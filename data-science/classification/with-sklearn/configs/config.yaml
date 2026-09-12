@@ -1,0 +1,10 @@
+seed: 42
+data:
+  path: data/raw/customers.csv
+  target: churned
+training:
+  test_size: 0.25
+  output_dir: data/artifacts
+model:
+  c: 1.0
+  max_iter: 300

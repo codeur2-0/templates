@@ -1,0 +1,4 @@
+data:
+  path: data/raw/sales.csv
+report:
+  output_path: data/processed/quality_report.json

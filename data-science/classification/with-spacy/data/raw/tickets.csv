@@ -1,0 +1,13 @@
+ticket_id,text,label
+S-001,I was charged twice for my subscription,billing
+S-002,My invoice has the wrong amount,billing
+S-003,Please update my payment card,billing
+S-004,The application returns a 500 error,technical
+S-005,The dashboard is not loading,technical
+S-006,The API request times out,technical
+S-007,I cannot reset my password,account
+S-008,Please change the email on my profile,account
+S-009,My account is locked after login,account
+S-010,Why was I charged twice,billing
+S-011,The mobile app crashes on launch,technical
+S-012,I need help changing my login email,account

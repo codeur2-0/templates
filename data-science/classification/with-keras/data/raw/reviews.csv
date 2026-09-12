@@ -1,0 +1,13 @@
+review_id,text,sentiment
+R-001,The product is easy to use and fast,positive
+R-002,Excellent support and a smooth experience,positive
+R-003,I love the new dashboard,positive
+R-004,The service works as expected,positive
+R-005,It is okay but nothing special,neutral
+R-006,The features are average for the price,neutral
+R-007,The response time is acceptable,neutral
+R-008,The application crashes every day,negative
+R-009,Very disappointing support experience,negative
+R-010,The update broke my workflow,negative
+R-011,I cannot use this product anymore,negative
+R-012,Fast delivery and friendly team,positive

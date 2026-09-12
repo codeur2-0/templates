@@ -1,0 +1,7 @@
+sale_id,sale_date,country,amount,status
+V-001,2026-01-02,FR,99.0,paid
+V-002,2026-01-02,BE,49.0,paid
+V-003,2026-01-03,FR,19.0,refunded
+V-004,2026-02-03,DE,150.0,paid
+V-005,2026-02-04,ES,79.0,paid
+V-006,2026-02-04,FR,38.0,paid

@@ -1,0 +1,1 @@
+"""Versioned model-serving template."""

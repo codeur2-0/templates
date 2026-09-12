@@ -1,0 +1,1 @@
+"""Idempotent order batch ETL."""

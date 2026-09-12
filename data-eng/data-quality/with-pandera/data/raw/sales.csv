@@ -1,0 +1,7 @@
+sale_id,sale_date,product_category,quantity,amount,country
+V-001,2026-01-02,software,1,99.0,FR
+V-002,2026-01-02,hardware,2,49.0,BE
+V-003,2026-01-03,subscription,1,19.0,FR
+V-004,2026-01-03,software,3,150.0,DE
+V-005,2026-01-04,hardware,1,79.0,ES
+V-006,2026-01-04,subscription,2,38.0,FR

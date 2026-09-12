@@ -1,0 +1,4 @@
+service:
+  model_name: churn-demo
+  model_version: 2026.01.0
+  threshold: 0.5

@@ -1,0 +1,10 @@
+order_id,order_date,customer_id,country,quantity,unit_price,status
+O-001,2026-01-02,C-001,FR,2,19.90,paid
+O-002,2026-01-02,C-002,BE,1,120.00,paid
+O-002,2026-01-02,C-002,BE,1,120.00,paid
+O-003,2026-01-03,C-003,FR,3,8.50,cancelled
+O-004,2026-01-03,C-004,DE,1,49.90,paid
+O-005,2026-01-04,C-005,FR,4,12.00,paid
+O-006,2026-01-04,C-006,ES,2,25.00,refunded
+O-007,2026-01-05,C-007,FR,1,79.00,paid
+O-008,2026-01-05,C-008,BE,2,15.50,paid

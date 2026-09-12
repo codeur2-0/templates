@@ -1,0 +1,12 @@
+seed: 42
+data:
+  path: data/raw/loans.csv
+  target: defaulted
+training:
+  test_size: 0.25
+  epochs: 12
+  batch_size: 4
+  output_dir: data/artifacts
+model:
+  hidden_units: 16
+  learning_rate: 0.001

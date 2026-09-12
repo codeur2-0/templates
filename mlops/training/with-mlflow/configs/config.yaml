@@ -1,0 +1,10 @@
+seed: 42
+experiment: churn-template
+tracking_uri: data/mlruns
+data:
+  path: data/raw/churn.csv
+  target: churned
+training:
+  test_size: 0.25
+  c: 1.0
+  output_dir: data/artifacts

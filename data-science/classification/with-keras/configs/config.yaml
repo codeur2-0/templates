@@ -1,0 +1,13 @@
+seed: 42
+data:
+  path: data/raw/reviews.csv
+  target: sentiment
+training:
+  test_size: 0.25
+  epochs: 10
+  batch_size: 4
+  output_dir: data/artifacts
+model:
+  vocabulary_size: 1000
+  sequence_length: 20
+  embedding_dim: 16

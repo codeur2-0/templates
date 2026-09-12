@@ -1,0 +1,4 @@
+data:
+  path: data/raw/sales.csv
+query:
+  output_path: data/processed/revenue_by_country.csv

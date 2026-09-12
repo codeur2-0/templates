@@ -1,0 +1,17 @@
+customer_id,age,monthly_spend,tenure_months,contract,support_tickets,churned
+C-001,25,29.9,2,monthly,5,1
+C-002,44,89.0,32,annual,0,0
+C-003,31,49.0,8,monthly,3,1
+C-004,56,109.0,48,annual,1,0
+C-005,22,19.0,1,monthly,4,1
+C-006,38,79.0,18,annual,1,0
+C-007,47,59.0,7,monthly,2,1
+C-008,29,39.0,14,annual,0,0
+C-009,63,99.0,36,annual,0,0
+C-010,35,29.0,4,monthly,3,1
+C-011,52,69.0,24,annual,1,0
+C-012,41,45.0,10,monthly,2,1
+C-013,27,35.0,6,monthly,1,1
+C-014,49,95.0,28,annual,0,0
+C-015,33,55.0,12,annual,1,0
+C-016,58,115.0,40,annual,0,0

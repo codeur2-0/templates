@@ -1,0 +1,7 @@
+data:
+  path: data/raw
+  persist_dir: data/artifacts/chroma
+  collection: product_docs
+retrieval:
+  top_k: 2
+query: "How long is the trial?"

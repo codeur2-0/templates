@@ -1,0 +1,4 @@
+data:
+  path: data/raw/orders.csv
+  output_path: data/processed/orders_clean.csv
+  target_currency: EUR

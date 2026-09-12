@@ -1,0 +1,7 @@
+seed: 42
+data:
+  path: data/raw/tickets.csv
+training:
+  epochs: 12
+  dropout: 0.2
+  output_dir: data/artifacts
