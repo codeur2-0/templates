@@ -145,6 +145,7 @@ class Trainer:
         callbacks: Sequence[BaseCallback] | None = None,
         min_primary_metric: float | None = None,
         primary_metric: str | None = None,
+        primary_direction: str = "maximize",
     ) -> None:
         """Inject the model and the training policy.
 
@@ -157,6 +158,8 @@ class Trainer:
             callbacks: Explicit callbacks; when ``None`` they are built from the config.
             min_primary_metric: Optional quality gate enforced during training.
             primary_metric: Metric watched by the quality gate.
+            primary_direction: ``maximize`` (AUC, R2) or ``minimize`` (RMSE, MAE) — fixe le sens
+                dans lequel le seuil de qualité est évalué.
         """
         self.model = model
         self.config: dict[str, Any] = _normalise_train_config(config)
@@ -165,6 +168,7 @@ class Trainer:
         self.metric_names = list(metric_names or [])
         self.min_primary_metric = min_primary_metric
         self.primary_metric = primary_metric
+        self.primary_direction = str(primary_direction)
         self.callbacks: list[BaseCallback] = (
             list(callbacks) if callbacks is not None else self.build_callbacks()
         )
@@ -195,11 +199,13 @@ class Trainer:
                 )
             )
         if self.min_primary_metric is not None and self.primary_metric:
+            # `mode` dépend du **sens** de la métrique : un RMSE doit rester sous le seuil
+            # (mode="min"), un ROC AUC doit le dépasser (mode="max").
             callbacks.append(
                 MetricThresholdCallback(
                     monitor=self.primary_metric,
                     threshold=float(self.min_primary_metric),
-                    mode="max",
+                    mode="max" if self.primary_direction == "maximize" else "min",
                 )
             )
         logger.debug("Callbacks enabled: {}", [callback.name for callback in callbacks])

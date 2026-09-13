@@ -1,0 +1,724 @@
+{#- Générateur synthétique du cas d'usage « estimation de prix immobilier » (famille regression). -#}
+"""Synthetic data generator — {{ spec.data.title }}.
+
+Business scenario
+    {{ wrap(business.context, 96, indent=4) }}
+
+How the data is built
+    The generator does **not** draw columns independently. It builds a latent property profile
+    first (district, era, size, energy performance), derives every observable column from it, and
+    finally computes the price through an explicit **multiplicative model in log-price**:
+
+    * each characteristic contributes a factor (district premium, concave surface effect, energy
+      penalty, floor x elevator interaction, transport accessibility, declared condition);
+    * a mild market drift and a spring seasonality make ``listing_date`` genuinely informative;
+    * the target is heteroscedastic by construction (absolute error grows with the price), which is
+      what makes MAPE / median error more honest than RMSE alone;
+    * irreducible log-normal noise keeps the achievable {{ spec.metrics.primary }} realistic;
+    * a few legitimate prestige outliers and deliberate missing values exercise the preprocessing.
+
+Determinism
+    ``generate()`` is a pure function of ``(n_samples, seed, options)``: two runs produce the
+    same bytes, which is what makes stack-to-stack comparisons meaningful.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, ClassVar, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+
+from src.data.schemas import RawDataSchema
+from src.utils.io import write_json, write_table_multiple
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+
+logger = get_logger(__name__)
+
+#: Default dataset name (overridable through the constructor / Hydra config).
+DEFAULT_DATASET_NAME = "{{ spec.data.dataset_name }}"
+
+#: Districts, their population share and their log-price premium.
+DISTRICTS: tuple[str, ...] = (
+    "centre_historique",
+    "bords_de_loire",
+    "quartier_universitaire",
+    "quartier_affaires",
+    "peripherie_nord",
+    "peripherie_sud",
+)
+DISTRICT_WEIGHTS: tuple[float, ...] = (0.14, 0.12, 0.18, 0.11, 0.23, 0.22)
+DISTRICT_PREMIUM: dict[str, float] = {
+    "centre_historique": 0.42,
+    "bords_de_loire": 0.27,
+    "quartier_affaires": 0.21,
+    "quartier_universitaire": 0.07,
+    "peripherie_sud": -0.18,
+    "peripherie_nord": -0.30,
+}
+
+#: Typical surface (m2) and walking time (min) to public transport, per district.
+DISTRICT_SURFACE: dict[str, float] = {
+    "centre_historique": 54.0,
+    "bords_de_loire": 68.0,
+    "quartier_universitaire": 48.0,
+    "quartier_affaires": 62.0,
+    "peripherie_nord": 82.0,
+    "peripherie_sud": 76.0,
+}
+DISTRICT_WALK: dict[str, float] = {
+    "centre_historique": 5.0,
+    "bords_de_loire": 9.0,
+    "quartier_universitaire": 12.0,
+    "quartier_affaires": 7.0,
+    "peripherie_nord": 26.0,
+    "peripherie_sud": 19.0,
+}
+
+#: Comparable sales per year within 1 km (market depth), per district.
+DISTRICT_MARKET_DEPTH: dict[str, float] = {
+    "centre_historique": 62.0,
+    "bords_de_loire": 41.0,
+    "quartier_universitaire": 33.0,
+    "quartier_affaires": 37.0,
+    "peripherie_nord": 9.0,
+    "peripherie_sud": 15.0,
+}
+
+#: Building eras: label, year range and log-price effect (U shaped on purpose).
+ERAS: tuple[tuple[str, int, int, float], ...] = (
+    ("haussmannien", 1850, 1914, 0.12),
+    ("entre_deux_guerres", 1915, 1948, 0.00),
+    ("trente_glorieuses", 1949, 1975, -0.09),
+    ("moderne", 1976, 2005, 0.03),
+    ("recent", 2006, 2025, 0.11),
+)
+
+#: Era mix per district (le centre est ancien, la périphérie est récente ou issue des Trente Glorieuses).
+ERA_WEIGHTS_BY_DISTRICT: dict[str, tuple[float, ...]] = {
+    "centre_historique": (0.62, 0.18, 0.10, 0.07, 0.03),
+    "bords_de_loire": (0.24, 0.20, 0.20, 0.22, 0.14),
+    "quartier_universitaire": (0.14, 0.18, 0.30, 0.26, 0.12),
+    "quartier_affaires": (0.10, 0.12, 0.22, 0.34, 0.22),
+    "peripherie_nord": (0.02, 0.06, 0.44, 0.34, 0.14),
+    "peripherie_sud": (0.04, 0.10, 0.36, 0.32, 0.18),
+}
+
+#: Energy ratings, their log-price effect and their frequency per era.
+ENERGY_RATINGS: tuple[str, ...] = ("A", "B", "C", "D", "E", "F", "G")
+ENERGY_EFFECT: dict[str, float] = {
+    "A": 0.10,
+    "B": 0.06,
+    "C": 0.02,
+    "D": 0.00,
+    "E": -0.04,
+    "F": -0.11,
+    "G": -0.18,
+}
+ENERGY_WEIGHTS_BY_ERA: dict[str, tuple[float, ...]] = {
+    "haussmannien": (0.00, 0.03, 0.14, 0.30, 0.30, 0.16, 0.07),
+    "entre_deux_guerres": (0.00, 0.04, 0.16, 0.32, 0.28, 0.14, 0.06),
+    "trente_glorieuses": (0.00, 0.02, 0.12, 0.28, 0.32, 0.17, 0.09),
+    "moderne": (0.02, 0.12, 0.28, 0.32, 0.17, 0.07, 0.02),
+    "recent": (0.14, 0.42, 0.28, 0.12, 0.03, 0.01, 0.00),
+}
+
+#: Coefficients of the log-price model (interpretable on purpose).
+PRICE_COEFFICIENTS: dict[str, float] = {
+    "surface_elasticity": 0.78,      # < 1 : le prix au m2 decroit avec la taille (effet concave)
+    "rooms_bonus": 0.035,            # a surface egale, des pieces mieux distribuees paient
+    "condition_slope": 0.085,        # par ecart-type d'etat declare
+    "outdoor_premium": 0.055,
+    "elevator_premium": 0.045,
+    "floor_premium_per_level": 0.014,   # avec ascenseur
+    "floor_penalty_per_level": -0.021,  # sans ascenseur
+    "walk_decay_close": -0.013,      # par minute jusqu'a 10 minutes
+    "walk_decay_far": -0.004,        # par minute au-dela de 25 minutes
+    "market_depth_bonus": 0.010,     # par tranche de 10 ventes comparables (signal de liquidite)
+    "fees_penalty": -0.00012,        # charges elevees = cout recurrent, penalise le prix
+}
+
+#: Effet en log-prix de chaque époque de construction (effet en U : ancien et récent primés).
+ERA_EFFECT: dict[str, float] = {label: effect for label, _, _, effect in ERAS}
+
+#: Colonnes portant des valeurs manquantes volontaires, avec leur taux de manque relatif.
+MISSING_POLICY: dict[str, float] = {"condition_score": 1.0, "condo_fees_eur": 0.7}
+
+
+class SyntheticDataGenerator:
+    """Deterministic generator of the {{ spec.data.dataset_name | replace("_", " ") }} dataset.
+
+    Example:
+        >>> generator = SyntheticDataGenerator(n_samples=200, seed=42)
+        >>> frame = generator.generate()
+        >>> frame.shape[0]
+        200
+        >>> sorted({"price_eur"} <= set(frame.columns))
+        [True]
+    """
+
+    #: Options accepted from ``conf/data/default.yaml`` (extra keys of the data node).
+    SUPPORTED_OPTIONS: ClassVar[tuple[str, ...]] = (
+        "target_median_price",
+        "price_dispersion",
+        "missing_rate",
+        "outlier_rate",
+        "market_drift_pct",
+    )
+
+    def __init__(
+        self,
+        *,
+        n_samples: int = {{ spec.data.n_samples }},
+        seed: int = {{ spec.data.seed }},
+        dataset_name: str | None = None,
+        output_dir: Path | str | None = None,
+        formats: Sequence[str] = ("parquet", "csv"),
+        target_median_price: float = 265000.0,
+        price_dispersion: float = 0.09,
+        missing_rate: float = 0.05,
+        outlier_rate: float = 0.01,
+        market_drift_pct: float = 1.8,
+    ) -> None:
+        """Store the generation parameters.
+
+        Args:
+            n_samples: Number of property rows to generate.
+            seed: Random seed (fully determines the output).
+            dataset_name: Base file name (defaults to :data:`DEFAULT_DATASET_NAME`).
+            output_dir: Directory receiving the files (defaults to ``data/raw``).
+            formats: Formats to write (``parquet`` and/or ``csv``).
+            target_median_price: Median price the population is calibrated on (EUR).
+            price_dispersion: Standard deviation of the irreducible log-normal noise. ``0.09``
+                means roughly 9 % of unexplainable price variation — a realistic ceiling.
+            missing_rate: Global scaling of the missing-value injection.
+            outlier_rate: Share of rows turned into legitimate prestige properties.
+            market_drift_pct: Annual market drift applied to the price (percent per year).
+
+        Raises:
+            ValueError: When a parameter is out of its valid range.
+        """
+        if n_samples < 50:
+            msg = f"n_samples must be >= 50 to keep the dataset meaningful, got {n_samples}"
+            raise ValueError(msg)
+        if target_median_price <= 0:
+            msg = f"target_median_price must be > 0, got {target_median_price}"
+            raise ValueError(msg)
+        if not 0.0 <= price_dispersion <= 0.5:
+            msg = f"price_dispersion must be in [0, 0.5], got {price_dispersion}"
+            raise ValueError(msg)
+        if not 0.0 <= missing_rate <= 0.5:
+            msg = f"missing_rate must be in [0, 0.5], got {missing_rate}"
+            raise ValueError(msg)
+        if not 0.0 <= outlier_rate <= 0.2:
+            msg = f"outlier_rate must be in [0, 0.2], got {outlier_rate}"
+            raise ValueError(msg)
+
+        self.n_samples = int(n_samples)
+        self.seed = int(seed)
+        self.dataset_name = dataset_name or DEFAULT_DATASET_NAME
+        self.output_dir = (
+            Path(output_dir) if output_dir is not None else ProjectPaths.from_root().raw_dir
+        )
+        self.formats = tuple(formats)
+        self.target_median_price = float(target_median_price)
+        self.price_dispersion = float(price_dispersion)
+        self.missing_rate = float(missing_rate)
+        self.outlier_rate = float(outlier_rate)
+        self.market_drift_pct = float(market_drift_pct)
+
+    # ------------------------------------------------------------------ generation ------
+    def generate(self) -> pd.DataFrame:
+        """Generate the dataset.
+
+        Returns:
+            A validated ``DataFrame`` with the columns declared in ``RawDataSchema``.
+        """
+        rng = np.random.default_rng(self.seed)
+        logger.info(
+            "Generating {} properties | seed={} median_target={:.0f} dispersion={}",
+            self.n_samples,
+            self.seed,
+            self.target_median_price,
+            self.price_dispersion,
+        )
+
+        profile = self._latent_profile(rng)
+        frame = pd.DataFrame(
+            {
+                "property_id": [f"PRP-{index:06d}" for index in range(1, self.n_samples + 1)],
+                "listing_date": profile["listing_date"],
+                "surface_m2": profile["surface_m2"],
+                "rooms": profile["rooms"],
+                "floor_level": profile["floor_level"],
+                "has_elevator": profile["has_elevator"],
+                "has_outdoor_space": profile["has_outdoor_space"],
+                "building_year": profile["building_year"],
+                "energy_rating": profile["energy_rating"],
+                "district": profile["district"],
+                "transport_walk_min": profile["transport_walk_min"],
+                "condo_fees_eur": profile["condo_fees_eur"],
+                "property_tax_eur": profile["property_tax_eur"],
+                "condition_score": profile["condition_score"],
+                "recent_sales_1km": profile["recent_sales_1km"],
+            }
+        )
+        frame = self._inject_outliers(frame, rng)
+        del profile  # les colonnes observables suffisent désormais
+        contributions = self._log_price_contributions(frame)
+        intercept = self._calibrate_intercept(contributions)
+        noise = rng.normal(0.0, self.price_dispersion, size=self.n_samples)
+        frame["price_eur"] = np.exp(intercept + contributions + noise)
+
+        frame = self._inject_missing(frame, rng)
+        frame = self._enforce_schema_bounds(frame)
+
+        validated = RawDataSchema.validate(frame)
+        logger.info(
+            "Dataset generated | rows={} cols={} median_price={:.0f} missing_cells={}",
+            len(validated),
+            validated.shape[1],
+            float(validated["price_eur"].median()),
+            int(validated.isna().to_numpy().sum()),
+        )
+        return validated
+
+    def _latent_profile(self, rng: np.random.Generator) -> dict[str, Any]:
+        """Draw the latent property profiles (district, era, size, energy, accessibility)."""
+        n = self.n_samples
+        district = rng.choice(DISTRICTS, size=n, p=_normalise(DISTRICT_WEIGHTS))
+        era_index = np.array(
+            [
+                rng.choice(len(ERAS), p=_normalise(ERA_WEIGHTS_BY_DISTRICT[name]))
+                for name in district
+            ]
+        )
+        era = np.array([ERAS[index][0] for index in era_index])
+        low = np.array([ERAS[index][1] for index in era_index])
+        high = np.array([ERAS[index][2] for index in era_index])
+        building_year = rng.integers(low, high + 1)
+
+        # Surface : log-normale centree sur la moyenne du quartier (le centre est plus petit).
+        typical = np.array([DISTRICT_SURFACE[name] for name in district])
+        surface = typical * np.exp(rng.normal(0.0, 0.36, size=n))
+
+        rooms = np.clip(np.round(surface / 22.0 + rng.normal(0.0, 0.7, size=n)), 1, 8)
+
+        # Etage : rez-de-chaussée fréquent, hauteur maximale dépendant de l'époque et du quartier.
+        max_floor = np.where(
+            era == "trente_glorieuses", 12, np.where(building_year >= 2000, 6, 5)
+        )
+        ground = rng.random(n) < 0.38
+        drawn_floor = np.ceil(rng.geometric(0.42, size=n) - 1)
+        floor_level = np.where(ground, rng.integers(0, 2, size=n), np.minimum(drawn_floor, max_floor))
+
+        # Ascenseur : quasi systématique au-delà du 4e étage, rare dans l'ancien bas.
+        elevator_probability = np.clip(
+            0.10 + 0.13 * floor_level + 0.35 * np.isin(era, ["moderne", "recent"]), 0.0, 0.995
+        )
+        has_elevator = rng.random(n) < elevator_probability
+        has_elevator = np.where(floor_level >= 4, rng.random(n) < 0.93, has_elevator)
+
+        outdoor_probability = np.clip(
+            0.18 + 0.28 * np.isin(era, ["moderne", "recent"]) + 0.10 * (surface > 80), 0.0, 0.95
+        )
+        has_outdoor_space = rng.random(n) < outdoor_probability
+
+        energy_rating = np.array(
+            [
+                str(rng.choice(ENERGY_RATINGS, p=_normalise(ENERGY_WEIGHTS_BY_ERA[name])))
+                for name in era
+            ]
+        )
+
+        walk_scale = np.array([DISTRICT_WALK[name] for name in district])
+        transport_walk_min = rng.gamma(shape=2.6, scale=walk_scale / 2.6)
+
+        # Charges : proportionnelles à la surface, majorées par les services (ascenseur, récent).
+        fees_per_m2 = 1.05 + 0.55 * has_elevator + 0.30 * np.isin(era, ["moderne", "recent"])
+        condo_fees_eur = surface * fees_per_m2 * np.exp(rng.normal(0.0, 0.22, size=n))
+
+        # Taxe foncière : fonction de la surface et du taux communal (le centre taxe davantage).
+        tax_rate = np.array([14.5 + 6.0 * DISTRICT_PREMIUM[name] for name in district])
+        property_tax_eur = surface * tax_rate * np.exp(rng.normal(0.0, 0.14, size=n))
+
+        condition_mean = np.where(
+            np.isin(era, ["recent", "moderne"]),
+            7.0,
+            np.where(era == "trente_glorieuses", 5.4, 6.2),
+        )
+        condition_score = condition_mean + rng.normal(0.0, 1.5, size=n)
+
+        depth = np.array([DISTRICT_MARKET_DEPTH[name] for name in district])
+        recent_sales_1km = rng.poisson(np.maximum(depth, 0.5))
+
+        # Date de mise en annonce : 3 ans d'historique, avec sur-représentation du printemps
+        # (les vendeurs attendent la belle saison) — la date devient donc réellement informative.
+        reference = pd.Timestamp("{{ extras.get('reference_date', '2026-01-31') }}")
+        all_days = pd.date_range(reference - pd.Timedelta(days=3 * 365), reference, freq="D")
+        day_weights = np.where(np.isin(all_days.month.to_numpy(), (4, 5, 6)), 1.18, 1.0)
+        picked = rng.choice(len(all_days), size=n, p=day_weights / day_weights.sum())
+        listing_date = all_days[picked]
+
+        return {
+            "district": district.astype(str),
+            "building_year": building_year.astype("int64"),
+            "surface_m2": surface.astype("float64"),
+            "rooms": rooms.astype("int64"),
+            "floor_level": floor_level.astype("int64"),
+            "has_elevator": has_elevator.astype("int64"),
+            "has_outdoor_space": has_outdoor_space.astype("int64"),
+            "energy_rating": energy_rating.astype(str),
+            "transport_walk_min": transport_walk_min.astype("float64"),
+            "condo_fees_eur": condo_fees_eur.astype("float64"),
+            "property_tax_eur": property_tax_eur.astype("float64"),
+            "condition_score": condition_score.astype("float64"),
+            "recent_sales_1km": recent_sales_1km.astype("int64"),
+            "listing_date": listing_date,
+        }
+
+    def _log_price_contributions(self, frame: pd.DataFrame) -> np.ndarray:
+        """Sum every log-price contribution **except** the intercept and the noise.
+
+        Args:
+            frame: Property features.
+
+        Returns:
+            The per-row log-price contribution.
+        """
+        coefficients = PRICE_COEFFICIENTS
+        district = frame["district"].to_numpy()
+        surface = frame["surface_m2"].to_numpy(dtype="float64")
+        rooms = frame["rooms"].to_numpy(dtype="float64")
+        floor_level = frame["floor_level"].to_numpy(dtype="float64")
+        elevator = frame["has_elevator"].to_numpy(dtype="float64")
+        outdoor = frame["has_outdoor_space"].to_numpy(dtype="float64")
+        walk = frame["transport_walk_min"].to_numpy(dtype="float64")
+        fees = frame["condo_fees_eur"].to_numpy(dtype="float64")
+        condition = frame["condition_score"].to_numpy(dtype="float64")
+        depth = frame["recent_sales_1km"].to_numpy(dtype="float64")
+
+        contributions = np.array([DISTRICT_PREMIUM[name] for name in district])
+        contributions += coefficients["surface_elasticity"] * np.log(surface / 63.0)
+        contributions += coefficients["rooms_bonus"] * np.clip(rooms - surface / 22.0, -2.0, 2.0)
+        contributions += np.array([ENERGY_EFFECT[name] for name in frame["energy_rating"]])
+        contributions += np.array([ERA_EFFECT[str(era)] for era in self._era_of(frame)])
+
+        # Effet d'étage en interaction avec l'ascenseur : le signe change selon l'équipement.
+        floor_effect = np.where(
+            elevator > 0.5,
+            coefficients["floor_premium_per_level"] * floor_level,
+            coefficients["floor_penalty_per_level"] * floor_level,
+        )
+        contributions += floor_effect
+        contributions += coefficients["elevator_premium"] * elevator
+        contributions += coefficients["outdoor_premium"] * outdoor
+
+        # Accessibilité : chaque minute compte beaucoup jusqu'à 10, presque plus au-delà de 25.
+        walk_effect = np.where(
+            walk <= 10.0,
+            coefficients["walk_decay_close"] * walk,
+            coefficients["walk_decay_close"] * 10.0
+            + coefficients["walk_decay_far"] * np.maximum(walk - 10.0, 0.0),
+        )
+        contributions += walk_effect
+
+        contributions += coefficients["condition_slope"] * (condition - 6.2) / 1.5
+        contributions += coefficients["market_depth_bonus"] * np.minimum(depth, 80.0) / 10.0
+        contributions += coefficients["fees_penalty"] * fees
+
+        # Dérive de marché et saisonnalité : la date d'annonce devient réellement informative.
+        reference = pd.Timestamp("{{ extras.get('reference_date', '2026-01-31') }}")
+        listing = pd.to_datetime(frame["listing_date"])
+        years_before = (reference - listing).dt.days.to_numpy() / 365.25
+        drift = np.log1p(self.market_drift_pct / 100.0)
+        contributions += drift * (3.0 - years_before)
+        contributions += 0.012 * listing.dt.month.isin([4, 5, 6]).to_numpy()
+        return contributions
+
+    def _era_of(self, frame: pd.DataFrame) -> np.ndarray:
+        """Map the building year back to its era label (cohérence année / effet de prix).
+
+        Args:
+            frame: Property features.
+
+        Returns:
+            The era label per row.
+        """
+        year = frame["building_year"].to_numpy()
+        era = np.full(len(frame), ERAS[0][0], dtype=object)
+        for label, low, high, _ in ERAS:
+            era[(year >= low) & (year <= high)] = label
+        return era
+
+    def _calibrate_intercept(self, contributions: np.ndarray) -> float:
+        """Return the intercept making the population median hit the target price.
+
+        Args:
+            contributions: Per-row log-price contributions (without intercept).
+
+        Returns:
+            The intercept, in log-price space.
+        """
+        return float(np.log(self.target_median_price) - np.median(contributions))
+
+    def _inject_outliers(self, frame: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+        """Turn a small share of rows into legitimate prestige properties.
+
+        Un outlier **cohérent** (grande surface, centre historique, état haut de gamme) est bien
+        plus formateur qu'un prix aberrant tiré au hasard : le modèle doit apprendre la queue de
+        distribution, pas du bruit d'étiquette.
+
+        Args:
+            frame: Property features.
+            rng: Seeded random generator.
+
+        Returns:
+            The frame with prestige rows amplified.
+        """
+        output = frame.copy()
+        n_samples = int(len(output))
+        n_outliers = int(round(n_samples * self.outlier_rate))
+        if n_outliers <= 0:
+            return output
+        mask = rng.choice(n_samples, size=n_outliers, replace=False)
+        output.loc[mask, "district"] = "centre_historique"
+        output.loc[mask, "surface_m2"] = output.loc[mask, "surface_m2"] * rng.uniform(1.7, 2.6, n_outliers)
+        output.loc[mask, "condition_score"] = rng.uniform(9.0, 10.0, n_outliers)
+        output.loc[mask, "energy_rating"] = rng.choice(["A", "B"], size=n_outliers)
+        output.loc[mask, "has_outdoor_space"] = 1
+        output.loc[mask, "has_elevator"] = 1
+        output.loc[mask, "rooms"] = np.clip(
+            np.round(output.loc[mask, "surface_m2"] / 24.0), 1, 8
+        ).astype("int64")
+        logger.debug("{} biens d'exception injectés ({:.2%})", n_outliers, self.outlier_rate)
+        return output
+
+    def _inject_missing(self, frame: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+        """Inject missing values on the columns declared nullable.
+
+        Args:
+            frame: Complete frame.
+            rng: Seeded random generator.
+
+        Returns:
+            The frame with missing values.
+        """
+        output = frame.copy()
+        for column, weight in MISSING_POLICY.items():
+            if column not in output.columns:
+                continue
+            rate = min(self.missing_rate * float(weight), 0.35)
+            if rate <= 0:
+                continue
+            mask = rng.random(len(output)) < rate
+            output.loc[mask, column] = np.nan
+            logger.debug("Column '{}' | {:.2%} missing values", column, float(mask.mean()))
+        return output
+
+    def _enforce_schema_bounds(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Clip every column inside the bounds declared by ``RawDataSchema``.
+
+        Les bornes sont celles du contrat Pandera : un générateur qui produit des valeurs hors
+        contrat ferait échouer le pipeline, ce qui est exactement le comportement attendu.
+
+        Args:
+            frame: Raw frame.
+
+        Returns:
+            The bounded frame (NaN preserved on nullable columns).
+        """
+        output = frame.copy()
+        output["surface_m2"] = np.clip(
+            output["surface_m2"].astype("float64"), 12.0, 320.0
+        ).round(1)
+        output["rooms"] = np.clip(output["rooms"].astype("int64"), 1, 8)
+        output["floor_level"] = np.clip(output["floor_level"].astype("int64"), 0, 12)
+        output["has_elevator"] = output["has_elevator"].astype("int64").clip(0, 1)
+        output["has_outdoor_space"] = output["has_outdoor_space"].astype("int64").clip(0, 1)
+        output["building_year"] = np.clip(output["building_year"].astype("int64"), 1850, 2025)
+        output["transport_walk_min"] = np.clip(
+            output["transport_walk_min"].astype("float64"), 1.0, 45.0
+        ).round(0).astype("int64")
+
+        fees = output["condo_fees_eur"].astype("float64")
+        fees_median = float(fees.median())
+        output["condo_fees_eur"] = np.clip(fees.fillna(fees_median), 0.0, 900.0).round(2)
+        output["condo_fees_eur"] = output["condo_fees_eur"].where(fees.notna(), other=np.nan)
+
+        output["property_tax_eur"] = np.clip(
+            output["property_tax_eur"].astype("float64"), 120.0, 6500.0
+        ).round(2)
+
+        condition = output["condition_score"].astype("float64")
+        output["condition_score"] = np.clip(condition, 1.0, 10.0).round(2)
+        output["condition_score"] = output["condition_score"].where(condition.notna(), other=np.nan)
+
+        output["recent_sales_1km"] = np.clip(output["recent_sales_1km"].astype("int64"), 0, 140)
+        output["price_eur"] = (
+            np.clip(output["price_eur"].astype("float64"), 35000.0, 2500000.0) / 500.0
+        ).round() * 500.0
+        output["district"] = output["district"].astype(str)
+        output["energy_rating"] = output["energy_rating"].astype(str)
+        return output
+
+    # ------------------------------------------------------------------ export ----------
+    def export(self, frame: pd.DataFrame | None = None) -> dict[str, Path]:
+        """Write the dataset in every configured format.
+
+        Args:
+            frame: Data to write; generated when ``None``.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        data = frame if frame is not None else self.generate()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        base = self.output_dir / self.dataset_name
+        written = write_table_multiple(data, base, formats=self.formats)
+        logger.info("Dataset exported: {}", {fmt: str(path) for fmt, path in written.items()})
+        return written
+
+    def run(self) -> dict[str, Path]:
+        """Generate, export and persist the generation metadata.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        frame = self.generate()
+        written = self.export(frame)
+        payload = self.metadata(frame)
+        payload["files"] = {fmt: str(path) for fmt, path in written.items()}
+        write_json(self.output_dir / "generation_metadata.json", payload)
+        return written
+
+    def sample(self, n_samples: int, *, with_target: bool = False) -> pd.DataFrame:
+        """Draw a small sample, typically used to demo inference.
+
+        Args:
+            n_samples: Number of rows.
+            with_target: Keep the target column (evaluation) or drop it (real inference).
+
+        Returns:
+            The sampled frame.
+        """
+        frame = self.generate()
+        sample_frame = frame.head(max(int(n_samples), 1)).copy()
+        if not with_target and "{{ spec.data.target }}" in sample_frame.columns:
+            sample_frame = sample_frame.drop(columns=["{{ spec.data.target }}"])
+        return sample_frame
+
+    # ------------------------------------------------------------------ metadata --------
+    def metadata(self, frame: pd.DataFrame) -> dict[str, Any]:
+        """Build the traceability payload of a generation run.
+
+        Args:
+            frame: Generated data.
+
+        Returns:
+            JSON-serialisable metadata (seed, shape, dtypes, target statistics, missing rate).
+        """
+        missing = frame.isna().sum()
+        price = frame["{{ spec.data.target }}"] if "{{ spec.data.target }}" in frame.columns else None
+        surface = frame["surface_m2"] if "surface_m2" in frame.columns else None
+        payload: dict[str, Any] = {
+            "dataset_name": self.dataset_name,
+            "generator": type(self).__name__,
+            "seed": self.seed,
+            "n_samples": int(len(frame)),
+            "n_columns": int(frame.shape[1]),
+            "dtypes": {str(column): str(dtype) for column, dtype in frame.dtypes.items()},
+            "missing_cells": int(missing.sum()),
+            "missing_rate": float(missing.sum()) / float(max(frame.size, 1)),
+            "missing_by_column": {
+                str(column): int(value) for column, value in missing.items() if value > 0
+            },
+            "options": {
+                "target_median_price": self.target_median_price,
+                "price_dispersion": self.price_dispersion,
+                "missing_rate": self.missing_rate,
+                "outlier_rate": self.outlier_rate,
+                "market_drift_pct": self.market_drift_pct,
+            },
+        }
+        if price is not None:
+            payload["target"] = {
+                "name": "{{ spec.data.target }}",
+                "median": float(price.median()),
+                "mean": float(price.mean()),
+                "std": float(price.std()),
+                "min": float(price.min()),
+                "max": float(price.max()),
+                "skew": float(price.skew()),
+                "p05": float(price.quantile(0.05)),
+                "p95": float(price.quantile(0.95)),
+            }
+        if surface is not None and price is not None:
+            per_m2 = price / surface.replace(0.0, np.nan)
+            payload["price_per_m2"] = {
+                "median": float(per_m2.median()),
+                "p10": float(per_m2.quantile(0.10)),
+                "p90": float(per_m2.quantile(0.90)),
+            }
+        if "district" in frame.columns and price is not None:
+            payload["median_price_by_district"] = {
+                str(key): float(value)
+                for key, value in price.groupby(frame["district"]).median().items()
+            }
+        return payload
+
+    @classmethod
+    def from_config(
+        cls, config: Mapping[str, Any], paths: ProjectPaths | None = None
+    ) -> SyntheticDataGenerator:
+        """Build a generator from the ``data`` configuration node.
+
+        Args:
+            config: Root configuration mapping (or the ``data`` node alone).
+            paths: Project layout (defaults to :meth:`ProjectPaths.from_root`).
+
+        Returns:
+            The configured generator.
+        """
+        payload = dict(config)
+        node = dict(payload.get("data") or payload)
+        layout = paths or ProjectPaths.from_root()
+        options = {
+            key: node[key] for key in cls.SUPPORTED_OPTIONS if key in node and node[key] is not None
+        }
+        return cls(
+            n_samples=int(node.get("n_samples", {{ spec.data.n_samples }})),
+            seed=int(payload.get("seed", node.get("seed", {{ spec.data.seed }}))),
+            dataset_name=str(node.get("dataset_name", DEFAULT_DATASET_NAME)),
+            output_dir=layout.raw_dir,
+            formats=tuple(node.get("formats", ("parquet", "csv"))),
+            **options,
+        )
+
+
+def _normalise(weights: Sequence[float]) -> np.ndarray:
+    """Return a probability vector summing to one.
+
+    Args:
+        weights: Non-negative weights.
+
+    Returns:
+        The normalised weights.
+    """
+    values = np.asarray(weights, dtype="float64")
+    total = float(values.sum())
+    if total <= 0:
+        return np.full(len(values), 1.0 / max(len(values), 1))
+    return values / total
+
+
+__all__ = [
+    "DEFAULT_DATASET_NAME",
+    "DISTRICTS",
+    "ENERGY_RATINGS",
+    "ERAS",
+    "PRICE_COEFFICIENTS",
+    "SyntheticDataGenerator",
+]

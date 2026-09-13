@@ -1,0 +1,290 @@
+# ==============================================================================================
+# Famille « régression » — cas d'usage : estimation automatisée du prix de vente d'un bien
+# immobilier résidentiel (Automated Valuation Model) pour une plateforme immobilière en ligne.
+# Toutes les stacks de cette famille (sklearn, xgboost, lightgbm, pytorch, keras, tensorflow)
+# partagent EXACTEMENT ce cas d'usage, ces données et ces métriques : seule l'implémentation du
+# modèle change. C'est ce qui rend la comparaison pédagogique et honnête.
+# ==============================================================================================
+
+domain: data-science
+problem: regression
+modality: tabular
+family: regression
+
+business:
+  persona: >-
+    Équipe Data d'une plateforme immobilière en ligne (estimation grand public + réseau d'agences
+    partenaires), avec un data scientist qui industrialise le modèle, un produit web qui consomme
+    l'estimation en temps réel et des négociateurs qui l'utilisent en rendez-vous de rentrée de
+    mandat.
+  context: >-
+    La plateforme promet une estimation de prix en moins de trente secondes. Aujourd'hui, cette
+    estimation repose sur un prix au m² communal publié par trimestre et sur le regard d'un
+    négociateur : le résultat est lent à rafraîchir, hétérogène d'une agence à l'autre, et
+    systématiquement aveugle à l'état du bien, à son étage ou à sa performance énergétique. Les
+    biens sur-évalués stagnent en portefeuille (quatre-vingt-dix jours en moyenne), les biens
+    sous-évalués partent en quelques jours et laissent de la valeur sur la table.
+  problem: >-
+    Prédire le prix de vente net vendeur d'un bien résidentiel à partir de sa fiche descriptive,
+    et publier une **fourchette** assortie d'un niveau de confiance, plutôt qu'un prix unique
+    présenté comme exact.
+  inputs: >-
+    Fiche bien : surface habitable, nombre de pièces, étage et présence d'ascenseur, balcon ou
+    terrasse, année de construction, classe énergétique (DPE), quartier, temps d'accès piéton au
+    transport structurant, charges de copropriété, taxe foncière, état déclaré par le vendeur,
+    profondeur du marché local (ventes récentes à moins d'un kilomètre), date de mise en annonce.
+  outputs: >-
+    Prix estimé en euros, fourchette basse et haute (± pourcentage piloté par le métier), prix au
+    m² estimé, niveau de confiance (marché profond / marché fin) et principaux facteurs
+    explicatifs de l'estimation (surface, quartier, état, DPE, étage).
+  value: >-
+    Rentrée de mandat plus rapide et mieux argumentée, réduction du délai de vente des biens
+    correctement pricing, homogénéité des estimations entre agences, détection automatique des
+    biens dont la fourchette est trop large (à revoir par un humain).
+  success_criteria:
+    - "MAPE ≤ 12 % sur le split de test hors échantillon (le générateur injecte un bruit irréductible d'environ 9 %)."
+    - "R² ≥ 0.80 : la majeure partie de la variance des prix doit être expliquée par la fiche bien."
+    - "RMSE ≤ 90 000 EUR, et erreur médiane ≤ 25 000 EUR : la RMSE seule masque les biens d'exception."
+    - "Couverture de la fourchette ±10 % ≥ 75 % des biens : une fourchette qui ne couvre pas est inutile."
+    - "Biais moyen (sous-estimation systématique) < 2 % du prix : un biais directionnel coûte cher en négociation."
+    - "Reproductibilité : deux exécutions avec la même seed produisent exactement les mêmes métriques."
+  cadence: "Estimation à la demande (API synchrone) et ré-entraînement hebdomadaire sur les annonces récentes."
+  constraints:
+    - "Aucune donnée réelle de transaction : le dataset de ce dépôt est synthétique et hors ligne."
+    - "Le modèle doit tourner sur CPU, en moins de 50 ms pour un lot de 100 biens (contrainte produit)."
+    - "Chaque estimation doit être explicable : les facteurs clés sont affichés à l'utilisateur final."
+    - "Vigilance équité : le quartier est un prédicteur puissant mais aussi un proxy socio-économique ; son usage doit être documenté et surveillé."
+
+data:
+  dataset_name: real_estate_prices
+  title: "Biens immobiliers résidentiels et prix de vente"
+  description: >-
+    Population de biens résidentiels mis en annonce sur une métropole française, avec leurs
+    caractéristiques physiques, énergétiques, géographiques et administratives, et le prix de vente
+    net vendeur observé. Les données sont générées par un modèle multiplicatif en log-prix :
+    chaque caractéristique contribue par un facteur explicite (prime de quartier, effet surface en
+    log, malus énergétique, effet étage), puis un bruit log-normal irréductible est ajouté. Le
+    signal est réaliste — hétéroscédastique, non linéaire, avec colinéarités — et plafonne la
+    performance atteignable.
+  n_samples: 5000
+  seed: 42
+  formats: [parquet, csv]
+  target: price_eur
+  id_column: property_id
+  time_column: null
+  group_column: district
+  columns:
+    - name: property_id
+      dtype: str
+      role: identifier
+      description: "Identifiant unique du bien"
+      unique: true
+      checks: { regex: "^PRP-[0-9]{6}$" }
+      distribution: "identifiants séquentiels uniques"
+    - name: listing_date
+      dtype: datetime
+      role: timestamp
+      description: "Date de mise en annonce du bien"
+      distribution: "étalement sur ~3 ans, avec une saisonnalité printanière"
+    - name: surface_m2
+      dtype: float
+      role: feature
+      description: "Surface habitable"
+      unit: "m²"
+      checks: { ge: 12.0, le: 320.0 }
+      distribution: "log-normale centrée ~63 m², queue droite étirée (grandes maisons)"
+    - name: rooms
+      dtype: int
+      role: feature
+      description: "Nombre de pièces principales"
+      unit: "pièces"
+      checks: { ge: 1, le: 8 }
+      distribution: "≈ surface / 22 + bruit (fortement corrélée à la surface, colinéarité volontaire)"
+    - name: floor_level
+      dtype: int
+      role: feature
+      description: "Étage du bien (0 = rez-de-chaussée)"
+      unit: "étage"
+      checks: { ge: 0, le: 12 }
+      distribution: "~38 % au niveau 0-1, décroissance jusqu'au 12e"
+    - name: has_elevator
+      dtype: bool
+      role: feature
+      description: "Présence d'un ascenseur dans l'immeuble (1 = oui)"
+      checks: { isin: [0, 1] }
+      distribution: "~52 % avec ascenseur, quasi systématique au-delà du 4e étage"
+    - name: has_outdoor_space
+      dtype: bool
+      role: feature
+      description: "Balcon, terrasse ou jardin (1 = oui)"
+      checks: { isin: [0, 1] }
+      distribution: "~34 % des biens"
+    - name: building_year
+      dtype: int
+      role: feature
+      description: "Année de construction de l'immeuble"
+      unit: "année"
+      checks: { ge: 1850, le: 2025 }
+      distribution: "mélange d'époques : haussmannien (1850-1914), entre-deux-guerres, Trente Glorieuses, récent"
+    - name: energy_rating
+      dtype: category
+      role: feature
+      description: "Classe énergétique du diagnostic de performance énergétique (DPE)"
+      checks: { isin: [A, B, C, D, E, F, G] }
+      distribution: "~2 % A, ~12 % B, ~24 % C, ~32 % D, ~18 % E, ~9 % F, ~3 % G"
+    - name: district
+      dtype: category
+      role: feature
+      description: "Quartier (segment géographique) de rattachement du bien"
+      checks: { isin: [centre_historique, bords_de_loire, quartier_universitaire, quartier_affaires, peripherie_nord, peripherie_sud] }
+      distribution: "parts inégales : 14 % centre, 12 % bords, 18 % université, 11 % affaires, 23 % nord, 22 % sud"
+    - name: transport_walk_min
+      dtype: int
+      role: feature
+      description: "Temps d'accès piéton au transport structurant le plus proche"
+      unit: "minutes"
+      checks: { ge: 1, le: 45 }
+      distribution: "gamma centrée ~9 min en centre, ~24 min en périphérie"
+    - name: condo_fees_eur
+      dtype: float
+      role: feature
+      description: "Charges de copropriété mensuelles"
+      unit: "EUR/mois"
+      nullable: true
+      checks: { ge: 0.0, le: 900.0 }
+      distribution: "proportionnelle à la surface et aux services ; ~4 % de manquants (bien non renseigné)"
+    - name: property_tax_eur
+      dtype: float
+      role: feature
+      description: "Taxe foncière annuelle"
+      unit: "EUR/an"
+      checks: { ge: 120.0, le: 6500.0 }
+      distribution: "≈ fonction de la surface et du quartier (colinéarité volontaire avec surface_m2)"
+    - name: condition_score
+      dtype: float
+      role: feature
+      description: "État déclaré par le vendeur (1 = à rénover entièrement, 10 = haut de gamme rénové)"
+      unit: "/10"
+      nullable: true
+      checks: { ge: 1.0, le: 10.0 }
+      distribution: "normale tronquée ~6.2 ; ~6 % de manquants (diagnostic non rempli)"
+    - name: recent_sales_1km
+      dtype: int
+      role: feature
+      description: "Nombre de ventes comparables enregistrées à moins d'un kilomètre sur 12 mois"
+      unit: "ventes"
+      checks: { ge: 0, le: 140 }
+      distribution: "Poisson selon le quartier : marché dense en centre, marché fin en périphérie"
+    - name: price_eur
+      dtype: float
+      role: target
+      description: "Prix de vente net vendeur observé"
+      unit: "EUR"
+      checks: { ge: 35000.0, le: 2500000.0 }
+      distribution: "log-normale : médiane ~265 000 EUR, moyenne ~330 000 EUR, queue au-delà de 1 M EUR"
+  insights:
+    - "La cible est **log-normale** : travailler en log-prix (ou transformer la cible) stabilise la variance et rend les erreurs comparables entre un studio et une grande maison."
+    - "Le quartier est le premier facteur de prix (écart d'un facteur ~2 entre centre historique et périphérie nord) : c'est aussi un proxy socio-économique, à documenter sous l'angle équité."
+    - "L'effet de la surface est **concave** : le prix au m² décroît avec la taille. Un modèle linéaire en surface sur-évalue systématiquement les grands biens et sous-évalue les studios."
+    - "`rooms` et `property_tax_eur` sont quasi redondants avec `surface_m2` : colinéarité attendue, pénalisante pour un modèle linéaire régularisé, neutre pour les arbres."
+    - "Le DPE pèse de plus en plus : une classe F ou G entraîne une décote explicite (interdiction progressive de location des passoires thermiques), non linéaire entre E et G."
+    - "L'étage ne vaut que **si** l'immeuble dispose d'un ascenseur : l'interaction étage × ascenseur change le signe de l'effet (un 6e sans ascenseur est décoté, un 6e avec ascenseur est primé)."
+    - "L'année de construction a un effet en U : l'haussmannien et le très récent sont primés, les constructions des années 1960-1975 sont décotées."
+    - "`transport_walk_min` a un effet décroissant : chaque minute compte beaucoup jusqu'à 10 minutes, presque plus au-delà de 25."
+    - "Les erreurs sont **hétéroscédastiques** : l'erreur absolue croît avec le prix. Piloter uniquement la RMSE conduit à sacrifier les petits biens ; le MAPE et l'erreur médiane sont plus justes."
+    - "`recent_sales_1km` n'explique pas le prix mais la **fiabilité** de l'estimation : un marché fin (< 10 ventes) doit produire une fourchette plus large, pas un prix plus précis."
+    - "Quelques biens d'exception existent légitimement (> 1,2 M EUR) : les supprimer appauvrirait le modèle, le winsorising (0,5-99,5 %) et une analyse d'erreur dédiée sont préférables."
+    - "`condition_score` et `condo_fees_eur` comportent des manquants volontaires (6 % et 4 %) : l'imputation doit être explicite, et un indicateur de manquant est souvent rentable."
+    - "Le bruit injecté (multiplicateur log-normal d'environ 9 %) fixe un plafond : un MAPE proche de 0 signerait une fuite de données, pas un bon modèle."
+  recommendations:
+    - "Publier une **fourchette** et un niveau de confiance, jamais un prix unique : c'est ce que le métier sait exploiter."
+    - "Piloter le modèle sur le MAPE, l'erreur médiane et la couverture de fourchette ; garder la RMSE comme indicateur de risque sur les biens chers."
+    - "Travailler en log-prix (transformer la cible) puis revenir en euros à l'inférence, avec correction de biais de retransformation."
+    - "Recalibrer par segment (quartier × tranche de surface) : un biais de +4 % en périphérie nord coûte plus qu'un biais moyen nul."
+    - "Surveiller la dérive du marché (taux d'intérêt, saisonnalité) : un modèle de prix immobilier se décale en quelques mois, d'où le ré-entraînement hebdomadaire."
+    - "Documenter et tester l'usage des proxies géographiques : mesurer l'écart d'estimation à caractéristiques égales entre quartiers est un garde-fou d'équité."
+    - "Ajouter des features exogènes en production (transactions voisines, taux de crédit, tension locative) : c'est le levier de performance principal au-delà de la fiche bien."
+  notes:
+    - "Valeurs manquantes volontaires sur `condition_score` (~6 %) et `condo_fees_eur` (~4 %) pour exercer l'imputation."
+    - "Outliers légitimes (~1 %) : biens d'exception (grande surface, centre historique, état haut de gamme)."
+    - "Colinéarité volontaire entre `surface_m2`, `rooms` et `property_tax_eur`."
+    - "Cible générée par un modèle multiplicatif en log-prix avec interactions (étage × ascenseur, surface concave, malus DPE non linéaire)."
+    - "Bruit irréductible log-normal (σ ≈ 0.09) : un prix parfait indiquerait une fuite de données."
+
+metrics:
+  task: regression
+  primary: rmse
+  secondary: [mae, r2, mape, smape, max_error]
+  baseline: dummy
+  direction: minimize
+  # Seuil de qualité : la RMSE de validation doit rester **sous** cette valeur (direction=minimize).
+  min_primary: 90000.0
+
+preprocessing:
+  numeric:
+    imputer: median
+    clip_outliers: true
+    clip_quantiles: [0.005, 0.995]
+    scaler: standard
+    log1p_columns: [property_tax_eur, condo_fees_eur]
+  categorical:
+    imputer: most_frequent
+    encoder: onehot
+    handle_unknown: ignore
+    min_frequency: 0.02
+    max_categories: 10
+  features:
+    - type: ratio
+      name: surface_per_room
+      numerator: surface_m2
+      denominator: rooms
+      epsilon: 1.0
+    - type: ratio
+      name: tax_per_surface
+      numerator: property_tax_eur
+      denominator: surface_m2
+      epsilon: 1.0
+    - type: bin
+      name: surface_bucket
+      column: surface_m2
+      method: quantile
+      bins: 4
+    - type: boolean_flag
+      name: thin_market
+      column: recent_sales_1km
+      operator: lt
+      value: 10.0
+    - type: boolean_flag
+      name: top_floor
+      column: floor_level
+      operator: gt
+      value: 5.0
+    - type: group_stat
+      name: median_surface_by_district
+      group_by: district
+      value_column: surface_m2
+      agg: median
+    - type: datetime_parts
+      name: listing_period
+      column: listing_date
+      prefix: listing
+      parts: [year, month, quarter]
+
+train:
+  split:
+    test_size: 0.2
+    val_size: 0.15
+    # Une cible continue ne se stratifie pas : le split est aléatoire, non stratifié.
+    stratify: false
+    shuffle: true
+    time_based: false
+
+learning_objectives:
+  - "Construire un pipeline de régression sans fuite : split d'abord, apprentissage du pré-traitement ensuite."
+  - "Choisir des métriques adaptées à une cible hétéroscédastique : RMSE, MAE, MAPE, sMAPE, R², erreur maximale."
+  - "Lire des résidus : biais, hétéroscédasticité, sous/sur-estimation par segment, valeurs extrêmes."
+  - "Passer d'une prédiction ponctuelle à une **fourchette** exploitable par le métier, et mesurer sa couverture."
+  - "Comparer une baseline triviale (médiane) à un modèle appris pour prouver la valeur ajoutée."
+  - "Formaliser un contrat de données avec Pandera et le faire respecter à l'entrée, en sortie de pré-traitement et en inférence."
+  - "Réaliser une analyse d'erreurs exploitable : quels biens se trompent, pourquoi, et que faire ensuite."
+  - "Industrialiser l'ensemble : configuration Hydra, artefacts traçables, tests pytest, rapports générés."

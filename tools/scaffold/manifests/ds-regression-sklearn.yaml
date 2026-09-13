@@ -1,0 +1,73 @@
+# ==============================================================================================
+# data-science / regression / with-sklearn
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/regression.yaml` (estimation de prix immobilier, AVM).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet et modèle.
+# ==============================================================================================
+
+key: ds-regression-sklearn
+title: "Estimation du prix de vente immobilier (AVM) avec scikit-learn"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> forêt aléatoire en régression -> analyse des résidus par segment) pour un modèle
+  d'évaluation automatisée de prix immobilier, entièrement piloté par Hydra et structuré en objets
+  testables. L'estimation publiée est une fourchette assortie d'un niveau de confiance.
+
+family: regression
+domain: data-science
+problem: regression
+stack: sklearn
+project_slug: real-estate-avm-sklearn
+package_name: avm_sklearn
+
+model:
+  display_name: "Forêt aléatoire scikit-learn (régression)"
+  algorithm: random_forest
+  rationale: >-
+    La forêt aléatoire est le meilleur compromis pédagogie/performance pour un premier modèle de
+    prix : elle apprend sans réglage fin les non-linéarités du cas (effet concave de la surface,
+    interaction étage x ascenseur, malus énergétique non linéaire), fournit une importance de
+    features native qui alimente l'explication de l'estimation, et reste robuste aux colinéarités
+    (surface / pièces / taxe foncière) qui pénalisent un modèle linéaire. Elle sert aussi de
+    référence pour comparer les autres stacks du même cas d'usage.
+  alternatives:
+    - "logistic_regression (Ridge en régression) : baseline linéaire interprétable, sous-estime les effets concaves"
+    - "hist_gradient_boosting : généralement plus précis, importance native absente (permutation)"
+    - "gradient_boosting : variante historique, plus lente à entraîner"
+    - "extra_trees : plus de variance aléatoire, parfois plus robuste au bruit"
+    - "svm (SVR) : bon sur petits volumes, coûteux au-delà de 100k lignes"
+  params:
+    n_estimators: 300
+    max_depth: 16
+    min_samples_leaf: 4
+    max_features: 0.5
+    criterion: squared_error
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 1 min).
+  notebook_param_grid:
+    n_estimators: [120, 300]
+    max_depth: [8, 16]
+    min_samples_leaf: [2, 8]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    cross_validation:
+      enabled: true
+      folds: 5
+      # Une cible continue ne se stratifie pas : validation croisée aléatoire standard.
+      strategy: kfold
+  root_conf:
+    estimation:
+      tolerance_pct: 10.0            # fourchette publiée : +/- 10 % autour de l'estimation
+      depth_column: recent_sales_1km # profondeur du marché -> niveau de confiance
+      unit_column: surface_m2        # prix au m2 affiché à l'utilisateur
+      min_market_depth: 10           # en dessous, le bien est orienté vers une revue humaine
+
+learning_objectives:
+  - "Composer un pipeline de régression scikit-learn propre : ColumnTransformer, transformers custom, fit sur le train uniquement."
+  - "Utiliser une classe abstraite BaseModel pour rendre le framework interchangeable."
+  - "Lire des métriques de régression en contexte hétéroscédastique (RMSE, MAE, MAPE, R2, erreur maximale)."
+  - "Diagnostiquer un biais segmenté : la RMSE globale masque une sous-estimation systématique d'un quartier."
+  - "Publier une fourchette et un niveau de confiance plutôt qu'un prix unique, et mesurer la couverture."
+  - "Produire une importance de features et l'interpréter sans sur-vendre la causalité."
