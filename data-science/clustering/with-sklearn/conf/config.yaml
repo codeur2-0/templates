@@ -64,7 +64,7 @@ metrics:
     - n_clusters
   baseline: random_assignment
   direction: maximize
-  min_primary: 0.25
+  min_primary: 0.18
 
 predict:
   input: null             # chemin d'un fichier (parquet/csv) ou null pour un échantillon

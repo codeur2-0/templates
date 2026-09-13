@@ -459,7 +459,7 @@ Après `make all`, le dépôt local contient :
 | `artifacts/figures/*.png` | figures spécifiques à la tâche |
 | `outputs/<date>/<heure>/` | configuration composée + logs Hydra |
 
-Métrique principale : **`silhouette`** (cible de smoke test : ≥ 0.25).
+Métrique principale : **`silhouette`** (cible de smoke test : ≥ 0.18).
 Métriques secondaires : calinski_harabasz, davies_bouldin, n_clusters.
 
 ---

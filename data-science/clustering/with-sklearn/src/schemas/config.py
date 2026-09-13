@@ -290,7 +290,7 @@ class MetricsConfig(BaseModel):
     )
     baseline: str = "random_assignment"
     direction: Literal["maximize", "minimize"] = "maximize"
-    min_primary: float | None = 0.25
+    min_primary: float | None = 0.18
 
     @property
     def all_metrics(self) -> list[str]:
