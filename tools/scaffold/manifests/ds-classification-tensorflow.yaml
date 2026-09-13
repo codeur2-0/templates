@@ -1,0 +1,96 @@
+# ==============================================================================================
+# data-science / classification / with-tensorflow
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/binary_classification.yaml` (churn télécom).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité, modèle, budget d'entraînement.
+# ==============================================================================================
+
+key: ds-classification-tensorflow
+title: "Prédiction d'attrition client (churn télécom) avec TensorFlow"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> réseau subclassé entraîné au GradientTape sur un pipeline tf.data -> évaluation
+  et analyse d'erreurs) pour un cas de churn télécom, entièrement piloté par Hydra et structuré
+  en objets testables.
+
+family: binary_classification
+domain: data-science
+problem: classification
+stack: tensorflow
+project_slug: telecom-churn-tensorflow
+package_name: churn_tensorflow
+
+# Budget d'entraînement : propre aux stacks itératives (époques, lots, taux d'apprentissage).
+train:
+  epochs: 40
+  batch_size: 64
+  learning_rate: 0.004
+  weight_decay: 0.0001
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    patience: 8
+    min_delta: 0.0
+    mode: min
+    # Restaure l'instantané des meilleurs poids pris pendant la boucle d'époques.
+    restore_best: true
+
+model:
+  display_name: "Réseau TensorFlow subclassé (GradientTape)"
+  algorithm: mlp
+  rationale: >-
+    Cette stack descend au niveau le plus bas du trio deep learning du dépôt : le réseau est
+    **subclassé** (`keras.Model` + `call`), les couches sont écrites à la main (`DenseBlock`,
+    `ResidualBlock`), le pipeline d'entrée est un `tf.data.Dataset` (shuffle semé, batch,
+    prefetch) et chaque pas d'optimisation passe par `tf.GradientTape` puis
+    `optimizer.apply_gradients`, le tout compilé en graphe par `tf.function`. On y voit ce que
+    Keras masque : l'ajout des pertes de régularisation, l'écrêtage du gradient, la pondération
+    des échantillons, l'instantané des meilleurs poids.
+  alternatives:
+    - "linear : modèle linéaire entraîné par gradient — baseline interprétable, même contrat"
+    - "residual_mlp : MLP à blocs résiduels écrits comme des couches personnalisées"
+    - "autoencoder : reconstruction non supervisée, réservé à la détection d'anomalies"
+  params:
+    hidden_layers: [64, 32]
+    dropout: 0.25
+    activation: relu
+    batch_norm: false
+    optimizer: adamw
+    scheduler: cosine
+    # `auto` : poids de la classe positive calculé depuis le déséquilibre observé à l'entraînement
+    # (appliqué par `sample_weight` dans la boucle, Keras n'ayant pas de `pos_weight`).
+    pos_weight: auto
+    # Écrêtage global de la norme du gradient : stabilité numérique de l'entraînement.
+    clip_norm: 5.0
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (le budget reste à 12 époques en notebook).
+  notebook_param_grid:
+    dropout: [0.1, 0.3]
+    hidden_layers: [[32, 16], [64, 32]]
+    learning_rate: [0.003, 0.01]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    # Déterminisme des opérations TensorFlow : reproductibilité bit à bit, léger surcoût.
+    deterministic: true
+    # La validation croisée d'un réseau est coûteux : elle est désactivée par défaut ici.
+    cross_validation:
+      enabled: false
+      folds: 3
+      strategy: stratified
+  root_conf:
+    decision:
+      threshold: 0.5
+      retention_cost_eur: 25.0
+      customer_lifetime_value_eur: 1450.0
+
+learning_objectives:
+  - "Écrire une boucle d'entraînement TensorFlow bas niveau : tf.data, GradientTape, apply_gradients."
+  - "Compiler le pas d'entraînement avec tf.function et comprendre le retraçage (reduce_retracing)."
+  - "Subclasser keras.Model et keras.layers.Layer : call(features, training=...), get_config()."
+  - "Ajouter les pertes de régularisation (L2) à la perte métier et écrêter la norme du gradient."
+  - "Travailler sur logits : entropie croisée from_logits=True et sigmoid/softmax côté inférence."
+  - "Pondérer les échantillons pour traiter un déséquilibre de classes (équivalent du pos_weight)."
+  - "Paramétrer un ordonnanceur de taux d'apprentissage en pas d'optimiseur, pas en époques."
+  - "Persister un modèle subclassé : poids (.weights.h5) + configuration JSON, reconstruction au chargement."
