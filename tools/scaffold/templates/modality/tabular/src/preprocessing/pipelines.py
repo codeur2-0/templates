@@ -142,7 +142,9 @@ class PreprocessingPipeline:
                 msg = "Target encoding requires 'target' to be provided"
                 raise ValueError(msg)
             if not _HAS_TARGET_ENCODER:
-                logger.warning("TargetEncoder unavailable (scikit-learn < 1.3); falling back to one-hot")
+                logger.warning(
+                    "TargetEncoder unavailable (scikit-learn < 1.3); falling back to one-hot"
+                )
                 categorical_cfg["encoder"] = "onehot"
 
         self.sklearn_pipeline: Pipeline = self._build()
@@ -230,13 +232,17 @@ class PreprocessingPipeline:
                 ("encode", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1))
             )
         elif encoder_name == "target" and _HAS_TARGET_ENCODER and TargetEncoder is not None:
-            steps.append(("encode", TargetEncoder(random_state=self.config.get("random_state", 42))))
+            steps.append(
+                ("encode", TargetEncoder(random_state=self.config.get("random_state", 42)))
+            )
         else:
             steps.append(
                 (
                     "encode",
                     OneHotEncoder(
-                        handle_unknown=handle_unknown if handle_unknown in {"ignore", "infrequent_if_exist"} else "ignore",
+                        handle_unknown=handle_unknown
+                        if handle_unknown in {"ignore", "infrequent_if_exist"}
+                        else "ignore",
                         sparse_output=False,
                         drop=None,
                         min_frequency=float(cfg.get("min_frequency", 0.01)) or None,
@@ -506,7 +512,10 @@ def _derived_feature_kinds(
         for recipe in builder.recipes
         if recipe.type == "bin" and recipe.params.get("labels")
     }
-    return [(name, "categorical" if name in labelled_bins else "numeric") for name in builder.output_names]
+    return [
+        (name, "categorical" if name in labelled_bins else "numeric")
+        for name in builder.output_names
+    ]
 
 
 def _clean_feature_name(name: str) -> str:
@@ -518,7 +527,10 @@ def _clean_feature_name(name: str) -> str:
     Returns:
         The cleaned name.
     """
-    for prefix in (f"{PreprocessingPipeline.NUMERIC_BRANCH}__", f"{PreprocessingPipeline.CATEGORICAL_BRANCH}__"):
+    for prefix in (
+        f"{PreprocessingPipeline.NUMERIC_BRANCH}__",
+        f"{PreprocessingPipeline.CATEGORICAL_BRANCH}__",
+    ):
         if name.startswith(prefix):
             return name[len(prefix) :]
     return name
@@ -555,7 +567,10 @@ def _normalise_config(config: Mapping[str, Any] | None) -> dict[str, Any]:
     Returns:
         The normalised configuration.
     """
-    raw: dict[str, Any] = {key: dict(value) if isinstance(value, Mapping) else value for key, value in dict(config or {}).items()}
+    raw: dict[str, Any] = {
+        key: dict(value) if isinstance(value, Mapping) else value
+        for key, value in dict(config or {}).items()
+    }
     raw.setdefault("numeric", {})
     raw.setdefault("categorical", {})
     raw["numeric"] = {

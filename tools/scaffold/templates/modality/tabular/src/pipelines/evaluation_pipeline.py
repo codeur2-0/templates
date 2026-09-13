@@ -74,7 +74,10 @@ class EvaluationPipeline(BasePipeline):
                 "metrics": _sanitise(evaluation.metrics),
                 "n_samples": evaluation.n_samples,
                 "model": model.summary(),
-                "artifacts": {"model": str(self._model_path()), "preprocessing": str(self._preprocessing_path())},
+                "artifacts": {
+                    "model": str(self._model_path()),
+                    "preprocessing": str(self._preprocessing_path()),
+                },
                 "extras": _sanitise_extras(evaluation.extras),
             },
         )
@@ -184,7 +187,9 @@ class EvaluationPipeline(BasePipeline):
 
 def _sanitise(metrics: dict[str, Any]) -> dict[str, float]:
     """Coerce metrics to floats."""
-    return {str(key): float(value) for key, value in metrics.items() if isinstance(value, (int, float))}
+    return {
+        str(key): float(value) for key, value in metrics.items() if isinstance(value, (int, float))
+    }
 
 
 def _sanitise_extras(extras: dict[str, Any]) -> dict[str, Any]:

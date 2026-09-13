@@ -19,8 +19,9 @@ Chaque notebook est **autonome** (il recalcule ce dont il a besoin), écrit dans
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from nbformat.notebooknode import NotebookNode
 
@@ -34,6 +35,10 @@ from tools.scaffold.utils_notebooks import (
 
 #: Nombre de lignes utilisé par les notebooks : réaliste mais exécutable en quelques secondes.
 NB_ROWS = 1500
+#: Époques utilisées par les notebooks pour une stack sans boucle d'époques (sans effet).
+NB_EPOCHS_DEFAULT = 3
+#: Époques utilisées par les notebooks pour une stack itérative (deep learning).
+NB_EPOCHS_DEEP = 12
 
 #: Tâches qui apprennent à partir d'une cible.
 SUPERVISED_TASKS = frozenset({"binary", "multiclass", "regression", "forecasting", "ranking"})
@@ -85,6 +90,9 @@ def _tokens(context: NotebookContext) -> dict[str, str]:
         "__MIN_PRIMARY__": repr(spec.metrics.min_primary),
         "__SUPERVISED__": repr(spec.metrics.task in SUPERVISED_TASKS),
         "__PARAM_GRID__": repr(_param_grid(spec)),
+        # Budget d'entraînement réduit dans les notebooks : sans effet sur les stacks sans
+        # époques (sklearn, boosting), il borne l'exécution des stacks itératives (deep learning).
+        "__NB_EPOCHS__": str(NB_EPOCHS_DEEP if context.stack.epochs_based else NB_EPOCHS_DEFAULT),
     }
 
 
@@ -142,14 +150,16 @@ def _objectives(context: NotebookContext, items: Sequence[str]) -> NotebookNode:
     lines = "\n".join(f"1. {item}" for item in items)
     extra = ""
     if shared:
-        extra = "\n\n**Objectifs transverses du dépôt**\n\n" + "\n".join(f"- {item}" for item in shared)
+        extra = "\n\n**Objectifs transverses du dépôt**\n\n" + "\n".join(
+            f"- {item}" for item in shared
+        )
     return markdown_cell(f"## Objectifs pédagogiques\n\n{lines}{extra}")
 
 
 # ---------------------------------------------------------------------------------------
 # Blocs de code partagés
 # ---------------------------------------------------------------------------------------
-SETUP = '''
+SETUP = """
 import sys
 from pathlib import Path
 from typing import Any
@@ -196,7 +206,7 @@ with initialize_config_dir(config_dir=str(PROJECT_ROOT / "conf"), version_base=N
                 f"data.n_samples={NB_ROWS}",
                 "seed=__SEED__",
                 "log_level=WARNING",
-                "++train.epochs=3",
+                "++train.epochs=__NB_EPOCHS__",
                 "train.callbacks.progress_bar=false",
             ],
         )
@@ -213,9 +223,9 @@ print(f"Métrique primaire : {CONFIG.metrics.primary} (seuil cible : __MIN_PRIMA
 print(f"Cible             : {CONFIG.data.target}")
 print(f"Algorithme        : {CONFIG.model.algorithm} ({CONFIG.model.name})")
 print(f"Lignes (notebook) : {NB_ROWS}")
-'''
+"""
 
-LOAD_RAW = '''
+LOAD_RAW = """
 from src.data.generators import SyntheticDataGenerator
 from src.data.loaders import RawDataLoader
 
@@ -232,7 +242,7 @@ else:
 raw = raw.head(NB_ROWS).reset_index(drop=True)
 print(f"shape = {raw.shape}")
 raw.head()
-'''
+"""
 
 PREPARE = '''
 from src.data.loaders import DatasetSplitter, feature_target_split
@@ -319,7 +329,7 @@ print(f"features livrées au modèle : {len(PREPARED['feature_names'])}")
 PREPARED["X_train"].head()
 '''
 
-FIT_MODEL = '''
+FIT_MODEL = """
 from src.models import build_model
 
 MODEL = build_model(CONFIG, feature_names=PREPARED["feature_names"])
@@ -332,7 +342,7 @@ FIT_RESULT = MODEL.fit(
 )
 print(MODEL.summary())
 pd.Series(FIT_RESULT.metrics, name="métrique").to_frame("valeur")
-'''
+"""
 
 
 # ---------------------------------------------------------------------------------------
@@ -389,7 +399,7 @@ dans ce notebook. Si `data/raw` est vide, le générateur synthétique du projet
         _md(
             """## 1. Chargement et premier contact
 
-On ne regarde jamais un dataset sans vérifier trois choses : sa **forme** (lignes × colonnes),
+On ne regarde jamais un dataset sans vérifier trois choses : sa **forme** (lignes x colonnes),
 ses **types** (un numérique lu comme texte casse tout) et ses **premières lignes** (les valeurs
 ont-elles du sens métier ?)."""
         ),
@@ -401,14 +411,14 @@ ont-elles du sens métier ?)."""
             ]
         ),
         _code(
-            '''
+            """
 from src.data.schemas import describe_schema, validation_report
 
 # Types déclarés (contrat Pandera) vs types réellement lus : toute divergence est un signal.
 contract = describe_schema("raw")
 observed = pd.DataFrame({"dtype_lu": {str(k): str(v) for k, v in raw.dtypes.items()}})
 contract.join(observed)[["dtype", "dtype_lu", "nullable", "unique", "checks"]]
-''',
+""",
             context,
         ),
         _insight(
@@ -418,7 +428,7 @@ contract.join(observed)[["dtype", "dtype_lu", "nullable", "unique", "checks"]]
             ]
         ),
         _code(
-            '''
+            """
 report = validation_report(raw)
 summary = pd.DataFrame(
     {
@@ -433,7 +443,7 @@ summary = pd.DataFrame(
     }
 )
 summary
-''',
+""",
             context,
         ),
         _insight(
@@ -442,9 +452,11 @@ summary
                 "La mémoire indique si le dataset tient en RAM (sinon : pyarrow, chunking ou échantillonnage).",
             ]
         ),
-        _md("## 2. Valeurs manquantes\n\nOù, combien, et surtout : **manquant au hasard ou pas** ? Un manquant informatif (ex. score de satisfaction non renseigné par les clients mécontents) est un signal, pas seulement un problème technique."),
+        _md(
+            "## 2. Valeurs manquantes\n\nOù, combien, et surtout : **manquant au hasard ou pas** ? Un manquant informatif (ex. score de satisfaction non renseigné par les clients mécontents) est un signal, pas seulement un problème technique."
+        ),
         _code(
-            '''
+            """
 missing = raw.isna().sum()
 missing_frame = (
     pd.DataFrame({"manquants": missing, "taux": (missing / len(raw)).round(4)})
@@ -452,11 +464,11 @@ missing_frame = (
     .sort_values("manquants", ascending=False)
 )
 missing_frame
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 if missing_frame.empty:
     print("Aucune valeur manquante dans cet échantillon.")
 else:
@@ -466,19 +478,19 @@ else:
     axis.set_title("Valeurs manquantes par colonne")
     fig.tight_layout()
     plt.show()
-''',
+""",
             context,
         ),
         _insight(
             [
                 "L'imputation doit être **apprise sur le train** (moyenne/médiane/constante) puis appliquée aux autres splits.",
                 "Ajouter un indicateur binaire « valeur manquante » est souvent rentable quand le manquant est informatif.",
-                f"Notes du générateur : {'; '.join(data.notes[:2]) if data.notes else 'manquants injectés volontairement pour exercer l’imputation'}.",
+                f"Notes du générateur : {'; '.join(data.notes[:2]) if data.notes else 'valeurs manquantes injectées volontairement (cas pédagogique)'}.",
             ]
         ),
         _md("## 3. Distributions numériques"),
         _code(
-            '''
+            """
 numeric_columns = [
     column for column in raw.columns if pd.api.types.is_numeric_dtype(raw[column])
 ]
@@ -497,13 +509,13 @@ for axis in np.atleast_1d(axes).ravel()[len(numeric_columns):]:
 fig.suptitle("Distributions des variables numériques", y=1.005)
 fig.tight_layout()
 plt.show()
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 raw[numeric_columns].describe(percentiles=[0.01, 0.25, 0.5, 0.75, 0.99]).T.round(2)
-''',
+""",
             context,
         ),
         _insight(
@@ -515,7 +527,7 @@ raw[numeric_columns].describe(percentiles=[0.01, 0.25, 0.5, 0.75, 0.99]).T.round
         ),
         _md("## 4. Variables catégorielles"),
         _code(
-            '''
+            """
 categorical_columns = [
     column
     for column in raw.columns
@@ -527,7 +539,7 @@ for column in categorical_columns:
     counts = raw[column].astype(str).value_counts()
     print(f"--- {column} ({len(counts)} modalités) ---")
     print((counts / len(raw)).map("{:.1%}".format).to_string())
-''',
+""",
             context,
         ),
         _insight(
@@ -544,7 +556,7 @@ for column in categorical_columns:
     cells += [
         _md("## 6. Colinéarité et structure"),
         _code(
-            '''
+            """
 correlation = raw[numeric_columns].corr(numeric_only=True)
 fig, axis = plt.subplots(figsize=(6.6, 5.4))
 image = axis.imshow(correlation.to_numpy(), cmap="coolwarm", vmin=-1, vmax=1)
@@ -559,7 +571,7 @@ fig.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
 axis.set_title("Corrélations de Pearson (variables numériques)")
 fig.tight_layout()
 plt.show()
-''',
+""",
             context,
         ),
         _insight(
@@ -570,7 +582,7 @@ plt.show()
             ]
         ),
         _code(
-            '''
+            """
 # Outliers : comptage par la règle de l'IQR (1.5 x écart interquartile).
 rows = []
 for column in numeric_columns:
@@ -583,7 +595,7 @@ for column in numeric_columns:
     rows.append({"colonne": column, "outliers_iqr": outliers, "part": outliers / max(len(series), 1)})
 outlier_frame = pd.DataFrame(rows).sort_values("outliers_iqr", ascending=False)
 outlier_frame.head(8).round(4)
-''',
+""",
             context,
         ),
         _insight(
@@ -593,7 +605,7 @@ outlier_frame.head(8).round(4)
             ]
         ),
         _code(
-            '''
+            """
 # Intégrité : unicité de la clé et doublons complets.
 key = CONFIG.data.id_column
 duplicates = int(raw.duplicated().sum())
@@ -602,7 +614,7 @@ print(f"doublons complets            : {duplicates}")
 print(f"doublons sur la clé '{key}' : {key_duplicates}")
 unique_keys = raw[key].nunique() if key in raw.columns else "n/a"
 print(f"identifiants uniques         : {unique_keys} / {len(raw)}")
-''',
+""",
             context,
         ),
         _md("## 7. Synthèse de l'exploration"),
@@ -611,7 +623,7 @@ print(f"identifiants uniques         : {unique_keys} / {len(raw)}")
             title="Lectures clés de ce jeu de données",
         ),
         _md(
-            f"""### Décisions de modélisation issues de l'EDA
+            """### Décisions de modélisation issues de l'EDA
 
 | Observation | Décision |
 | --- | --- |
@@ -645,9 +657,11 @@ def _target_cells(context: NotebookContext) -> list[NotebookNode]:
         else "répartition à observer"
     )
     return [
-        _md(f"## 5. La cible\n\n{rate_text}. C'est la variable la plus importante du notebook : son déséquilibre conditionne le choix des métriques."),
+        _md(
+            f"## 5. La cible\n\n{rate_text}. C'est la variable la plus importante du notebook : son déséquilibre conditionne le choix des métriques."
+        ),
         _code(
-            '''
+            """
 target = CONFIG.data.target
 distribution = raw[target].value_counts(normalize=True).sort_index()
 counts = raw[target].value_counts().sort_index()
@@ -666,7 +680,7 @@ plt.show()
 
 print(f"classes : {list(counts.index)}")
 print(f"classe majoritaire : {float(distribution.max()):.1%} -> accuracy triviale")
-''',
+""",
             context,
         ),
         _insight(
@@ -677,7 +691,7 @@ print(f"classe majoritaire : {float(distribution.max()):.1%} -> accuracy trivial
             ]
         ),
         _code(
-            '''
+            """
 # Signal par variable catégorielle : écart de taux de cible entre modalités.
 target = CONFIG.data.target
 rows = []
@@ -698,7 +712,7 @@ for column in categorical_columns:
     )
 signal_frame = pd.DataFrame(rows).sort_values("écart_de_taux", ascending=False)
 signal_frame
-''',
+""",
             context,
         ),
         _insight(
@@ -709,7 +723,7 @@ signal_frame
             ]
         ),
         _code(
-            '''
+            """
 # Signal par variable numérique : taux de cible par quartile.
 target = CONFIG.data.target
 plots = [column for column in numeric_columns if raw[column].nunique() > 4][:6]
@@ -725,7 +739,7 @@ for axis in np.atleast_1d(axes).ravel()[len(plots):]:
     axis.axis("off")
 fig.tight_layout()
 plt.show()
-''',
+""",
             context,
         ),
         _insight(
@@ -796,11 +810,11 @@ Trois schémas cohabitent dans `src/data/schemas.py` :
 | `InferenceDataSchema` | toute requête de prédiction | colonnes optionnelles, nulls tolérés |"""
         ),
         _code(
-            '''
+            """
 from src.data.schemas import RawDataSchema, schema_to_markdown
 
 display(Markdown(schema_to_markdown("raw")))
-''',
+""",
             context,
         ),
         _insight(
@@ -811,16 +825,16 @@ display(Markdown(schema_to_markdown("raw")))
             ]
         ),
         _code(
-            '''
+            """
 from src.data.schemas import describe_schema
 
 describe_schema("raw")
-''',
+""",
             context,
         ),
         _md("## 2. Validation nominale : le contrat doit passer"),
         _code(
-            '''
+            """
 from src.data.schemas import validate_frame, validation_report
 
 validated = validate_frame(raw, "raw")
@@ -828,7 +842,7 @@ profile = validation_report(validated)
 print(f"validation OK | lignes={profile['n_rows']} | colonnes={profile['n_columns']}")
 print(f"              | cellules manquantes={profile['missing_cells']}")
 validated.head(3)
-''',
+""",
             context,
         ),
         _insight(
@@ -875,7 +889,7 @@ def show_violation(label: str, frame: pd.DataFrame) -> None:
             context,
         ),
         _code(
-            '''
+            """
 numeric_bounded = [
     name
     for name, column in RawDataSchema.to_schema().columns.items()
@@ -886,7 +900,7 @@ column = numeric_bounded[0]
 corrupted = raw.copy()
 corrupted.loc[corrupted.index[:5], column] = 10_000_000
 show_violation(f"valeur hors bornes sur `{column}` (10 000 000)", corrupted)
-''',
+""",
             context,
         ),
         _insight(
@@ -896,22 +910,22 @@ show_violation(f"valeur hors bornes sur `{column}` (10 000 000)", corrupted)
             ]
         ),
         _code(
-            '''
+            """
 corrupted = raw.copy()
 corrupted["colonne_non_declaree"] = 0
 show_violation("colonne non déclarée (strict=True)", corrupted)
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 corrupted = raw.drop(columns=[raw.columns[-1]])
 show_violation("colonne manquante", corrupted)
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 categorical_checked = [
     name
     for name, column in RawDataSchema.to_schema().columns.items()
@@ -924,7 +938,7 @@ if categorical_checked:
     show_violation(f"catégorie hors liste sur `{column}`", corrupted)
 else:
     print("Aucune colonne contrainte par `isin` dans ce schéma.")
-''',
+""",
             context,
         ),
         _insight(
@@ -938,19 +952,19 @@ else:
     if spec.data.id_column:
         cells += [
             _code(
-                '''
+                """
 corrupted = raw.copy()
 corrupted.loc[corrupted.index[1], CONFIG.data.id_column] = corrupted.loc[corrupted.index[0], CONFIG.data.id_column]
 show_violation(f"clé dupliquée sur `{CONFIG.data.id_column}`", corrupted)
-''',
+""",
                 context,
             ),
             _code(
-                '''
+                """
 corrupted = raw.copy()
 corrupted.loc[corrupted.index[0], CONFIG.data.id_column] = None
 show_violation(f"clé nulle sur `{CONFIG.data.id_column}`", corrupted)
-''',
+""",
                 context,
             ),
             _insight(
@@ -964,13 +978,13 @@ show_violation(f"clé nulle sur `{CONFIG.data.id_column}`", corrupted)
     cells += [
         _md("## 4. Mode `lazy` : tout remonter d'un coup"),
         _code(
-            '''
+            """
 column = numeric_bounded[0]
 corrupted = raw.copy()
 corrupted.loc[corrupted.index[:20], column] = -1_000_000
 corrupted.loc[corrupted.index[20:40], column] = 1_000_000
 show_violation(f"40 violations sur `{column}` (mode lazy)", corrupted)
-''',
+""",
             context,
         ),
         _insight(
@@ -981,7 +995,7 @@ show_violation(f"40 violations sur `{column}` (mode lazy)", corrupted)
         ),
         _md("## 5. Contrat des données transformées"),
         _code(
-            '''
+            """
 from src.data.schemas import ProcessedDataSchema
 
 try:
@@ -992,7 +1006,7 @@ except SchemaViolation as error:
 
 numeric_matrix = raw.select_dtypes(include=[np.number]).dropna().head(50)
 print("matrice numérique valide ->", ProcessedDataSchema.validate(numeric_matrix).shape)
-''',
+""",
             context,
         ),
         _insight(
@@ -1003,7 +1017,7 @@ print("matrice numérique valide ->", ProcessedDataSchema.validate(numeric_matri
         ),
         _md("## 6. Contrat d'inférence : tolérant mais pas laxiste"),
         _code(
-            '''
+            """
 from src.data.schemas import InferenceDataSchema
 
 payload = raw.drop(columns=[CONFIG.data.target]).head(20).copy() if CONFIG.data.target else raw.head(20).copy()
@@ -1018,7 +1032,7 @@ try:
     InferenceDataSchema.validate(bad_payload)
 except SchemaViolation as error:
     print("[REFUSÉ] type incohérent :", str(error)[:200])
-''',
+""",
             context,
         ),
         _insight(
@@ -1092,7 +1106,7 @@ Ordre imposé (et testé dans `tests/test_preprocessing.py`) :
         _code(LOAD_RAW, context),
         _md("## 1. Splitter avant toute transformation"),
         _code(
-            '''
+            """
 from src.data.loaders import DatasetSplitter, assert_no_overlap
 
 splitter = DatasetSplitter.from_config(CONFIG.model_dump(), seed=CONFIG.data.seed)
@@ -1103,7 +1117,7 @@ assert_no_overlap(*frames, key=CONFIG.data.id_column)
 pd.DataFrame([splits.sizes], index=["lignes"]).T.assign(
     part=lambda frame: (frame["lignes"] / len(raw)).map("{:.1%}".format)
 )
-''',
+""",
             context,
         ),
         _insight(
@@ -1115,13 +1129,13 @@ pd.DataFrame([splits.sizes], index=["lignes"]).T.assign(
         ),
         _md("## 2. Feature engineering déclaratif"),
         _code(
-            '''
+            """
 from src.features.build_features import FeatureBuilder
 
 builder = FeatureBuilder.from_config(CONFIG.model_dump(), target=CONFIG.data.target)
 recipes = pd.DataFrame(builder.describe())
 recipes if not recipes.empty else print("Aucune recette déclarée dans conf/preprocessing/default.yaml")
-''',
+""",
             context,
         ),
         _insight(
@@ -1132,7 +1146,7 @@ recipes if not recipes.empty else print("Aucune recette déclarée dans conf/pre
             ]
         ),
         _code(
-            '''
+            """
 if builder.recipes:
     builder.fit(splits.train)          # statistiques apprises sur le train uniquement
     enriched_train = builder.transform(splits.train)
@@ -1143,11 +1157,11 @@ if builder.recipes:
 else:
     enriched_train, enriched_test, created = splits.train, splits.test, []
     print("Aucune feature dérivée.")
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 # Stabilité d'une feature dérivée entre train et test : un bon signal doit se transporter.
 if created:
     column = created[0]
@@ -1162,7 +1176,7 @@ if created:
     print(f"moyenne test  = {enriched_test[column].mean():.4f}")
 else:
     print("Aucune feature dérivée à comparer.")
-''',
+""",
             context,
         ),
         _insight(
@@ -1180,7 +1194,7 @@ else:
             ]
         ),
         _code(
-            '''
+            """
 report = PREPARED["pipeline"].report.to_dict()
 pd.DataFrame(
     {
@@ -1204,7 +1218,7 @@ pd.DataFrame(
         ],
     }
 )
-''',
+""",
             context,
         ),
         _insight(
@@ -1214,7 +1228,7 @@ pd.DataFrame(
             ]
         ),
         _code(
-            '''
+            """
 from src.data.schemas import ProcessedDataSchema
 
 X_train, X_test = PREPARED["X_train"], PREPARED["X_test"]
@@ -1222,12 +1236,12 @@ print("contrat processed :", "OK" if ProcessedDataSchema.validate(X_train) is no
 print("dtypes uniques    :", sorted({str(dtype) for dtype in X_train.dtypes}))
 print("NaN restants      :", int(X_train.isna().to_numpy().sum()))
 X_train.iloc[:5, :6]
-''',
+""",
             context,
         ),
         _md("## 4. Démonstration d'anti-fuite"),
         _code(
-            '''
+            """
 # Le scaler est appris sur le train : le test est centré/réduit avec les statistiques du TRAIN.
 train_mean = float(PREPARED["X_train"].to_numpy().mean())
 test_mean = float(PREPARED["X_test"].to_numpy().mean())
@@ -1252,7 +1266,7 @@ print(f"moyenne train (pipeline correct) : {train_mean:+.4f}")
 print(f"moyenne test  (pipeline correct) : {test_mean:+.4f}  <- proche de 0 sans être 0 : normal")
 print(f"colonnes du pipeline fuyard      : {len(leaky.feature_names_out)}")
 print("Le pipeline fuyard a vu le test : ses statistiques en dépendent (illustration uniquement).")
-''',
+""",
             context,
         ),
         _insight(
@@ -1264,7 +1278,7 @@ print("Le pipeline fuyard a vu le test : ses statistiques en dépendent (illustr
         ),
         _md("## 5. Les transformateurs maison, un par un"),
         _code(
-            '''
+            """
 from src.preprocessing.transformers import (
     ColumnSelector,
     DataFrameScaler,
@@ -1284,11 +1298,11 @@ for column, bounds in list(clipper.bounds_.items())[:3]:
     print(f"  {column:<28} [{bounds[0]:.2f} ; {bounds[1]:.2f}]")
 clipped = clipper.transform(frame)
 print("cellules écrêtées       :", clipper.report)
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 if categorical_columns:
     grouper = RareCategoryGrouper(min_frequency=0.01, max_categories=10).fit(frame[categorical_columns])
     kept = {column: len(values) for column, values in grouper.kept_.items()}
@@ -1297,11 +1311,11 @@ if categorical_columns:
     print("modalités `rare`     :", int((grouped.astype(str) == "rare").to_numpy().sum()))
 else:
     print("Aucune colonne catégorielle dans ce projet.")
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 # Comparaison des stratégies de scaling sur une variable asymétrique.
 column = numeric_columns[0]
 strategies = ["none", "standard", "minmax", "robust"]
@@ -1316,7 +1330,7 @@ for axis, strategy in zip(axes, strategies, strict=False):
 fig.suptitle(f"Effet du scaling sur `{column}`", y=1.04)
 fig.tight_layout()
 plt.show()
-''',
+""",
             context,
         ),
         _insight(
@@ -1328,7 +1342,7 @@ plt.show()
             ]
         ),
         _code(
-            '''
+            """
 # TypeCaster : projette un payload sur le contrat (utile en inférence,
 # où des colonnes non déclarées arrivent du système appelant).
 caster = TypeCaster(numeric_columns=numeric_columns[:3], categorical_columns=categorical_columns[:2]).fit(frame)
@@ -1337,12 +1351,12 @@ projected = caster.transform(noisy)
 print("colonnes du payload bruité :", list(noisy.columns)[-3:])
 print("colonnes après projection  :", list(projected.columns))
 print("dtypes                     :", {str(k): str(v) for k, v in projected.dtypes.items()})
-''',
+""",
             context,
         ),
         _md("## 6. Persistance : l'inférence doit reproduire l'entraînement"),
         _code(
-            '''
+            """
 test_frame = PREPARED["enriched"]["test"].loc[:, PREPARED["numeric"] + PREPARED["categorical"]]
 artifact = PREPARED["pipeline"].save(NB_PATHS.models_dir / "preprocessing_notebook.joblib")
 restored = PreprocessingPipeline.load(artifact)
@@ -1353,7 +1367,7 @@ after = restored.transform(test_frame)
 print("artefact      :", artifact.relative_to(PROJECT_ROOT))
 print("features      :", before.shape[1])
 print("reproductible :", bool(np.allclose(before.to_numpy(), after.to_numpy())))
-''',
+""",
             context,
         ),
         _insight(
@@ -1437,7 +1451,7 @@ hyperparamètres, courbe d'apprentissage et importance des features.
         _code(PREPARE, context),
         _md("## 1. La baseline d'abord"),
         _code(
-            '''
+            """
 from src.evaluation.evaluator import Evaluator
 from src.models import build_model
 from src.training.losses_metrics import MetricCalculator, MetricInputs
@@ -1466,7 +1480,7 @@ comparison = pd.DataFrame(
     }
 )
 comparison.round(4)
-''',
+""",
             context,
         ),
         _insight(
@@ -1478,7 +1492,7 @@ comparison.round(4)
         ),
         _md("## 2. Comparaison des algorithmes de la stack"),
         _code(
-            '''
+            """
 from src.models.factory import available_algorithms
 
 ALGORITHMS = available_algorithms(CONFIG.metrics.task)
@@ -1515,18 +1529,18 @@ for algorithm in ALGORITHMS:
 
 ranking = pd.DataFrame(rows).sort_values(CONFIG.metrics.primary, ascending=False).reset_index(drop=True)
 ranking.round(4)
-''',
+""",
             context,
         ),
         _insight(
             [
-                "Le classement se lit **avec** le temps d'entraînement : un gain de 0.005 pour 20× plus lent est rarement rentable.",
+                "Le classement se lit **avec** le temps d'entraînement : un gain de 0.005 pour 20x plus lent est rarement rentable.",
                 "Un écart faible entre algorithmes indique que la limite vient des **données**, pas du modèle.",
                 "Les valeurs manquantes (NaN) signalent une métrique non définie pour l'algorithme (ex. probabilités absentes).",
             ]
         ),
         _code(
-            '''
+            """
 fig, axis = plt.subplots(figsize=(8.2, 0.45 * len(ranking) + 1.8))
 axis.barh(ranking["algorithme"][::-1], ranking[CONFIG.metrics.primary][::-1], color="#005f73")
 baseline_value = baseline_metrics.get(f"baseline_{CONFIG.metrics.primary}", float("nan"))
@@ -1537,17 +1551,16 @@ axis.set_xlabel(f"{CONFIG.metrics.primary} (validation)")
 axis.set_title("Comparaison des algorithmes")
 fig.tight_layout()
 plt.show()
-''',
+""",
             context,
         ),
     ]
 
     if grid:
-        grid_items = ", ".join(f'"{name}": {values!r}' for name, values in grid.items())
         cells += [
             _md("## 3. Sensibilité aux hyperparamètres"),
             _code(
-                '''
+                """
 import itertools
 
 GRID = __PARAM_GRID__
@@ -1575,7 +1588,7 @@ for combination in combinations:
 
 grid_frame = pd.DataFrame(rows).sort_values(CONFIG.metrics.primary, ascending=False)
 grid_frame.round(4)
-''',
+""",
                 context,
             ),
             _insight(
@@ -1590,7 +1603,7 @@ grid_frame.round(4)
     cells += [
         _md(f"## {4 if grid else 3}. Courbe d'apprentissage — faut-il plus de données ?"),
         _code(
-            '''
+            """
 fractions = [0.2, 0.4, 0.6, 0.8, 1.0]
 curve = []
 for fraction in fractions:
@@ -1623,7 +1636,7 @@ axis.legend(fontsize=8)
 fig.tight_layout()
 plt.show()
 curve_frame.round(4)
-''',
+""",
             context,
         ),
         _insight(
@@ -1635,7 +1648,7 @@ curve_frame.round(4)
         ),
         _md(f"## {5 if grid else 4}. Importance des features"),
         _code(
-            '''
+            """
 importance = EVALUATOR.feature_importance(PREPARED["X_val"], y=PREPARED["y_val"])
 if importance.empty:
     print("Ce modèle n'expose pas d'importance (permutation indisponible sur ce split).")
@@ -1648,7 +1661,7 @@ else:
     axis.set_title("Top 12 des features")
     fig.tight_layout()
     plt.show()
-''',
+""",
             context,
         ),
         _insight(
@@ -1663,7 +1676,7 @@ else:
 
 - Algorithme retenu par la configuration : **`{spec.model.algorithm}`** ({spec.model.display_name}).
 - Justification documentée : {spec.model.rationale}
-- Alternatives évaluées ici : {', '.join(f'`{name}`' for name in spec.model.alternatives) or 'voir le tableau de comparaison'}.
+- Alternatives évaluées ici : {", ".join(f"`{name}`" for name in spec.model.alternatives) or "voir le tableau de comparaison"}.
 
 **Règle de décision** : on retient le modèle le plus **simple** dont la métrique primaire est à
 moins de ~1 point du meilleur, et dont le coût d'inférence est compatible avec `{spec.business.cadence}`.
@@ -1724,7 +1737,7 @@ visible, mesurable et rejouable.
         ),
         _md("## 2. Callbacks : instrumenter sans polluer la boucle d'entraînement"),
         _code(
-            '''
+            """
 from src.training.callbacks import (
     EarlyStoppingCallback,
     LoggingCallback,
@@ -1757,11 +1770,11 @@ CALLBACKS = [
     ),
 ]
 [callback.name for callback in CALLBACKS]
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 TRAINER = Trainer(
     MODEL,
     config=CONFIG.model_dump(),
@@ -1777,7 +1790,7 @@ metrics_frame = pd.DataFrame(
 ).sort_values("valeur", ascending=False)
 print(f"durée : {OUTCOME.duration_seconds:.2f}s | artefacts : {len(OUTCOME.artifacts)}")
 metrics_frame.round(4).reset_index(drop=True)
-''',
+""",
             context,
         ),
         _insight(
@@ -1789,7 +1802,7 @@ metrics_frame.round(4).reset_index(drop=True)
         ),
         _md("## 3. Artefacts produits"),
         _code(
-            '''
+            """
 import json
 
 artifacts = pd.DataFrame(
@@ -1803,7 +1816,7 @@ if card_path:
     print("fiche modèle — clés :", sorted(card))
     print("features attendues  :", len(card["feature_names"]))
     print("versions librairies :", card["library_versions"])
-''',
+""",
             context,
         ),
         _insight(
@@ -1815,7 +1828,7 @@ if card_path:
         ),
         _md("## 4. Stabilité : plusieurs graines, même conclusion ?"),
         _code(
-            '''
+            """
 from src.training.losses_metrics import MetricCalculator, MetricInputs
 
 scores = []
@@ -1844,19 +1857,19 @@ std = float(np.nanstd(scores_array, ddof=1)) if len(scores_array) > 1 else 0.0
 print(f"moyenne = {mean:.4f} | ecart-type = {std:.4f}")
 print(f"intervalle +/- 1 ecart-type = [{mean - std:.4f} ; {mean + std:.4f}]")
 stability
-''',
+""",
             context,
         ),
         _insight(
             [
                 "Un écart-type élevé signifie que le résultat dépend de la graine : toute comparaison de modèles doit le mesurer.",
-                "Règle pratique : ne pas célébrer un gain inférieur à 2 × l'écart-type observé.",
+                "Règle pratique : ne pas célébrer un gain inférieur à 2 x l'écart-type observé.",
                 "Cette variabilité est aussi un argument pour la **validation croisée** en CI (`train.cross_validation`).",
             ]
         ),
         _md("## 5. Garde-fou de qualité"),
         _code(
-            '''
+            """
 threshold_callback = next(
     (callback for callback in CALLBACKS if isinstance(callback, MetricThresholdCallback)), None
 )
@@ -1868,7 +1881,7 @@ print(f"valeur observée   : {observed:.4f}")
 print(f"seuil configuré   : {threshold}")
 print(f"verdict           : {verdict}")
 print(f"callback satisfait: {getattr(threshold_callback, 'satisfied', 'n/a')}")
-''',
+""",
             context,
         ),
         _insight(
@@ -1879,7 +1892,7 @@ print(f"callback satisfait: {getattr(threshold_callback, 'satisfied', 'n/a')}")
         ),
         _md("## 6. Rechargement et vérification"),
         _code(
-            '''
+            """
 from src.models import load_model
 
 RESTORED = load_model(OUTCOME.artifacts["model"])
@@ -1887,7 +1900,7 @@ original = np.asarray(MODEL.predict(PREPARED["X_test"]), dtype="float64")
 reloaded = np.asarray(RESTORED.predict(PREPARED["X_test"]), dtype="float64")
 print("modèle rechargé :", RESTORED.summary())
 print("prédictions identiques :", bool(np.allclose(original, reloaded)))
-''',
+""",
             context,
         ),
         _insight(
@@ -1897,7 +1910,7 @@ print("prédictions identiques :", bool(np.allclose(original, reloaded)))
             ]
         ),
         _md(
-            f"""## Synthèse
+            """## Synthèse
 
 | Étape | Objet utilisé | Artefact |
 | --- | --- | --- |
@@ -1930,7 +1943,9 @@ def build_06_error_analysis(context: NotebookContext, destination: Path) -> Path
     """
     spec = context.spec
     data = spec.data
-    recommendation_lines = "\n".join(f"{index}. {item}" for index, item in enumerate(data.recommendations, start=1))
+    recommendation_lines = "\n".join(
+        f"{index}. {item}" for index, item in enumerate(data.recommendations, start=1)
+    )
     cells: list[NotebookNode] = [
         _md(
             f"""# 06 — Analyse d'erreurs et recommandations
@@ -1957,7 +1972,7 @@ Le split de **test** n'est utilisé qu'ici — une seule fois — pour rester un
         _code(FIT_MODEL, context),
         _md("## 1. Évaluation sur le split de test"),
         _code(
-            '''
+            """
 from src.evaluation.evaluator import Evaluator
 
 EVALUATOR = Evaluator.from_config(MODEL, CONFIG.model_dump(), NB_PATHS)
@@ -1973,7 +1988,7 @@ metrics_frame = pd.DataFrame(
 )
 print(f"observations évaluées : {RESULT.n_samples} | taux d'erreur : {RESULT.error_rate:.2%}")
 metrics_frame.round(4)
-''',
+""",
             context,
         ),
         _insight(
@@ -1985,24 +2000,24 @@ metrics_frame.round(4)
         ),
         _md("## 2. Matrice de confusion et métriques par classe"),
         _code(
-            '''
+            """
 from src.visualization.plots import ClassificationPlots
 
 PLOTS = ClassificationPlots(NB_PATHS.figures_dir)
 confusion_path = PLOTS.confusion_matrix(RESULT)
 display(Image(confusion_path, width=460))
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 if not RESULT.per_class.empty:
     display(RESULT.per_class.round(4))
     per_class_path = PLOTS.per_class_metrics(RESULT.per_class)
     display(Image(per_class_path, width=520))
 else:
     print("Aucune métrique par classe pour cette tâche.")
-''',
+""",
             context,
         ),
         _insight(
@@ -2014,7 +2029,7 @@ else:
         ),
         _md("## 3. Courbes et calibration"),
         _code(
-            '''
+            """
 figures = {}
 for name in ("roc_curve", "precision_recall_curve", "calibration_curve", "score_distribution"):
     method = getattr(PLOTS, name, None)
@@ -2025,7 +2040,7 @@ for name in ("roc_curve", "precision_recall_curve", "calibration_curve", "score_
         figures[name] = path
         display(Image(path, width=470))
 print("figures générées :", sorted(figures))
-''',
+""",
             context,
         ),
         _insight(
@@ -2037,7 +2052,7 @@ print("figures générées :", sorted(figures))
         ),
         _md("## 4. Arbitrage du seuil — la table à montrer aux métiers"),
         _code(
-            '''
+            """
 THRESHOLDS = EVALUATOR.threshold_analysis(PREPARED["X_test"], PREPARED["y_test"])
 if THRESHOLDS.empty:
     print("Pas de probabilités disponibles : l'arbitrage de seuil ne s'applique pas à ce modèle.")
@@ -2046,11 +2061,11 @@ else:
     threshold_path = PLOTS.threshold_curve(THRESHOLDS)
     if threshold_path is not None:
         display(Image(threshold_path, width=560))
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 if not THRESHOLDS.empty:
     best_f1 = THRESHOLDS.loc[THRESHOLDS["f1"].idxmax()]
     volume_column = next((name for name in THRESHOLDS.columns if "volume" in name or "flag" in name), None)
@@ -2060,7 +2075,7 @@ if not THRESHOLDS.empty:
         print(f"  {volume_column} = {best_f1[volume_column]}")
     print("\\nLecture métier : baisser le seuil augmente le volume à traiter et le rappel ;")
     print("l'augmenter réduit la charge des équipes mais laisse passer des cas positifs.")
-''',
+""",
             context,
         ),
         _insight(
@@ -2071,17 +2086,17 @@ if not THRESHOLDS.empty:
         ),
         _md("## 5. Où le modèle se trompe-t-il ?"),
         _code(
-            '''
+            """
 if RESULT.errors.empty:
     print("Aucune erreur sur le split de test.")
 else:
     print(f"{len(RESULT.errors)} erreurs analysées (triées par confiance décroissante)")
     display(RESULT.errors.head(12))
-''',
+""",
             context,
         ),
         _code(
-            '''
+            """
 # Segmentation des erreurs : quelle population concentre les faux positifs / faux négatifs ?
 if not RESULT.errors.empty and CONFIG.data.target:
     error_frame = RESULT.errors.copy()
@@ -2101,7 +2116,7 @@ if not RESULT.errors.empty and CONFIG.data.target:
         display(table.head(6))
 else:
     print("Segmentation indisponible pour cette tâche.")
-''',
+""",
             context,
         ),
         _insight(
@@ -2112,7 +2127,7 @@ else:
             ]
         ),
         _code(
-            '''
+            """
 baseline_comparison = EVALUATOR.compare_to_baseline(PREPARED["X_test"], PREPARED["y_test"])
 gains = pd.DataFrame(
     {
@@ -2124,12 +2139,12 @@ gains = pd.DataFrame(
     }
 )
 gains.round(4)
-''',
+""",
             context,
         ),
         _md("## 6. Rapport exécutable"),
         _code(
-            '''
+            """
 from src.evaluation.reports import ReportBuilder
 
 REPORTER = ReportBuilder(NB_PATHS, config=CONFIG.model_dump())
@@ -2137,7 +2152,7 @@ WRITTEN = REPORTER.build(RESULT, model=MODEL, thresholds=THRESHOLDS if not THRES
 print(f"{len(WRITTEN)} artefacts écrits dans {NB_PATHS.artifacts_dir.relative_to(PROJECT_ROOT)}")
 report_path = WRITTEN["report"]
 Markdown(report_path.read_text(encoding="utf-8")[:2500] + "\\n\\n[…]")
-''',
+""",
             context,
         ),
         _insight(
@@ -2147,11 +2162,11 @@ Markdown(report_path.read_text(encoding="utf-8")[:2500] + "\\n\\n[…]")
             ]
         ),
         _code(
-            '''
+            """
 recommendations = REPORTER.recommendations(RESULT)
 for index, recommendation in enumerate(recommendations, start=1):
     print(f"{index:2d}. {recommendation}")
-''',
+""",
             context,
         ),
         _md(
@@ -2250,4 +2265,4 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
     return [builder(context, destination) for builder in builders]
 
 
-__all__ = ["NB_ROWS", "build_all", "build_01_eda", "build_06_error_analysis"]
+__all__ = ["NB_ROWS", "build_01_eda", "build_06_error_analysis", "build_all"]

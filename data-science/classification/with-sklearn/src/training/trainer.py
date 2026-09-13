@@ -14,6 +14,7 @@ for scikit-learn, XGBoost, LightGBM, PyTorch, TensorFlow and Keras implementatio
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 from collections.abc import Mapping, Sequence
@@ -386,27 +387,48 @@ def _interactive_progress_bar() -> bool:
     """Disable progress bars in non interactive environments (CI, pytest)."""
     if not sys.stdout.isatty():
         return False
-    return "PYTEST_CURRENT_TEST" not in __import__("os").environ
+    return "PYTEST_CURRENT_TEST" not in os.environ
+
+
+#: Librairies dont la version est consignée pour la traçabilité du run.
+_TRACKED_LIBRARIES: tuple[str, ...] = (
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "sklearn",
+    "scipy",
+    "torch",
+    "tensorflow",
+    "xgboost",
+    "lightgbm",
+    "catboost",
+    "pandera",
+    "pydantic",
+    "hydra",
+    "omegaconf",
+    "loguru",
+    "matplotlib",
+    "seaborn",
+    "plotly",
+    "joblib",
+)
 
 
 def _library_versions() -> dict[str, str]:
-    """Collect the versions of the main libraries (traceability)."""
-    versions: dict[str, str] = {"python": sys.version.split()[0]}
-    for module_name in (
-        "numpy",
-        "pandas",
-        "sklearn",
-        "scipy",
-        "torch",
-        "tensorflow",
-        "xgboost",
-        "lightgbm",
-        "pandera",
-        "hydra",
-    ):
-        try:
-            module = __import__(module_name)
-        except ImportError:
+    """Collect the versions of the libraries **already loaded** in this process.
+
+    Importer une librairie uniquement pour lire sa version est coûteux — et dangereux : faire
+    cohabiter PyTorch et TensorFlow dans un même processus peut déclencher un conflit de runtime
+    OpenMP (segfault). On se limite donc à ``sys.modules``, qui reflète fidèlement l'environnement
+    réellement utilisé par le projet.
+
+    Returns:
+        Library name -> version mapping (best effort).
+    """
+    versions: dict[str, str] = {"python": sys.version.split()[0], "platform": platform.platform()}
+    for module_name in _TRACKED_LIBRARIES:
+        module = sys.modules.get(module_name)
+        if module is None:
             continue
         version = getattr(module, "__version__", None)
         if version:

@@ -101,7 +101,9 @@ def pandera_field(
     return "pa.Field(" + ", ".join(kwargs) + ")"
 
 
-def pandera_columns_block(columns: list[ColumnSpec], *, inference: bool = False, indent: int = 4) -> str:
+def pandera_columns_block(
+    columns: list[ColumnSpec], *, inference: bool = False, indent: int = 4
+) -> str:
     """Render a whole block of annotated columns for a ``DataFrameModel``.
 
     Args:

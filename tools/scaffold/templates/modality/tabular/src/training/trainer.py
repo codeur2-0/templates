@@ -14,6 +14,7 @@ for scikit-learn, XGBoost, LightGBM, PyTorch, TensorFlow and Keras implementatio
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 from dataclasses import dataclass, field
@@ -257,7 +258,8 @@ class Trainer:
         logger.info(
             "Trainer finished in {:.2f}s | {}",
             outcome.duration_seconds,
-            ", ".join(f"{key}={value:.5f}" for key, value in list(merged.items())[:6]) or "no metric",
+            ", ".join(f"{key}={value:.5f}" for key, value in list(merged.items())[:6])
+            or "no metric",
         )
         return outcome
 
@@ -274,7 +276,10 @@ class Trainer:
             missing_cells = int(data.X_train.isna().to_numpy().sum())
             msg = f"Training features contain {missing_cells} missing value(s): preprocess first"
             raise ValueError(msg)
-        if self.model.task in {"binary", "multiclass", "regression", "forecasting"} and data.y_train is None:
+        if (
+            self.model.task in {"binary", "multiclass", "regression", "forecasting"}
+            and data.y_train is None
+        ):
             msg = f"Task '{self.model.task}' is supervised but no target was provided"
             raise ValueError(msg)
 
@@ -307,7 +312,10 @@ class Trainer:
             )
         )
         prefixed = {f"val_{name}": value for name, value in values.items()}
-        logger.info("Validation metrics: {}", {k: round(v, 5) for k, v in prefixed.items() if np.isfinite(v)})
+        logger.info(
+            "Validation metrics: {}",
+            {k: round(v, 5) for k, v in prefixed.items() if np.isfinite(v)},
+        )
         return prefixed
 
     # ------------------------------------------------------------------ artefacts -------
@@ -328,7 +336,9 @@ class Trainer:
 
         card = outcome.model.model_card(metrics=outcome.metrics)
         card.library_versions.update(_library_versions())
-        card_path = self.paths.models_dir / str(artifact_config.get("model_card_file", "model_card.json"))
+        card_path = self.paths.models_dir / str(
+            artifact_config.get("model_card_file", "model_card.json")
+        )
         written["model_card"] = card.to_json(card_path)
 
         metrics_payload = {
@@ -376,16 +386,48 @@ def _interactive_progress_bar() -> bool:
     """Disable progress bars in non interactive environments (CI, pytest)."""
     if not sys.stdout.isatty():
         return False
-    return "PYTEST_CURRENT_TEST" not in __import__("os").environ
+    return "PYTEST_CURRENT_TEST" not in os.environ
+
+
+#: Librairies dont la version est consignée pour la traçabilité du run.
+_TRACKED_LIBRARIES: tuple[str, ...] = (
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "sklearn",
+    "scipy",
+    "torch",
+    "tensorflow",
+    "xgboost",
+    "lightgbm",
+    "catboost",
+    "pandera",
+    "pydantic",
+    "hydra",
+    "omegaconf",
+    "loguru",
+    "matplotlib",
+    "seaborn",
+    "plotly",
+    "joblib",
+)
 
 
 def _library_versions() -> dict[str, str]:
-    """Collect the versions of the main libraries (traceability)."""
-    versions: dict[str, str] = {"python": sys.version.split()[0]}
-    for module_name in ("numpy", "pandas", "sklearn", "scipy", "torch", "tensorflow", "xgboost", "lightgbm", "pandera", "hydra"):
-        try:
-            module = __import__(module_name)
-        except ImportError:
+    """Collect the versions of the libraries **already loaded** in this process.
+
+    Importer une librairie uniquement pour lire sa version est coûteux — et dangereux : faire
+    cohabiter PyTorch et TensorFlow dans un même processus peut déclencher un conflit de runtime
+    OpenMP (segfault). On se limite donc à ``sys.modules``, qui reflète fidèlement l'environnement
+    réellement utilisé par le projet.
+
+    Returns:
+        Library name -> version mapping (best effort).
+    """
+    versions: dict[str, str] = {"python": sys.version.split()[0], "platform": platform.platform()}
+    for module_name in _TRACKED_LIBRARIES:
+        module = sys.modules.get(module_name)
+        if module is None:
             continue
         version = getattr(module, "__version__", None)
         if version:

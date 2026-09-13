@@ -135,7 +135,11 @@ class ProjectPaths:
         Returns:
             The absolute path of the file.
         """
-        directories = {"raw": self.raw_dir, "processed": self.processed_dir, "external": self.external_dir}
+        directories = {
+            "raw": self.raw_dir,
+            "processed": self.processed_dir,
+            "external": self.external_dir,
+        }
         if stage not in directories:
             msg = f"Unknown data stage '{stage}'. Allowed: {sorted(directories)}"
             raise ValueError(msg)

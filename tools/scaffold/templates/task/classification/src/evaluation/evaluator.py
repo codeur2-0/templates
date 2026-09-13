@@ -94,7 +94,9 @@ class EvaluationResult:
             "primary_value": self.primary_value,
             "metrics": {key: _to_float(value) for key, value in self.metrics.items()},
             "labels": self.labels,
-            "confusion_matrix": None if self.confusion_matrix is None else self.confusion_matrix.tolist(),
+            "confusion_matrix": None
+            if self.confusion_matrix is None
+            else self.confusion_matrix.tolist(),
             "classification_report": self.classification_report,
             "error_rate": self.error_rate,
             "n_errors": int(len(self.errors)),
@@ -140,7 +142,9 @@ class Evaluator:
         ]
 
     @classmethod
-    def from_config(cls, model: BaseModel, config: Mapping[str, Any], paths: ProjectPaths | None = None) -> Evaluator:
+    def from_config(
+        cls, model: BaseModel, config: Mapping[str, Any], paths: ProjectPaths | None = None
+    ) -> Evaluator:
         """Build an evaluator from a root configuration mapping.
 
         Args:
@@ -191,7 +195,9 @@ class Evaluator:
         predictions = self.model.predict(X)
         probabilities = self._safe_probabilities(X)
 
-        predictions_frame = self._predictions_frame(labels_series, predictions, probabilities, context)
+        predictions_frame = self._predictions_frame(
+            labels_series, predictions, probabilities, context
+        )
         metrics = self._compute_metrics(labels_series, predictions, probabilities)
         matrix, label_names = self._confusion(labels_series, predictions)
         report, per_class = self._class_report(labels_series, predictions, label_names)
@@ -261,7 +267,10 @@ class Evaluator:
         return baseline_metrics
 
     def threshold_analysis(
-        self, X: pd.DataFrame, y: pd.Series | Sequence[Any], thresholds: Sequence[float] | None = None
+        self,
+        X: pd.DataFrame,
+        y: pd.Series | Sequence[Any],
+        thresholds: Sequence[float] | None = None,
     ) -> pd.DataFrame:
         """Business-facing trade-off table: what happens when the decision threshold moves.
 
@@ -280,7 +289,11 @@ class Evaluator:
             return pd.DataFrame()
         scores = probabilities[:, 1]
         truth = np.asarray(y).astype(int)
-        grid = list(thresholds) if thresholds is not None else list(np.round(np.arange(0.05, 0.96, 0.05), 2))
+        grid = (
+            list(thresholds)
+            if thresholds is not None
+            else list(np.round(np.arange(0.05, 0.96, 0.05), 2))
+        )
 
         rows: list[dict[str, float]] = []
         for threshold in grid:
@@ -305,7 +318,9 @@ class Evaluator:
             )
         return pd.DataFrame(rows)
 
-    def feature_importance(self, X: pd.DataFrame, *, y: pd.Series | Sequence[Any] | None = None) -> pd.DataFrame:
+    def feature_importance(
+        self, X: pd.DataFrame, *, y: pd.Series | Sequence[Any] | None = None
+    ) -> pd.DataFrame:
         """Extract a feature importance ranking when the model exposes one.
 
         Two mechanisms are supported: a native ``feature_importances_`` / ``coef_`` attribute,
@@ -323,10 +338,18 @@ class Evaluator:
         if native is None:
             native = getattr(estimator, "coef_", None)
             if native is not None:
-                native = np.abs(np.asarray(native)).mean(axis=0) if np.ndim(native) > 1 else np.abs(np.asarray(native)).ravel()
+                native = (
+                    np.abs(np.asarray(native)).mean(axis=0)
+                    if np.ndim(native) > 1
+                    else np.abs(np.asarray(native)).ravel()
+                )
         if native is not None and len(native) == X.shape[1]:
             frame = pd.DataFrame(
-                {"feature": list(X.columns), "importance": np.asarray(native, dtype="float64"), "method": "native"}
+                {
+                    "feature": list(X.columns),
+                    "importance": np.asarray(native, dtype="float64"),
+                    "method": "native",
+                }
             )
             return frame.sort_values("importance", ascending=False).reset_index(drop=True)
 
@@ -393,7 +416,9 @@ class Evaluator:
         if probabilities is not None and probabilities.ndim == 2:
             for index in range(probabilities.shape[1]):
                 frame[f"probability_class_{index}"] = probabilities[:, index]
-            frame["probability_positive"] = probabilities[:, 1] if probabilities.shape[1] > 1 else probabilities[:, 0]
+            frame["probability_positive"] = (
+                probabilities[:, 1] if probabilities.shape[1] > 1 else probabilities[:, 0]
+            )
             frame["confidence"] = probabilities.max(axis=1)
         frame["is_error"] = (frame["y_true"].astype(str) != frame["y_pred"].astype(str)).astype(int)
         frame = frame.reset_index(drop=True)
@@ -418,8 +443,13 @@ class Evaluator:
 
     def _confusion(self, truth: pd.Series, predictions: np.ndarray) -> tuple[np.ndarray, list[str]]:
         """Compute the confusion matrix and its labels."""
-        label_names = sorted({str(value) for value in truth.unique()} | {str(value) for value in np.asarray(predictions)})
-        matrix = confusion_matrix(truth.astype(str), np.asarray(predictions).astype(str), labels=label_names)
+        label_names = sorted(
+            {str(value) for value in truth.unique()}
+            | {str(value) for value in np.asarray(predictions)}
+        )
+        matrix = confusion_matrix(
+            truth.astype(str), np.asarray(predictions).astype(str), labels=label_names
+        )
         return matrix, label_names
 
     def _class_report(
@@ -429,7 +459,11 @@ class Evaluator:
         from sklearn.metrics import classification_report
 
         report = classification_report(
-            truth.astype(str), np.asarray(predictions).astype(str), labels=list(label_names), output_dict=True, zero_division=0
+            truth.astype(str),
+            np.asarray(predictions).astype(str),
+            labels=list(label_names),
+            output_dict=True,
+            zero_division=0,
         )
         rows: list[dict[str, Any]] = []
         for label in label_names:
@@ -449,7 +483,9 @@ class Evaluator:
             )
         return report, pd.DataFrame(rows)
 
-    def _error_analysis(self, predictions_frame: pd.DataFrame, context: pd.DataFrame | None) -> pd.DataFrame:
+    def _error_analysis(
+        self, predictions_frame: pd.DataFrame, context: pd.DataFrame | None
+    ) -> pd.DataFrame:
         """Rank the misclassified rows by confidence (the most damaging errors first)."""
         if predictions_frame.empty or "is_error" not in predictions_frame.columns:
             return pd.DataFrame()
@@ -462,7 +498,9 @@ class Evaluator:
         errors = errors.head(self.top_k_errors).reset_index(drop=True)
 
         if context is not None and not errors.empty:
-            feature_columns = [column for column in context.columns if column not in {"y_true", "y_pred"}]
+            feature_columns = [
+                column for column in context.columns if column not in {"y_true", "y_pred"}
+            ]
             join_key = _CONTEXT_COLUMNS[0] if _CONTEXT_COLUMNS[0] in errors.columns else None
             if join_key and join_key in context.columns:
                 merged = errors.merge(context.loc[:, feature_columns], on=join_key, how="left")
@@ -483,9 +521,15 @@ class Evaluator:
 
         fpr, tpr, roc_thresholds = roc_curve(labels, scores)
         precision, recall, pr_thresholds = precision_recall_curve(labels, scores)
-        fraction_positive, mean_predicted = calibration_curve(labels, scores, n_bins=10, strategy="quantile")
+        fraction_positive, mean_predicted = calibration_curve(
+            labels, scores, n_bins=10, strategy="quantile"
+        )
 
-        curves["roc"] = {"fpr": fpr.tolist(), "tpr": tpr.tolist(), "thresholds": roc_thresholds.tolist()}
+        curves["roc"] = {
+            "fpr": fpr.tolist(),
+            "tpr": tpr.tolist(),
+            "thresholds": roc_thresholds.tolist(),
+        }
         curves["precision_recall"] = {
             "precision": precision.tolist(),
             "recall": recall.tolist(),

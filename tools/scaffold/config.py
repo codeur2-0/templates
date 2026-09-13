@@ -6,7 +6,7 @@ being rendered through Jinja2 template layers.
 
 The layering is the following (each layer may override files produced by the previous one):
 
-1. ``templates/base``                -> files shared by *every* project (Makefile, conf/, utils, ...)
+1. ``templates/base``                -> files shared by *every* project (Makefile, conf/, utils)
 2. ``templates/modality/<modality>`` -> preprocessing / features / loaders of a data modality
 3. ``templates/family/<family>``     -> schemas, synthetic data generators, evaluator, predictor
 4. ``templates/stack/<stack>``       -> framework specific model, trainer and dependencies
@@ -286,7 +286,9 @@ def load_manifest(path: Path, defaults_dir: Path | None = None) -> ProjectSpec:
         # cette couche.
         family = raw.get("family")
         if not family:
-            msg = f"Manifest {path} must declare 'family' (see tools/scaffold/registry/families.yaml)"
+            msg = (
+                f"Manifest {path} must declare 'family' (see tools/scaffold/registry/families.yaml)"
+            )
             raise KeyError(msg)
         family_defaults_path = Path(defaults_dir) / "family" / f"{family}.yaml"
         if family_defaults_path.exists():

@@ -33,9 +33,7 @@ CONSOLE_FORMAT = (
 )
 
 #: File format: the same, without colours.
-FILE_FORMAT = (
-    "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}"
-)
+FILE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}"
 
 _CONFIGURED = False
 

@@ -61,7 +61,9 @@ class ClassificationPlots:
         self.palette = palette
 
     # ------------------------------------------------------------------ matrices --------
-    def confusion_matrix(self, result: Any, *, normalize: bool = True, name: str = "confusion_matrix.png") -> Path:
+    def confusion_matrix(
+        self, result: Any, *, normalize: bool = True, name: str = "confusion_matrix.png"
+    ) -> Path:
         """Plot the (normalised) confusion matrix.
 
         Args:
@@ -96,7 +98,9 @@ class ClassificationPlots:
         axis.set_title(f"Matrice de confusion ({mode}) — split {result.split}")
         return _save(fig, self.figures_dir / name)
 
-    def per_class_metrics(self, per_class: pd.DataFrame, *, name: str = "per_class_metrics.png") -> Path:
+    def per_class_metrics(
+        self, per_class: pd.DataFrame, *, name: str = "per_class_metrics.png"
+    ) -> Path:
         """Plot precision / recall / F1 per class.
 
         Args:
@@ -146,7 +150,9 @@ class ClassificationPlots:
         axis.legend(loc="lower right", fontsize=9)
         return _save(fig, self.figures_dir / name)
 
-    def precision_recall_curve(self, result: Any, *, name: str = "precision_recall_curve.png") -> Path | None:
+    def precision_recall_curve(
+        self, result: Any, *, name: str = "precision_recall_curve.png"
+    ) -> Path | None:
         """Plot the precision-recall curve (more informative than ROC on données déséquilibrées).
 
         Args:
@@ -161,7 +167,13 @@ class ClassificationPlots:
             return None
         pr_auc = float(result.metrics.get("pr_auc", float("nan")))
         fig, axis = plt.subplots(figsize=(5.6, 5.0))
-        axis.plot(curve["recall"], curve["precision"], lw=2.2, label=f"PR AUC = {pr_auc:.4f}", color="#16a34a")
+        axis.plot(
+            curve["recall"],
+            curve["precision"],
+            lw=2.2,
+            label=f"PR AUC = {pr_auc:.4f}",
+            color="#16a34a",
+        )
         axis.set_xlabel("Rappel")
         axis.set_ylabel("Précision")
         axis.set_title("Courbe Précision-Rappel")
@@ -197,7 +209,9 @@ class ClassificationPlots:
         axis.legend(fontsize=9)
         return _save(fig, self.figures_dir / name)
 
-    def score_distribution(self, result: Any, *, name: str = "score_distribution.png") -> Path | None:
+    def score_distribution(
+        self, result: Any, *, name: str = "score_distribution.png"
+    ) -> Path | None:
         """Plot the distribution of the predicted score per true class.
 
         Args:
@@ -211,8 +225,22 @@ class ClassificationPlots:
         if not curve or not curve.get("positive"):
             return None
         fig, axis = plt.subplots(figsize=(6.6, 4.2))
-        axis.hist(curve["negative"], bins=30, alpha=0.62, label="Classe 0 (réel)", color="#94a3b8", density=True)
-        axis.hist(curve["positive"], bins=30, alpha=0.62, label="Classe 1 (réel)", color="#ef4444", density=True)
+        axis.hist(
+            curve["negative"],
+            bins=30,
+            alpha=0.62,
+            label="Classe 0 (réel)",
+            color="#94a3b8",
+            density=True,
+        )
+        axis.hist(
+            curve["positive"],
+            bins=30,
+            alpha=0.62,
+            label="Classe 1 (réel)",
+            color="#ef4444",
+            density=True,
+        )
         axis.set_xlabel("Probabilité prédite de la classe positive")
         axis.set_ylabel("Densité")
         axis.set_title("Séparation des scores par classe réelle")
@@ -259,16 +287,39 @@ class ClassificationPlots:
         if thresholds is None or thresholds.empty:
             return None
         fig, left_axis = plt.subplots(figsize=(7.4, 4.4))
-        left_axis.plot(thresholds["threshold"], thresholds["precision"], marker="o", label="Précision", color="#2563eb")
-        left_axis.plot(thresholds["threshold"], thresholds["recall"], marker="s", label="Rappel", color="#dc2626")
-        left_axis.plot(thresholds["threshold"], thresholds["f1"], marker="^", ls="--", label="F1", color="#16a34a")
+        left_axis.plot(
+            thresholds["threshold"],
+            thresholds["precision"],
+            marker="o",
+            label="Précision",
+            color="#2563eb",
+        )
+        left_axis.plot(
+            thresholds["threshold"],
+            thresholds["recall"],
+            marker="s",
+            label="Rappel",
+            color="#dc2626",
+        )
+        left_axis.plot(
+            thresholds["threshold"],
+            thresholds["f1"],
+            marker="^",
+            ls="--",
+            label="F1",
+            color="#16a34a",
+        )
         left_axis.set_xlabel("Seuil de décision")
         left_axis.set_ylabel("Score")
         left_axis.set_ylim(0.0, 1.05)
 
         right_axis = left_axis.twinx()
         right_axis.bar(
-            thresholds["threshold"], thresholds["flagged_rate"], alpha=0.18, color="#64748b", label="Volume alerté"
+            thresholds["threshold"],
+            thresholds["flagged_rate"],
+            alpha=0.18,
+            color="#64748b",
+            label="Volume alerté",
         )
         right_axis.set_ylabel("Part de la population alertée")
         right_axis.grid(False)
@@ -280,7 +331,11 @@ class ClassificationPlots:
         return _save(fig, self.figures_dir / name)
 
     def error_breakdown(
-        self, predictions: pd.DataFrame, *, group_by: str | None = None, name: str = "error_breakdown.png"
+        self,
+        predictions: pd.DataFrame,
+        *,
+        group_by: str | None = None,
+        name: str = "error_breakdown.png",
     ) -> Path | None:
         """Plot the error rate, globally or per segment.
 
@@ -307,8 +362,14 @@ class ClassificationPlots:
             frame = pd.DataFrame(
                 {
                     "segment": ["erreur (FP+FN)", "correct"],
-                    "error_rate": [float(predictions["is_error"].mean()), 1.0 - float(predictions["is_error"].mean())],
-                    "n": [int(predictions["is_error"].sum()), int((1 - predictions["is_error"]).sum())],
+                    "error_rate": [
+                        float(predictions["is_error"].mean()),
+                        1.0 - float(predictions["is_error"].mean()),
+                    ],
+                    "n": [
+                        int(predictions["is_error"].sum()),
+                        int((1 - predictions["is_error"]).sum()),
+                    ],
                 }
             )
             title = "Répartition des prédictions"
@@ -320,11 +381,21 @@ class ClassificationPlots:
         axis.set_title(title)
         axis.tick_params(axis="x", rotation=20, labelsize=8)
         for index, row in frame.iterrows():
-            axis.text(index, float(row["error_rate"]) + 0.01, f"n={int(row['n'])}", ha="center", fontsize=8)
+            axis.text(
+                index,
+                float(row["error_rate"]) + 0.01,
+                f"n={int(row['n'])}",
+                ha="center",
+                fontsize=8,
+            )
         return _save(fig, self.figures_dir / name)
 
     def metrics_bar(
-        self, metrics: dict[str, float], *, exclude: Sequence[str] = ("log_loss",), name: str = "metrics_summary.png"
+        self,
+        metrics: dict[str, float],
+        *,
+        exclude: Sequence[str] = ("log_loss",),
+        name: str = "metrics_summary.png",
     ) -> Path:
         """Plot the main metrics as a bar chart (used in reports and dashboards).
 
@@ -336,7 +407,11 @@ class ClassificationPlots:
         Returns:
             The written path.
         """
-        filtered = {key: value for key, value in metrics.items() if key not in exclude and np.isfinite(value)}
+        filtered = {
+            key: value
+            for key, value in metrics.items()
+            if key not in exclude and np.isfinite(value)
+        }
         fig, axis = plt.subplots(figsize=(7.4, 3.8))
         axis.bar(list(filtered), list(filtered.values()), color="#0ea5e9")
         axis.set_ylim(0.0, 1.05)
@@ -367,8 +442,14 @@ class ClassificationPlots:
             ("calibration_curve", self.calibration_curve(result)),
             ("score_distribution", self.score_distribution(result)),
             ("feature_importance", self.feature_importance(result.feature_importance)),
-            ("threshold_tradeoff", self.threshold_curve(thresholds) if thresholds is not None else None),
-            ("error_breakdown", self.error_breakdown(result.predictions, group_by=_first_group(result.predictions))),
+            (
+                "threshold_tradeoff",
+                self.threshold_curve(thresholds) if thresholds is not None else None,
+            ),
+            (
+                "error_breakdown",
+                self.error_breakdown(result.predictions, group_by=_first_group(result.predictions)),
+            ),
             ("metrics_summary", self.metrics_bar(result.metrics)),
         ]
         for name, path in candidates:

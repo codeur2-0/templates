@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import os
 import random
+import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -35,7 +35,12 @@ def set_seed(seed: int, *, deterministic: bool = True) -> dict[str, Any]:
     np.random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
 
-    if importlib.util.find_spec("torch") is not None:
+    # Règle de sécurité : on n'importe JAMAIS un framework lourd *seulement* pour le semer.
+    # Faire cohabiter PyTorch et TensorFlow dans un même processus peut déclencher un conflit de
+    # runtime OpenMP (segfault), et chaque import coûte plusieurs secondes au démarrage. On ne
+    # seme donc que les frameworks déjà chargés par le projet ; un modèle qui en utilise un autre
+    # pose sa propre graine dans ``fit()``.
+    if "torch" in sys.modules:
         import torch
 
         torch.manual_seed(seed)
@@ -46,7 +51,7 @@ def set_seed(seed: int, *, deterministic: bool = True) -> dict[str, Any]:
             torch.backends.cudnn.benchmark = False
         seeded["torch"] = True
 
-    if importlib.util.find_spec("tensorflow") is not None:
+    if "tensorflow" in sys.modules:
         import tensorflow as tf
 
         tf.random.set_seed(seed)
@@ -134,7 +139,9 @@ def frame_fingerprint(frame: pd.DataFrame) -> str:
     Returns:
         The first 16 hexadecimal characters of the digest.
     """
-    payload = frame.to_numpy().tobytes() + str(frame.shape).encode() + ",".join(frame.columns).encode()
+    payload = (
+        frame.to_numpy().tobytes() + str(frame.shape).encode() + ",".join(frame.columns).encode()
+    )
     return hashlib.sha256(payload).hexdigest()[:16]
 
 

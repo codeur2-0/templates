@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import nbformat
 from nbformat.notebooknode import NotebookNode
@@ -204,9 +205,10 @@ def build_context(spec: ProjectSpec, family: FamilySpec, stack: StackSpec) -> No
     Returns:
         The :class:`NotebookContext`.
     """
-    model_class = stack.class_name or "".join(
-        part.capitalize() for part in stack.key.replace("-", "_").split("_")
-    ) + "Model"
+    model_class = (
+        stack.class_name
+        or "".join(part.capitalize() for part in stack.key.replace("-", "_").split("_")) + "Model"
+    )
     return NotebookContext(
         spec=spec,
         family=family,

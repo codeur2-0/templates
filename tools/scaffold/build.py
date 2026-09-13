@@ -8,7 +8,8 @@ Usage:
     python -m tools.scaffold.build --list
 
     # générer un projet
-    python -m tools.scaffold.build --manifest tools/scaffold/manifests/ds-classification-sklearn.yaml
+    python -m tools.scaffold.build \
+        --manifest tools/scaffold/manifests/ds-classification-sklearn.yaml
 
     # générer tous les projets (ou un sous-ensemble)
     python -m tools.scaffold.build --all
@@ -23,8 +24,8 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
 
 SCAFFOLD_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCAFFOLD_DIR.parents[1]
@@ -65,7 +66,7 @@ def iter_manifests(
     for candidate in candidates:
         try:
             spec = load_manifest(candidate, DEFAULTS_DIR)
-        except Exception:  # noqa: BLE001 - a broken manifest must not hide the others
+        except Exception:
             selected.append(candidate)
             continue
         if domain and spec.domain != domain:
@@ -97,13 +98,13 @@ def format_python_files(project_dir: Path) -> bool:
 
     executable = shutil.which("ruff")
     prefix = [executable] if executable else [sys.executable, "-m", "ruff"]
-    probe = subprocess.run(  # noqa: S603 - commande figée et contrôlée
+    probe = subprocess.run(
         [*prefix, "--version"], capture_output=True, text=True, check=False, cwd=project_dir
     )
     if probe.returncode != 0:
         return False
     for arguments in (["format", "--quiet", "."], ["check", "--quiet", "--fix", "."]):
-        subprocess.run(  # noqa: S603
+        subprocess.run(
             [*prefix, *arguments], capture_output=True, text=True, check=False, cwd=project_dir
         )
     return True
@@ -141,10 +142,16 @@ def build_project(
     families: dict[str, FamilySpec] = load_families()
     stack_key = spec.stack_key
     if stack_key not in stacks:
-        msg = f"Manifest '{manifest_path.name}': unknown stack '{spec.stack}'. Known: {sorted(stacks)}"
+        msg = (
+            f"Manifest '{manifest_path.name}': unknown stack '{spec.stack}'. "
+            f"Known: {sorted(stacks)}"
+        )
         raise KeyError(msg)
     if spec.family not in families:
-        msg = f"Manifest '{manifest_path.name}': unknown family '{spec.family}'. Known: {sorted(families)}"
+        msg = (
+            f"Manifest '{manifest_path.name}': unknown family '{spec.family}'. "
+            f"Known: {sorted(families)}"
+        )
         raise KeyError(msg)
 
     stack = stacks[stack_key]
@@ -153,7 +160,10 @@ def build_project(
 
     destination = root / spec.relative_path
     if dry_run:
-        print(f"[dry-run] {spec.key} -> {destination.relative_to(root)} (stack={stack_key}, family={spec.family})")
+        print(
+            f"[dry-run] {spec.key} -> {destination.relative_to(root)} "
+            f"(stack={stack_key}, family={spec.family})"
+        )
         return spec, None
 
     renderer = ProjectRenderer(spec, family, stack)
@@ -201,7 +211,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Valider sans écrire")
     parser.add_argument("--no-notebooks", action="store_true", help="Ne pas générer les notebooks")
     parser.add_argument("--no-format", action="store_true", help="Ne pas passer ruff sur la sortie")
-    parser.add_argument("--keep-existing", action="store_true", help="Ne pas écraser les fichiers existants")
+    parser.add_argument(
+        "--keep-existing", action="store_true", help="Ne pas écraser les fichiers existants"
+    )
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT, help="Racine du dépôt cible")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -215,7 +227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 spec = load_manifest(manifest, DEFAULTS_DIR)
                 print(f"  {spec.key:<44} {spec.relative_path}")
-            except Exception as exc:  # noqa: BLE001 - rapport d'erreur explicite
+            except Exception as exc:
                 print(f"  {manifest.name:<44} INVALIDE : {exc}")
         return 0
 
@@ -248,13 +260,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             if report is not None:
                 total_files += report.n_files
                 print(f"  ✓ {spec.key:<44} {spec.relative_path} ({report.n_files} fichiers)")
-        except Exception as exc:  # noqa: BLE001 - un manifeste cassé ne doit pas tout arrêter
+        except Exception as exc:
             failures.append(f"{manifest.name}: {type(exc).__name__}: {exc}")
             print(f"  ✗ {manifest.name}: {exc}", file=sys.stderr)
             if args.dry_run:
                 traceback.print_exc()
 
-    print(f"\n{len(manifests) - len(failures)}/{len(manifests)} projet(s) généré(s), {total_files} fichier(s) écrit(s).")
+    print(
+        f"\n{len(manifests) - len(failures)}/{len(manifests)} projet(s) généré(s), "
+        f"{total_files} fichier(s) écrit(s)."
+    )
     if failures:
         print("Échecs :", file=sys.stderr)
         for failure in failures:

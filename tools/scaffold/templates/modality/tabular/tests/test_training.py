@@ -54,7 +54,9 @@ def training_data(prepared: dict[str, Any], app_config: Any) -> TrainingData:
 
 
 @pytest.fixture
-def trainer(app_config: Any, model: BaseModel, training_data: TrainingData, tmp_path: Path) -> Trainer:
+def trainer(
+    app_config: Any, model: BaseModel, training_data: TrainingData, tmp_path: Path
+) -> Trainer:
     """Return a trainer writing its artefacts in a temporary directory."""
     paths = ProjectPaths.from_root(tmp_path).ensure()
     return Trainer(
@@ -75,7 +77,9 @@ def _run_training(trainer: Trainer, data: TrainingData) -> Any:
 class TestTrainer:
     """Orchestration de l'entraînement."""
 
-    def test_training_produces_an_outcome(self, trainer: Trainer, training_data: TrainingData) -> None:
+    def test_training_produces_an_outcome(
+        self, trainer: Trainer, training_data: TrainingData
+    ) -> None:
         """Un entraînement complet renvoie un outcome riche et sérialisable."""
         outcome = _run_training(trainer, training_data)
         assert outcome.model.is_fitted
@@ -91,7 +95,9 @@ class TestTrainer:
             assert Path(path).exists()
             assert Path(path).stat().st_size > 0
 
-    def test_validation_metrics_are_prefixed(self, trainer: Trainer, training_data: TrainingData) -> None:
+    def test_validation_metrics_are_prefixed(
+        self, trainer: Trainer, training_data: TrainingData
+    ) -> None:
         """Les métriques de validation sont préfixées ``val_`` (aucune confusion train/test)."""
         outcome = _run_training(trainer, training_data)
         if training_data.X_val is None:
@@ -99,7 +105,9 @@ class TestTrainer:
         assert outcome.validation_metrics
         assert all(name.startswith("val_") for name in outcome.validation_metrics)
 
-    def test_quality_gate_is_reported(self, app_config: Any, model: BaseModel, training_data: TrainingData, tmp_path: Path) -> None:
+    def test_quality_gate_is_reported(
+        self, app_config: Any, model: BaseModel, training_data: TrainingData, tmp_path: Path
+    ) -> None:
         """Le seuil de qualité déclaré en configuration est évalué pendant l'entraînement."""
         min_primary = app_config.metrics.min_primary
         if min_primary is None:
@@ -116,7 +124,9 @@ class TestTrainer:
         outcome = _run_training(gated, training_data)
         assert isinstance(outcome.metrics, dict)
 
-    def test_contract_rejects_empty_data(self, trainer: Trainer, training_data: TrainingData) -> None:
+    def test_contract_rejects_empty_data(
+        self, trainer: Trainer, training_data: TrainingData
+    ) -> None:
         """Un jeu d'entraînement vide doit être refusé avant tout calcul."""
         empty = TrainingData(
             X_train=training_data.X_train.head(0),
@@ -127,7 +137,9 @@ class TestTrainer:
         with pytest.raises(ValueError, match="empty"):
             trainer.train(empty)
 
-    def test_contract_rejects_missing_features(self, trainer: Trainer, training_data: TrainingData) -> None:
+    def test_contract_rejects_missing_features(
+        self, trainer: Trainer, training_data: TrainingData
+    ) -> None:
         """Une matrice qui n'a pas les features du modèle est refusée."""
         truncated = TrainingData(
             X_train=training_data.X_train.drop(columns=[training_data.feature_names[0]]),
@@ -138,7 +150,9 @@ class TestTrainer:
         with pytest.raises(ValueError, match="misses model features"):
             trainer.train(truncated)
 
-    def test_contract_rejects_missing_values(self, trainer: Trainer, training_data: TrainingData) -> None:
+    def test_contract_rejects_missing_values(
+        self, trainer: Trainer, training_data: TrainingData
+    ) -> None:
         """Des NaN dans les features signifient un preprocessing raté : refus explicite."""
         corrupted = training_data.X_train.copy()
         corrupted.iloc[0, 0] = np.nan
@@ -176,7 +190,9 @@ class TestTrainer:
                 )
             )
 
-    def test_callbacks_from_configuration(self, app_config: Any, model: BaseModel, tmp_path: Path) -> None:
+    def test_callbacks_from_configuration(
+        self, app_config: Any, model: BaseModel, tmp_path: Path
+    ) -> None:
         """Les callbacks viennent de ``conf/train/default.yaml`` (rien de codé en dur)."""
         configured = Trainer(
             model,

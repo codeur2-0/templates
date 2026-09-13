@@ -89,13 +89,20 @@ class TrainPipeline(BasePipeline):
         builder_artifact = self._save_feature_builder(feature_builder)
         result = PipelineResult(name=self.name)
         result.metrics = {
-            key: float(value) for key, value in outcome.metrics.items() if isinstance(value, (int, float))
+            key: float(value)
+            for key, value in outcome.metrics.items()
+            if isinstance(value, (int, float))
         }
         result.payload = outcome
-        for path in [*outcome.artifacts.values(), str(preprocessing_artifact), str(builder_artifact)]:
+        for path in [
+            *outcome.artifacts.values(),
+            str(preprocessing_artifact),
+            str(builder_artifact),
+        ]:
             result.add_artifact(path)
         result.messages.append(
-            "Model trained | " + ", ".join(f"{key}={value:.5f}" for key, value in list(result.metrics.items())[:5])
+            "Model trained | "
+            + ", ".join(f"{key}={value:.5f}" for key, value in list(result.metrics.items())[:5])
         )
         result.messages.append(f"Preprocessing saved to {preprocessing_artifact}")
         logger.debug("Train pipeline configuration: {}", _compact(config_dict))
@@ -138,7 +145,9 @@ class TrainPipeline(BasePipeline):
         Returns:
             The enriched splits and the fitted builder (persisted for inference).
         """
-        builder = FeatureBuilder.from_config(self.config.model_dump(), target=self.config.data.target)
+        builder = FeatureBuilder.from_config(
+            self.config.model_dump(), target=self.config.data.target
+        )
         if builder.recipes:
             builder.fit(splits.train)
         enriched = {
@@ -159,7 +168,9 @@ class TrainPipeline(BasePipeline):
         drop_columns = list(self.config.data.drop_columns)
         train_frame: pd.DataFrame = enriched["train"]
 
-        feature_columns = select_feature_columns(train_frame, drop_columns=drop_columns, target=target)
+        feature_columns = select_feature_columns(
+            train_frame, drop_columns=drop_columns, target=target
+        )
         numeric_columns, categorical_columns = split_by_dtype(train_frame, feature_columns)
         explicit = self.config.preprocessing.model_dump().get("columns") or {}
         numeric_columns = list(explicit.get("numeric") or numeric_columns)
@@ -179,14 +190,20 @@ class TrainPipeline(BasePipeline):
             else (None, None)
         )
         X_train = pipeline.fit_transform(X_train_frame, y_train)
-        X_val = None if enriched["val"] is None else pipeline.transform(enriched["val"].loc[:, X_train_frame.columns])
+        X_val = (
+            None
+            if enriched["val"] is None
+            else pipeline.transform(enriched["val"].loc[:, X_train_frame.columns])
+        )
         X_test = pipeline.transform(enriched["test"].loc[:, X_train_frame.columns])
 
         if self.config.data.validation.processed:
             validated: list[str] = []
             for name, matrix in (("train", X_train), ("val", X_val), ("test", X_test)):
                 if matrix is not None:
-                    ProcessedDataSchema.validate(matrix, lazy=bool(self.config.data.validation.lazy))
+                    ProcessedDataSchema.validate(
+                        matrix, lazy=bool(self.config.data.validation.lazy)
+                    )
                     validated.append(name)
             logger.debug("Processed matrices validated against ProcessedDataSchema: {}", validated)
 

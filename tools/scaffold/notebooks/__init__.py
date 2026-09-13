@@ -37,7 +37,9 @@ def build_notebooks(
     Returns:
         The list of written notebook paths.
     """
-    from tools.scaffold.notebooks import tabular  # local import: évite une dépendance à nbformat au chargement
+    from tools.scaffold.notebooks import (
+        tabular,  # local import: évite une dépendance à nbformat au chargement
+    )
 
     destination.mkdir(parents=True, exist_ok=True)
     context = build_context(spec, family, stack)
@@ -46,7 +48,7 @@ def build_notebooks(
     if builder_name != "tabular":
         # Les autres modalités réutilisent le même squelette, adapté par la suite.
         builder_name = "tabular"
-    builder = getattr(tabular, "build_all")
+    builder = tabular.build_all
     return builder(context, destination)
 
 

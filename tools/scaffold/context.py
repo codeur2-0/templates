@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import textwrap
 from collections.abc import Iterable
-from datetime import UTC, date
+from datetime import date
 from typing import Any
 
 import yaml
@@ -263,7 +263,11 @@ def format_checks(checks: dict[str, Any] | None) -> str:
     parts: list[str] = []
     for key, value in checks.items():
         label = CHECK_LABELS.get(key, key)
-        rendered = ", ".join(str(item) for item in value) if isinstance(value, (list, tuple)) else str(value)
+        rendered = (
+            ", ".join(str(item) for item in value)
+            if isinstance(value, (list, tuple))
+            else str(value)
+        )
         parts.append(f"{label} {rendered}")
     return " · ".join(parts)
 

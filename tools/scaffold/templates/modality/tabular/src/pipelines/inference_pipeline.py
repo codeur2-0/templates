@@ -61,7 +61,11 @@ class InferencePipeline(BasePipeline):
     def _input_label(self) -> str:
         """Describe where the scored records came from."""
         source = self.config.predict.input
-        return f"file {source}" if source else f"synthetic sample ({self.config.predict.n_samples} rows)"
+        return (
+            f"file {source}"
+            if source
+            else f"synthetic sample ({self.config.predict.n_samples} rows)"
+        )
 
     def _load_inputs(self, predictor: Predictor) -> pd.DataFrame:
         """Load the records to score: configured file or generated sample."""

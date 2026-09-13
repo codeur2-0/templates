@@ -1,0 +1,92 @@
+# ==============================================================================================
+# data-science / classification / with-pytorch
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/binary_classification.yaml` (churn télécom).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité, modèle, budget d'entraînement.
+# ==============================================================================================
+
+key: ds-classification-pytorch
+title: "Prédiction d'attrition client (churn télécom) avec PyTorch"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> réseau de neurones PyTorch entraîné par descente de gradient explicite ->
+  évaluation et analyse d'erreurs) pour un cas de churn télécom, entièrement piloté par Hydra
+  et structuré en objets testables.
+
+family: binary_classification
+domain: data-science
+problem: classification
+stack: pytorch
+project_slug: telecom-churn-pytorch
+package_name: churn_pytorch
+
+# Budget d'entraînement : propre aux stacks itératives (époques, lots, taux d'apprentissage).
+train:
+  epochs: 40
+  batch_size: 64
+  learning_rate: 0.004
+  weight_decay: 0.0001
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    patience: 8
+    min_delta: 0.0
+    mode: min
+    # Restaure les poids de la meilleure époque (pas seulement un arrêt de la boucle).
+    restore_best: true
+
+model:
+  display_name: "Réseau de neurones PyTorch (MLP)"
+  algorithm: mlp
+  rationale: >-
+    Un perceptron multicouche montre ce que les librairies de boosting masquent : la boucle
+    d'entraînement (lots, forward, perte, rétropropagation, pas d'optimiseur), la régularisation
+    par dropout et poids décroissant, l'ordonnancement du taux d'apprentissage et l'arrêt anticipé
+    avec restauration du meilleur état. Sur ce cas churn, le réseau n'est pas le modèle le plus
+    performant — c'est justement l'intérêt pédagogique : la comparaison avec scikit-learn, XGBoost
+    et LightGBM sur les mêmes données et les mêmes métriques montre quand le deep learning est
+    (et n'est pas) le bon choix sur données tabulaires.
+  alternatives:
+    - "linear : modèle linéaire entraîné par gradient — baseline interprétable, même contrat"
+    - "residual_mlp : MLP à connexions résiduelles, utile quand on empile les couches"
+    - "autoencoder : reconstruction non supervisée, réservé à la détection d'anomalies"
+  params:
+    hidden_layers: [64, 32]
+    dropout: 0.25
+    activation: relu
+    batch_norm: false
+    optimizer: adamw
+    scheduler: cosine
+    # `auto` : poids de la classe positive calculé depuis le déséquilibre observé à l'entraînement.
+    pos_weight: auto
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (le budget reste à 12 époques en notebook).
+  notebook_param_grid:
+    dropout: [0.1, 0.3]
+    hidden_layers: [[32, 16], [64, 32]]
+    learning_rate: [0.003, 0.01]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    # CPU par défaut : déterminisme garanti et aucune dépendance matérielle.
+    device: cpu
+    # La validation croisée d'un réseau est coûteuse : elle est désactivée par défaut ici.
+    cross_validation:
+      enabled: false
+      folds: 3
+      strategy: stratified
+  root_conf:
+    decision:
+      threshold: 0.5
+      retention_cost_eur: 25.0
+      customer_lifetime_value_eur: 1450.0
+
+learning_objectives:
+  - "Écrire une boucle d'entraînement PyTorch explicite : DataLoader, forward, perte, backward, optimizer.step."
+  - "Comprendre ce que coûte le deep learning sur données tabulaires et quand lui préférer un booster."
+  - "Régulariser un réseau : dropout, weight decay, early stopping avec restauration du meilleur état."
+  - "Ordonnancer le taux d'apprentissage (cosine, plateau) et lire son effet sur les courbes d'apprentissage."
+  - "Traiter un déséquilibre de classes avec `pos_weight` sur une entropie croisée binaire avec logits."
+  - "Garantir le déterminisme : graine avant initialisation, mélange généré par un Generator semé, CPU."
+  - "Sauvegarder un checkpoint (poids + métadonnées) et le recharger sans pickler l'objet Python."

@@ -84,6 +84,11 @@ ignore = [
 "tests/*" = ["D"]
 "notebooks/*" = ["D", "E402"]
 "tools/scaffold/templates/*" = ["D", "E", "F", "I", "UP", "B", "SIM", "RUF", "N"]
+# Le builder de notebooks embarque la prose pédagogique (markdown, insights, explications)
+# destinée aux cellules générées : ces chaînes longues ne sont pas du code et leur césure
+# nuirait à la lisibilité du texte produit. Les **projets générés**, eux, restent soumis à
+# E501 sans exemption (leurs notebooks sont lintés cellule par cellule).
+"tools/scaffold/notebooks/tabular.py" = ["E501"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

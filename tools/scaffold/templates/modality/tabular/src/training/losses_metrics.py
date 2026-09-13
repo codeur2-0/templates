@@ -74,22 +74,30 @@ def _balanced_accuracy(inputs: MetricInputs) -> float:
 
 def _precision_macro(inputs: MetricInputs) -> float:
     """Macro-averaged precision."""
-    return float(sk_metrics.precision_score(inputs.y_true, inputs.y_pred, average="macro", zero_division=0))
+    return float(
+        sk_metrics.precision_score(inputs.y_true, inputs.y_pred, average="macro", zero_division=0)
+    )
 
 
 def _recall_macro(inputs: MetricInputs) -> float:
     """Macro-averaged recall."""
-    return float(sk_metrics.recall_score(inputs.y_true, inputs.y_pred, average="macro", zero_division=0))
+    return float(
+        sk_metrics.recall_score(inputs.y_true, inputs.y_pred, average="macro", zero_division=0)
+    )
 
 
 def _f1_macro(inputs: MetricInputs) -> float:
     """Macro-averaged F1."""
-    return float(sk_metrics.f1_score(inputs.y_true, inputs.y_pred, average="macro", zero_division=0))
+    return float(
+        sk_metrics.f1_score(inputs.y_true, inputs.y_pred, average="macro", zero_division=0)
+    )
 
 
 def _f1_weighted(inputs: MetricInputs) -> float:
     """Support-weighted F1."""
-    return float(sk_metrics.f1_score(inputs.y_true, inputs.y_pred, average="weighted", zero_division=0))
+    return float(
+        sk_metrics.f1_score(inputs.y_true, inputs.y_pred, average="weighted", zero_division=0)
+    )
 
 
 def _f1_binary(inputs: MetricInputs) -> float:
@@ -257,7 +265,9 @@ def _cluster_count(inputs: MetricInputs) -> float:
 # ---------------------------------------------------------------------------------------
 # Ranking / recommendation
 # ---------------------------------------------------------------------------------------
-def _grouped_ranking(inputs: MetricInputs, top_k: int, scorer: Callable[[np.ndarray, np.ndarray, int], float]) -> float:
+def _grouped_ranking(
+    inputs: MetricInputs, top_k: int, scorer: Callable[[np.ndarray, np.ndarray, int], float]
+) -> float:
     """Average a per-group ranking score.
 
     Args:
@@ -273,7 +283,11 @@ def _grouped_ranking(inputs: MetricInputs, top_k: int, scorer: Callable[[np.ndar
         return scorer(np.asarray(inputs.y_true), np.asarray(inputs.y_pred), top_k)
 
     frame = pd.DataFrame(
-        {"group": np.asarray(inputs.groups), "truth": np.asarray(inputs.y_true), "score": np.asarray(inputs.y_pred)}
+        {
+            "group": np.asarray(inputs.groups),
+            "truth": np.asarray(inputs.y_true),
+            "score": np.asarray(inputs.y_pred),
+        }
     )
     scores: list[float] = []
     for _, group in frame.groupby("group", observed=True):
@@ -327,7 +341,9 @@ def _map_at_k(truth: np.ndarray, scores: np.ndarray, top_k: int) -> float:
     return float((precisions * relevant).sum() / min(relevant.sum(), top_k))
 
 
-def _make_ranking_metric(scorer: Callable[[np.ndarray, np.ndarray, int], float], top_k: int = 10) -> Callable[[MetricInputs], float]:
+def _make_ranking_metric(
+    scorer: Callable[[np.ndarray, np.ndarray, int], float], top_k: int = 10
+) -> Callable[[MetricInputs], float]:
     """Create a group-aware ranking metric.
 
     Args:
@@ -381,56 +397,256 @@ def _precision_at_budget(inputs: MetricInputs) -> float:
 # Registry
 # ---------------------------------------------------------------------------------------
 _CLASSIFICATION_TASKS = frozenset({"binary", "multiclass"})
-_ALL_TASKS = frozenset({"binary", "multiclass", "regression", "clustering", "forecasting", "ranking", "anomaly"})
+_ALL_TASKS = frozenset(
+    {"binary", "multiclass", "regression", "clustering", "forecasting", "ranking", "anomaly"}
+)
 
 METRICS: dict[str, MetricDefinition] = {
     # classification
-    "accuracy": MetricDefinition("accuracy", _accuracy, tasks=_CLASSIFICATION_TASKS, description="Part de prédictions correctes"),
-    "balanced_accuracy": MetricDefinition("balanced_accuracy", _balanced_accuracy, tasks=_CLASSIFICATION_TASKS, description="Moyenne des rappels par classe"),
-    "precision": MetricDefinition("precision", _precision_binary, requires=frozenset({"y_true", "y_pred"}), tasks=frozenset({"binary", "anomaly"}), description="Précision sur la classe positive"),
-    "recall": MetricDefinition("recall", _recall_binary, tasks=frozenset({"binary", "anomaly"}), description="Rappel sur la classe positive"),
-    "f1": MetricDefinition("f1", _f1_binary, tasks=frozenset({"binary", "anomaly"}), description="F1 sur la classe positive"),
-    "precision_macro": MetricDefinition("precision_macro", _precision_macro, tasks=_CLASSIFICATION_TASKS, description="Précision macro-moyennée"),
-    "recall_macro": MetricDefinition("recall_macro", _recall_macro, tasks=_CLASSIFICATION_TASKS, description="Rappel macro-moyenné"),
-    "f1_macro": MetricDefinition("f1_macro", _f1_macro, tasks=_CLASSIFICATION_TASKS, description="F1 macro-moyenné"),
-    "f1_weighted": MetricDefinition("f1_weighted", _f1_weighted, tasks=_CLASSIFICATION_TASKS, description="F1 pondéré par le support"),
-    "roc_auc": MetricDefinition("roc_auc", _roc_auc, requires=frozenset({"y_true", "y_proba"}), tasks=frozenset({"binary", "anomaly"}), description="Aire sous la courbe ROC"),
-    "pr_auc": MetricDefinition("pr_auc", _pr_auc, requires=frozenset({"y_true", "y_proba"}), tasks=frozenset({"binary", "anomaly"}), description="Aire sous la courbe précision-rappel"),
-    "log_loss": MetricDefinition("log_loss", _log_loss, higher_is_better=False, requires=frozenset({"y_true", "y_proba"}), tasks=_CLASSIFICATION_TASKS, description="Entropie croisée"),
-    "mcc": MetricDefinition("mcc", _mcc, tasks=_CLASSIFICATION_TASKS, description="Corrélation de Matthews"),
+    "accuracy": MetricDefinition(
+        "accuracy",
+        _accuracy,
+        tasks=_CLASSIFICATION_TASKS,
+        description="Part de prédictions correctes",
+    ),
+    "balanced_accuracy": MetricDefinition(
+        "balanced_accuracy",
+        _balanced_accuracy,
+        tasks=_CLASSIFICATION_TASKS,
+        description="Moyenne des rappels par classe",
+    ),
+    "precision": MetricDefinition(
+        "precision",
+        _precision_binary,
+        requires=frozenset({"y_true", "y_pred"}),
+        tasks=frozenset({"binary", "anomaly"}),
+        description="Précision sur la classe positive",
+    ),
+    "recall": MetricDefinition(
+        "recall",
+        _recall_binary,
+        tasks=frozenset({"binary", "anomaly"}),
+        description="Rappel sur la classe positive",
+    ),
+    "f1": MetricDefinition(
+        "f1",
+        _f1_binary,
+        tasks=frozenset({"binary", "anomaly"}),
+        description="F1 sur la classe positive",
+    ),
+    "precision_macro": MetricDefinition(
+        "precision_macro",
+        _precision_macro,
+        tasks=_CLASSIFICATION_TASKS,
+        description="Précision macro-moyennée",
+    ),
+    "recall_macro": MetricDefinition(
+        "recall_macro",
+        _recall_macro,
+        tasks=_CLASSIFICATION_TASKS,
+        description="Rappel macro-moyenné",
+    ),
+    "f1_macro": MetricDefinition(
+        "f1_macro", _f1_macro, tasks=_CLASSIFICATION_TASKS, description="F1 macro-moyenné"
+    ),
+    "f1_weighted": MetricDefinition(
+        "f1_weighted",
+        _f1_weighted,
+        tasks=_CLASSIFICATION_TASKS,
+        description="F1 pondéré par le support",
+    ),
+    "roc_auc": MetricDefinition(
+        "roc_auc",
+        _roc_auc,
+        requires=frozenset({"y_true", "y_proba"}),
+        tasks=frozenset({"binary", "anomaly"}),
+        description="Aire sous la courbe ROC",
+    ),
+    "pr_auc": MetricDefinition(
+        "pr_auc",
+        _pr_auc,
+        requires=frozenset({"y_true", "y_proba"}),
+        tasks=frozenset({"binary", "anomaly"}),
+        description="Aire sous la courbe précision-rappel",
+    ),
+    "log_loss": MetricDefinition(
+        "log_loss",
+        _log_loss,
+        higher_is_better=False,
+        requires=frozenset({"y_true", "y_proba"}),
+        tasks=_CLASSIFICATION_TASKS,
+        description="Entropie croisée",
+    ),
+    "mcc": MetricDefinition(
+        "mcc", _mcc, tasks=_CLASSIFICATION_TASKS, description="Corrélation de Matthews"
+    ),
     # regression / forecasting
-    "rmse": MetricDefinition("rmse", _rmse, higher_is_better=False, tasks=frozenset({"regression", "forecasting", "anomaly"}), description="Racine de l'erreur quadratique moyenne"),
-    "mae": MetricDefinition("mae", _mae, higher_is_better=False, tasks=frozenset({"regression", "forecasting"}), description="Erreur absolue moyenne"),
-    "mape": MetricDefinition("mape", _mape, higher_is_better=False, tasks=frozenset({"regression", "forecasting"}), description="Erreur absolue en pourcentage"),
-    "smape": MetricDefinition("smape", _smape, higher_is_better=False, tasks=frozenset({"regression", "forecasting"}), description="MAPE symétrique"),
-    "r2": MetricDefinition("r2", _r2, tasks=frozenset({"regression", "forecasting"}), description="Coefficient de détermination"),
-    "max_error": MetricDefinition("max_error", _max_error, higher_is_better=False, tasks=frozenset({"regression", "forecasting"}), description="Pire erreur absolue"),
-    "mase": MetricDefinition("mase", _mase, higher_is_better=False, tasks=frozenset({"forecasting"}), description="Erreur absolue échelonnée par le naive"),
+    "rmse": MetricDefinition(
+        "rmse",
+        _rmse,
+        higher_is_better=False,
+        tasks=frozenset({"regression", "forecasting", "anomaly"}),
+        description="Racine de l'erreur quadratique moyenne",
+    ),
+    "mae": MetricDefinition(
+        "mae",
+        _mae,
+        higher_is_better=False,
+        tasks=frozenset({"regression", "forecasting"}),
+        description="Erreur absolue moyenne",
+    ),
+    "mape": MetricDefinition(
+        "mape",
+        _mape,
+        higher_is_better=False,
+        tasks=frozenset({"regression", "forecasting"}),
+        description="Erreur absolue en pourcentage",
+    ),
+    "smape": MetricDefinition(
+        "smape",
+        _smape,
+        higher_is_better=False,
+        tasks=frozenset({"regression", "forecasting"}),
+        description="MAPE symétrique",
+    ),
+    "r2": MetricDefinition(
+        "r2",
+        _r2,
+        tasks=frozenset({"regression", "forecasting"}),
+        description="Coefficient de détermination",
+    ),
+    "max_error": MetricDefinition(
+        "max_error",
+        _max_error,
+        higher_is_better=False,
+        tasks=frozenset({"regression", "forecasting"}),
+        description="Pire erreur absolue",
+    ),
+    "mase": MetricDefinition(
+        "mase",
+        _mase,
+        higher_is_better=False,
+        tasks=frozenset({"forecasting"}),
+        description="Erreur absolue échelonnée par le naive",
+    ),
     # clustering
-    "silhouette": MetricDefinition("silhouette", _silhouette, requires=frozenset({"y_pred", "X"}), tasks=frozenset({"clustering"}), description="Coefficient de silhouette moyen"),
-    "calinski_harabasz": MetricDefinition("calinski_harabasz", _calinski_harabasz, requires=frozenset({"y_pred", "X"}), tasks=frozenset({"clustering"}), description="Indice de Calinski-Harabasz"),
-    "davies_bouldin": MetricDefinition("davies_bouldin", _davies_bouldin, higher_is_better=False, requires=frozenset({"y_pred", "X"}), tasks=frozenset({"clustering"}), description="Indice de Davies-Bouldin"),
-    "n_clusters": MetricDefinition("n_clusters", _cluster_count, requires=frozenset({"y_pred"}), tasks=frozenset({"clustering", "anomaly"}), description="Nombre de groupes détectés"),
+    "silhouette": MetricDefinition(
+        "silhouette",
+        _silhouette,
+        requires=frozenset({"y_pred", "X"}),
+        tasks=frozenset({"clustering"}),
+        description="Coefficient de silhouette moyen",
+    ),
+    "calinski_harabasz": MetricDefinition(
+        "calinski_harabasz",
+        _calinski_harabasz,
+        requires=frozenset({"y_pred", "X"}),
+        tasks=frozenset({"clustering"}),
+        description="Indice de Calinski-Harabasz",
+    ),
+    "davies_bouldin": MetricDefinition(
+        "davies_bouldin",
+        _davies_bouldin,
+        higher_is_better=False,
+        requires=frozenset({"y_pred", "X"}),
+        tasks=frozenset({"clustering"}),
+        description="Indice de Davies-Bouldin",
+    ),
+    "n_clusters": MetricDefinition(
+        "n_clusters",
+        _cluster_count,
+        requires=frozenset({"y_pred"}),
+        tasks=frozenset({"clustering", "anomaly"}),
+        description="Nombre de groupes détectés",
+    ),
     # ranking
-    "precision_at_k": MetricDefinition("precision_at_k", _make_ranking_metric(_precision_at_k), requires=frozenset({"y_true", "y_pred", "groups"}), tasks=frozenset({"ranking"}), description="Précision@K"),
-    "recall_at_k": MetricDefinition("recall_at_k", _make_ranking_metric(_recall_at_k), requires=frozenset({"y_true", "y_pred", "groups"}), tasks=frozenset({"ranking"}), description="Rappel@K"),
-    "ndcg_at_k": MetricDefinition("ndcg_at_k", _make_ranking_metric(_ndcg_at_k), requires=frozenset({"y_true", "y_pred", "groups"}), tasks=frozenset({"ranking"}), description="NDCG@K"),
-    "map_at_k": MetricDefinition("map_at_k", _make_ranking_metric(_map_at_k), requires=frozenset({"y_true", "y_pred", "groups"}), tasks=frozenset({"ranking"}), description="MAP@K"),
-    "hit_rate_at_k": MetricDefinition("hit_rate_at_k", _make_ranking_metric(_hit_rate_at_k), requires=frozenset({"y_true", "y_pred", "groups"}), tasks=frozenset({"ranking"}), description="Hit rate@K"),
+    "precision_at_k": MetricDefinition(
+        "precision_at_k",
+        _make_ranking_metric(_precision_at_k),
+        requires=frozenset({"y_true", "y_pred", "groups"}),
+        tasks=frozenset({"ranking"}),
+        description="Précision@K",
+    ),
+    "recall_at_k": MetricDefinition(
+        "recall_at_k",
+        _make_ranking_metric(_recall_at_k),
+        requires=frozenset({"y_true", "y_pred", "groups"}),
+        tasks=frozenset({"ranking"}),
+        description="Rappel@K",
+    ),
+    "ndcg_at_k": MetricDefinition(
+        "ndcg_at_k",
+        _make_ranking_metric(_ndcg_at_k),
+        requires=frozenset({"y_true", "y_pred", "groups"}),
+        tasks=frozenset({"ranking"}),
+        description="NDCG@K",
+    ),
+    "map_at_k": MetricDefinition(
+        "map_at_k",
+        _make_ranking_metric(_map_at_k),
+        requires=frozenset({"y_true", "y_pred", "groups"}),
+        tasks=frozenset({"ranking"}),
+        description="MAP@K",
+    ),
+    "hit_rate_at_k": MetricDefinition(
+        "hit_rate_at_k",
+        _make_ranking_metric(_hit_rate_at_k),
+        requires=frozenset({"y_true", "y_pred", "groups"}),
+        tasks=frozenset({"ranking"}),
+        description="Hit rate@K",
+    ),
     # anomaly
-    "recall_at_budget": MetricDefinition("recall_at_budget", _recall_at_top_k_anomaly, requires=frozenset({"y_true", "y_proba"}), tasks=frozenset({"anomaly", "binary"}), description="Rappel quand on ne peut investiguer que K alertes"),
-    "precision_at_budget": MetricDefinition("precision_at_budget", _precision_at_budget, requires=frozenset({"y_true", "y_proba"}), tasks=frozenset({"anomaly", "binary"}), description="Précision sur le budget d'investigation"),
+    "recall_at_budget": MetricDefinition(
+        "recall_at_budget",
+        _recall_at_top_k_anomaly,
+        requires=frozenset({"y_true", "y_proba"}),
+        tasks=frozenset({"anomaly", "binary"}),
+        description="Rappel quand on ne peut investiguer que K alertes",
+    ),
+    "precision_at_budget": MetricDefinition(
+        "precision_at_budget",
+        _precision_at_budget,
+        requires=frozenset({"y_true", "y_proba"}),
+        tasks=frozenset({"anomaly", "binary"}),
+        description="Précision sur le budget d'investigation",
+    ),
 }
 
 #: Metric names grouped by task, used for validation and defaults.
 METRICS_BY_TASK: dict[str, list[str]] = {
-    "binary": ["roc_auc", "pr_auc", "accuracy", "balanced_accuracy", "precision", "recall", "f1", "log_loss", "mcc"],
-    "multiclass": ["accuracy", "balanced_accuracy", "f1_macro", "f1_weighted", "precision_macro", "recall_macro", "log_loss"],
+    "binary": [
+        "roc_auc",
+        "pr_auc",
+        "accuracy",
+        "balanced_accuracy",
+        "precision",
+        "recall",
+        "f1",
+        "log_loss",
+        "mcc",
+    ],
+    "multiclass": [
+        "accuracy",
+        "balanced_accuracy",
+        "f1_macro",
+        "f1_weighted",
+        "precision_macro",
+        "recall_macro",
+        "log_loss",
+    ],
     "regression": ["rmse", "mae", "r2", "mape", "smape", "max_error"],
     "forecasting": ["mae", "rmse", "mape", "smape", "mase", "r2"],
     "clustering": ["silhouette", "calinski_harabasz", "davies_bouldin", "n_clusters"],
     "ranking": ["ndcg_at_k", "precision_at_k", "recall_at_k", "map_at_k", "hit_rate_at_k"],
-    "anomaly": ["pr_auc", "roc_auc", "recall_at_budget", "precision_at_budget", "precision", "recall", "f1"],
+    "anomaly": [
+        "pr_auc",
+        "roc_auc",
+        "recall_at_budget",
+        "precision_at_budget",
+        "precision",
+        "recall",
+        "f1",
+    ],
 }
 
 
@@ -445,7 +661,11 @@ def available_metrics(task: str | None = None) -> list[str]:
     """
     if task is None:
         return sorted(METRICS)
-    return [name for name, definition in METRICS.items() if not definition.tasks or task in definition.tasks]
+    return [
+        name
+        for name, definition in METRICS.items()
+        if not definition.tasks or task in definition.tasks
+    ]
 
 
 def validate_metric_names(names: Iterable[str], task: str | None = None) -> list[str]:
@@ -488,7 +708,9 @@ class MetricCalculator:
         ['accuracy', 'roc_auc']
     """
 
-    def __init__(self, task: str, metrics: Sequence[str], *, extra: Mapping[str, Any] | None = None) -> None:
+    def __init__(
+        self, task: str, metrics: Sequence[str], *, extra: Mapping[str, Any] | None = None
+    ) -> None:
         """Validate and store the metric selection.
 
         Args:
@@ -512,7 +734,10 @@ class MetricCalculator:
         """
         node = dict(config.get("metrics", {}) or {})
         task = str(node.get("task", "binary"))
-        names = [str(node.get("primary", "accuracy")), *[str(name) for name in node.get("secondary", []) or []]]
+        names = [
+            str(node.get("primary", "accuracy")),
+            *[str(name) for name in node.get("secondary", []) or []],
+        ]
         return cls(task=task, metrics=names, extra=dict(node.get("extra", {}) or {}))
 
     def evaluate(self, inputs: MetricInputs) -> dict[str, float]:
@@ -581,10 +806,25 @@ def _missing(value: Any) -> bool:
 # Loss resolution (deep learning stacks)
 # ---------------------------------------------------------------------------------------
 LOSS_ALIASES: dict[str, dict[str, str]] = {
-    "binary": {"torch": "bce_with_logits", "tensorflow": "binary_crossentropy", "keras": "binary_crossentropy", "sklearn": "log_loss"},
-    "multiclass": {"torch": "cross_entropy", "tensorflow": "sparse_categorical_crossentropy", "keras": "sparse_categorical_crossentropy", "sklearn": "log_loss"},
+    "binary": {
+        "torch": "bce_with_logits",
+        "tensorflow": "binary_crossentropy",
+        "keras": "binary_crossentropy",
+        "sklearn": "log_loss",
+    },
+    "multiclass": {
+        "torch": "cross_entropy",
+        "tensorflow": "sparse_categorical_crossentropy",
+        "keras": "sparse_categorical_crossentropy",
+        "sklearn": "log_loss",
+    },
     "regression": {"torch": "mse", "tensorflow": "mse", "keras": "mse", "sklearn": "squared_error"},
-    "forecasting": {"torch": "mse", "tensorflow": "mse", "keras": "mse", "sklearn": "squared_error"},
+    "forecasting": {
+        "torch": "mse",
+        "tensorflow": "mse",
+        "keras": "mse",
+        "sklearn": "squared_error",
+    },
     "anomaly": {"torch": "mse", "tensorflow": "mse", "keras": "mse", "sklearn": "squared_error"},
 }
 

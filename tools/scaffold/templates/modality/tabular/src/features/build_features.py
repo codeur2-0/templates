@@ -104,7 +104,17 @@ class FeatureRecipe:
     def required_columns(self) -> list[str]:
         """Columns this recipe reads from the input frame."""
         columns: list[str] = []
-        for key in ("column", "numerator", "denominator", "left", "right", "a", "b", "value_column", "group_by"):
+        for key in (
+            "column",
+            "numerator",
+            "denominator",
+            "left",
+            "right",
+            "a",
+            "b",
+            "value_column",
+            "group_by",
+        ):
             value = self.params.get(key)
             if isinstance(value, str):
                 columns.append(value)
@@ -118,7 +128,17 @@ class FeatureRecipe:
 def _default_recipe_name(recipe_type: str, params: Mapping[str, Any]) -> str:
     """Derive an explicit output name from the recipe parameters."""
     parts = [recipe_type]
-    for key in ("column", "numerator", "denominator", "left", "right", "a", "b", "value_column", "group_by"):
+    for key in (
+        "column",
+        "numerator",
+        "denominator",
+        "left",
+        "right",
+        "a",
+        "b",
+        "value_column",
+        "group_by",
+    ):
         if isinstance(params.get(key), str):
             parts.append(str(params[key]))
     return "_".join(parts)
@@ -173,9 +193,7 @@ class FeatureBuilder:
 
     # ------------------------------------------------------------------ metadata --------
     @classmethod
-    def from_config(
-        cls, config: Mapping[str, Any], *, target: str | None = None
-    ) -> FeatureBuilder:
+    def from_config(cls, config: Mapping[str, Any], *, target: str | None = None) -> FeatureBuilder:
         """Build the feature builder from an application configuration.
 
         Args:
@@ -290,7 +308,9 @@ class FeatureBuilder:
         params = recipe.params
         if recipe.type == "ratio":
             numerator = pd.to_numeric(frame[_required(frame, params, "numerator")], errors="coerce")
-            denominator = pd.to_numeric(frame[_required(frame, params, "denominator")], errors="coerce")
+            denominator = pd.to_numeric(
+                frame[_required(frame, params, "denominator")], errors="coerce"
+            )
             epsilon = float(params.get("epsilon", 1e-6))
             # Un dénominateur nul (ou manquant) rend le ratio *indéfini* : on renvoie 0.0 plutôt
             # que NaN (qui ferait échouer ProcessedDataSchema) ou une valeur explosive
@@ -338,14 +358,14 @@ class FeatureBuilder:
             quantiles = np.linspace(0.0, 1.0, bins + 1)
             edges = np.unique(series.quantile(quantiles).to_numpy(dtype="float64"))
         elif method == "uniform":
-            edges = np.unique(
-                np.linspace(float(series.min()), float(series.max()), bins + 1)
-            )
+            edges = np.unique(np.linspace(float(series.min()), float(series.max()), bins + 1))
         else:
             msg = f"Unknown binning method '{method}'. Allowed: ['quantile', 'uniform']"
             raise ValueError(msg)
         if len(edges) < 2:
-            logger.warning("Feature '{}' cannot be binned (constant column '{}')", recipe.name, column)
+            logger.warning(
+                "Feature '{}' cannot be binned (constant column '{}')", recipe.name, column
+            )
             edges = np.array([float(series.min()), float(series.max())], dtype="float64")
         edges[0] = -np.inf
         edges[-1] = np.inf
@@ -396,7 +416,9 @@ class FeatureBuilder:
     def _apply_datetime_parts(self, frame: pd.DataFrame, recipe: FeatureRecipe) -> pd.DataFrame:
         """Expand a timestamp column into calendar features."""
         column = _required(frame, recipe.params, "column")
-        parts = [str(part) for part in recipe.params.get("parts", ["year", "month", "day", "dayofweek"])]
+        parts = [
+            str(part) for part in recipe.params.get("parts", ["year", "month", "day", "dayofweek"])
+        ]
         unknown = [part for part in parts if part not in DATETIME_PARTS]
         if unknown:
             msg = f"Unknown datetime part(s) {unknown}. Allowed: {DATETIME_PARTS}"
@@ -436,7 +458,9 @@ def _required(frame: pd.DataFrame, params: Mapping[str, Any], key: str) -> str:
         msg = f"Recipe parameter '{key}' is required and must be a column name"
         raise ValueError(msg)
     if value not in frame.columns:
-        msg = f"Column '{value}' required by the recipe is missing. Available: {list(frame.columns)}"
+        msg = (
+            f"Column '{value}' required by the recipe is missing. Available: {list(frame.columns)}"
+        )
         raise KeyError(msg)
     return value
 

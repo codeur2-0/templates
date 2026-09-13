@@ -77,7 +77,11 @@ def execute(path: Path, *, timeout: int, inplace: bool) -> tuple[bool, str, floa
     try:
         client.execute()
     except CellExecutionError as error:
-        return False, str(error).strip().splitlines()[-1] if str(error).strip() else "échec inconnu", time.perf_counter() - started
+        return (
+            False,
+            str(error).strip().splitlines()[-1] if str(error).strip() else "échec inconnu",
+            time.perf_counter() - started,
+        )
     except Exception as error:  # noqa: BLE001 - un notebook cassé ne doit pas arrêter les autres
         return False, f"{type(error).__name__}: {error}", time.perf_counter() - started
 
@@ -96,7 +100,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         Process exit code (``0`` when every notebook executed successfully).
     """
     parser = argparse.ArgumentParser(description="Exécute les notebooks du projet.")
-    parser.add_argument("--filter", help="N'exécuter que les notebooks dont le nom contient ce motif")
+    parser.add_argument(
+        "--filter", help="N'exécuter que les notebooks dont le nom contient ce motif"
+    )
     parser.add_argument("--timeout", type=int, default=900, help="Timeout par cellule (secondes)")
     parser.add_argument(
         "--inplace",
@@ -126,7 +132,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not success:
             failures.append(path.name)
 
-    print(f"\n{len(notebooks) - len(failures)}/{len(notebooks)} notebook(s) exécuté(s) avec succès.")
+    print(
+        f"\n{len(notebooks) - len(failures)}/{len(notebooks)} notebook(s) exécuté(s) avec succès."
+    )
     if failures:
         print("Échecs : " + ", ".join(failures), file=sys.stderr)
         return 1

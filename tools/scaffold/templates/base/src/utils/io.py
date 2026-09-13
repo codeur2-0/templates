@@ -153,7 +153,9 @@ def write_table_multiple(
     return written
 
 
-def resolve_table_path(directory: str | Path, name: str, formats: Iterable[str] = ("parquet", "csv")) -> Path:
+def resolve_table_path(
+    directory: str | Path, name: str, formats: Iterable[str] = ("parquet", "csv")
+) -> Path:
     """Find an existing table file, trying formats in priority order.
 
     Args:

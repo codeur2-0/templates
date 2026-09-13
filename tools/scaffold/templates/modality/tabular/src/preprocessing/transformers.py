@@ -247,7 +247,9 @@ class OutlierClipper(BaseEstimator, TransformerMixin):
         quantiles: ``(low, high)`` quantiles used to compute the bounds.
     """
 
-    def __init__(self, quantiles: tuple[float, float] = (0.01, 0.99), *, columns: Sequence[str] | None = None) -> None:
+    def __init__(
+        self, quantiles: tuple[float, float] = (0.01, 0.99), *, columns: Sequence[str] | None = None
+    ) -> None:
         """Store the clipping policy.
 
         Args:
@@ -272,9 +274,13 @@ class OutlierClipper(BaseEstimator, TransformerMixin):
         low_quantile, high_quantile = self._validated_quantiles()
         frame = _as_dataframe(X, list(self.columns or []))
         self.feature_names_in_ = list(frame.columns)
-        targets = list(self.columns) if self.columns is not None else [
-            column for column in frame.columns if pd.api.types.is_numeric_dtype(frame[column])
-        ]
+        targets = (
+            list(self.columns)
+            if self.columns is not None
+            else [
+                column for column in frame.columns if pd.api.types.is_numeric_dtype(frame[column])
+            ]
+        )
         self.bounds_ = {}
         for column in targets:
             if column not in frame.columns:
@@ -327,7 +333,9 @@ class OutlierClipper(BaseEstimator, TransformerMixin):
         Returns:
             Array of column names.
         """
-        return _names_out(input_features, getattr(self, "feature_names_in_", None), fallback=list(self.bounds_))
+        return _names_out(
+            input_features, getattr(self, "feature_names_in_", None), fallback=list(self.bounds_)
+        )
 
     @property
     def report(self) -> dict[str, int]:
@@ -387,7 +395,9 @@ class Log1pTransformer(BaseEstimator, TransformerMixin):
         frame = _as_dataframe(X, list(self.columns)).copy()
         for column in list(self.columns):
             if column in frame.columns:
-                frame[column] = np.log1p(pd.to_numeric(frame[column], errors="coerce").clip(lower=0))
+                frame[column] = np.log1p(
+                    pd.to_numeric(frame[column], errors="coerce").clip(lower=0)
+                )
         return frame
 
     def get_feature_names_out(self, input_features: Sequence[str] | None = None) -> np.ndarray:
@@ -399,7 +409,9 @@ class Log1pTransformer(BaseEstimator, TransformerMixin):
         Returns:
             Array of column names.
         """
-        return _names_out(input_features, getattr(self, "feature_names_in_", None), fallback=list(self.columns))
+        return _names_out(
+            input_features, getattr(self, "feature_names_in_", None), fallback=list(self.columns)
+        )
 
 
 class RareCategoryGrouper(BaseEstimator, TransformerMixin):
@@ -492,7 +504,9 @@ class RareCategoryGrouper(BaseEstimator, TransformerMixin):
         Returns:
             Array of column names.
         """
-        return _names_out(input_features, getattr(self, "feature_names_in_", None), fallback=list(self.kept_))
+        return _names_out(
+            input_features, getattr(self, "feature_names_in_", None), fallback=list(self.kept_)
+        )
 
 
 class DataFrameScaler(BaseEstimator, TransformerMixin):
@@ -572,4 +586,6 @@ class DataFrameScaler(BaseEstimator, TransformerMixin):
         Returns:
             Array of column names.
         """
-        return _names_out(input_features, getattr(self, "feature_names_in_", None), fallback=list(self.columns_))
+        return _names_out(
+            input_features, getattr(self, "feature_names_in_", None), fallback=list(self.columns_)
+        )

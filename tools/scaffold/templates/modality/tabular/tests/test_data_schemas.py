@@ -150,13 +150,17 @@ class TestRawSchema:
         with pytest.raises(SchemaViolation):
             RawDataSchema.validate(corrupted)
 
-    def test_rejects_duplicated_identifier(self, raw_dataset: pd.DataFrame, app_config: Any) -> None:
+    def test_rejects_duplicated_identifier(
+        self, raw_dataset: pd.DataFrame, app_config: Any
+    ) -> None:
         """Une clé dupliquée doit être refusée (integrité du jeu de données)."""
         identifier = app_config.data.id_column
         if not identifier:
             pytest.skip("aucune colonne identifiant déclarée")
         corrupted = raw_dataset.copy()
-        corrupted.loc[corrupted.index[1], identifier] = corrupted.loc[corrupted.index[0], identifier]
+        corrupted.loc[corrupted.index[1], identifier] = corrupted.loc[
+            corrupted.index[0], identifier
+        ]
         with pytest.raises(SchemaViolation):
             RawDataSchema.validate(corrupted)
 
@@ -218,7 +222,9 @@ class TestProcessedSchema:
 class TestInferenceSchema:
     """Contrat des payloads de prédiction."""
 
-    def test_accepts_payload_without_target(self, raw_dataset: pd.DataFrame, app_config: Any) -> None:
+    def test_accepts_payload_without_target(
+        self, raw_dataset: pd.DataFrame, app_config: Any
+    ) -> None:
         """Un payload d'inférence ne contient pas la cible : le contrat doit l'accepter."""
         payload = raw_dataset.drop(columns=[app_config.data.target]).head(10)
         validated = InferenceDataSchema.validate(payload)

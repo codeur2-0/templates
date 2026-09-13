@@ -97,7 +97,9 @@ def raw_loader(raw_project: tuple[ProjectPaths, str]) -> RawDataLoader:
 class TestRawDataLoader:
     """Chargement et validation des données brutes."""
 
-    def test_reads_and_validates(self, raw_loader: RawDataLoader, raw_dataset: pd.DataFrame) -> None:
+    def test_reads_and_validates(
+        self, raw_loader: RawDataLoader, raw_dataset: pd.DataFrame
+    ) -> None:
         """Le loader lit le Parquet et le retourne validé."""
         frame = raw_loader.load()
         assert len(frame) == len(raw_dataset)
@@ -120,7 +122,9 @@ class TestRawDataLoader:
         loader = RawDataLoader(paths, dataset_name=dataset_name, limit=40)
         assert len(loader.load()) == 40
 
-    def test_csv_fallback(self, raw_project: tuple[ProjectPaths, str], raw_dataset: pd.DataFrame) -> None:
+    def test_csv_fallback(
+        self, raw_project: tuple[ProjectPaths, str], raw_dataset: pd.DataFrame
+    ) -> None:
         """En l'absence de Parquet, le CSV est lu puis coercé par le schéma."""
         paths, dataset_name = raw_project
         (paths.raw_dir / f"{dataset_name}.parquet").unlink()
@@ -129,7 +133,9 @@ class TestRawDataLoader:
         frame = loader.load()
         assert len(frame) == len(raw_dataset)
 
-    def test_extra_column_is_rejected(self, raw_project: tuple[ProjectPaths, str], raw_dataset: pd.DataFrame, app_config: Any) -> None:
+    def test_extra_column_is_rejected(
+        self, raw_project: tuple[ProjectPaths, str], raw_dataset: pd.DataFrame, app_config: Any
+    ) -> None:
         """Une colonne non déclarée doit casser le chargement (dérive de la source)."""
         paths, dataset_name = raw_project
         corrupted = raw_dataset.copy()
@@ -139,7 +145,9 @@ class TestRawDataLoader:
         with pytest.raises(SchemaViolation):
             loader.load()
 
-    def test_validation_can_be_disabled(self, raw_project: tuple[ProjectPaths, str], raw_dataset: pd.DataFrame, app_config: Any) -> None:
+    def test_validation_can_be_disabled(
+        self, raw_project: tuple[ProjectPaths, str], raw_dataset: pd.DataFrame, app_config: Any
+    ) -> None:
         """``validate=False`` permet d'inspecter des données cassées sans exception."""
         paths, dataset_name = raw_project
         corrupted = raw_dataset.copy()
@@ -159,7 +167,10 @@ class TestRawDataLoader:
                 (name, getattr(col, "checks", []) or [])
                 for name, col in RawDataSchema.to_schema().columns.items()
             )
-            if any(getattr(check, "name", "") in {"ge", "greater_than_or_equal_to"} for check in check_list)
+            if any(
+                getattr(check, "name", "") in {"ge", "greater_than_or_equal_to"}
+                for check in check_list
+            )
         ]
         if not numeric:
             pytest.skip("aucune colonne numérique bornée")
@@ -176,7 +187,9 @@ class TestRawDataLoader:
 class TestProcessedDataLoader:
     """Chargement des matrices déjà transformées."""
 
-    def test_round_trip(self, raw_project: tuple[ProjectPaths, str], matrices: dict[str, Any]) -> None:
+    def test_round_trip(
+        self, raw_project: tuple[ProjectPaths, str], matrices: dict[str, Any]
+    ) -> None:
         """Une matrice sauvegardée puis rechargée reste conforme au contrat."""
         paths, _ = raw_project
         written = save_split(matrices["X_train"], paths, "features_train")
@@ -210,7 +223,9 @@ class TestInferenceDataLoader:
         validated = loader.load_from_frame(payload)
         assert len(validated) == 15
 
-    def test_load_from_json_file(self, raw_dataset: pd.DataFrame, app_config: Any, tmp_path: Path) -> None:
+    def test_load_from_json_file(
+        self, raw_dataset: pd.DataFrame, app_config: Any, tmp_path: Path
+    ) -> None:
         """Un fichier JSON (format d'échange API) est lu puis validé."""
         loader = InferenceDataLoader(ProjectPaths.from_root(tmp_path), dataset_name="inference")
         payload = raw_dataset.drop(columns=[app_config.data.target]).head(5)
@@ -234,7 +249,9 @@ class TestInferenceDataLoader:
 class TestDatasetSplitter:
     """Politique de split train / validation / test."""
 
-    def test_sizes_match_configuration(self, split_frames: Any, raw_dataset: pd.DataFrame, app_config: Any) -> None:
+    def test_sizes_match_configuration(
+        self, split_frames: Any, raw_dataset: pd.DataFrame, app_config: Any
+    ) -> None:
         """Les tailles observées respectent la configuration (à l'arrondi près)."""
         sizes = split_frames.sizes
         assert sum(sizes.values()) == len(raw_dataset)
@@ -247,7 +264,9 @@ class TestDatasetSplitter:
         else:
             assert split_frames.val is None
 
-    def test_stratification_preserves_class_balance(self, split_frames: Any, app_config: Any) -> None:
+    def test_stratification_preserves_class_balance(
+        self, split_frames: Any, app_config: Any
+    ) -> None:
         """La stratification conserve la proportion de la classe positive (± 5 points)."""
         target = app_config.data.target
         if target is None or not app_config.train.split.stratify:
@@ -259,7 +278,9 @@ class TestDatasetSplitter:
     def test_no_row_overlap(self, split_frames: Any, app_config: Any) -> None:
         """Aucune ligne ne doit apparaître dans deux splits (fuite de données)."""
         frames = [split_frames.train, split_frames.val, split_frames.test]
-        assert_no_overlap(*[frame for frame in frames if frame is not None], key=app_config.data.id_column)
+        assert_no_overlap(
+            *[frame for frame in frames if frame is not None], key=app_config.data.id_column
+        )
 
     def test_split_is_reproducible(self, raw_dataset: pd.DataFrame, app_config: Any) -> None:
         """Même graine ⇒ même split (reproductibilité exigée)."""
@@ -271,7 +292,9 @@ class TestDatasetSplitter:
         )
         pd.testing.assert_frame_equal(first.train, second.train)
 
-    def test_different_seed_changes_the_split(self, raw_dataset: pd.DataFrame, app_config: Any) -> None:
+    def test_different_seed_changes_the_split(
+        self, raw_dataset: pd.DataFrame, app_config: Any
+    ) -> None:
         """Une graine différente produit un split différent (le seed est bien utilisé)."""
         first = DatasetSplitter.from_config(app_config.model_dump(), seed=1).split(raw_dataset)
         second = DatasetSplitter.from_config(app_config.model_dump(), seed=2).split(raw_dataset)
@@ -291,12 +314,16 @@ class TestDatasetSplitter:
         with pytest.raises(ValueError, match="time_column"):
             DatasetSplitter(time_based=True)
 
-    def test_temporal_split_is_chronological(self, raw_dataset: pd.DataFrame, app_config: Any) -> None:
+    def test_temporal_split_is_chronological(
+        self, raw_dataset: pd.DataFrame, app_config: Any
+    ) -> None:
         """En split temporel, le passé entraîne et le futur est évalué."""
         time_column = app_config.data.time_column
         if not time_column:
             pytest.skip("ce projet n'a pas de colonne temporelle")
-        splitter = DatasetSplitter(test_size=0.2, val_size=0.15, time_based=True, time_column=time_column)
+        splitter = DatasetSplitter(
+            test_size=0.2, val_size=0.15, time_based=True, time_column=time_column
+        )
         splits = splitter.split(raw_dataset)
         assert splits.train[time_column].max() <= splits.test[time_column].min()
         if splits.val is not None:
