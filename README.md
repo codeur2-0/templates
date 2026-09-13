@@ -14,16 +14,19 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-`data-science/classification` — **prédiction d'attrition client (churn télécom)**, six stacks :
+**13 projets**, tous verts dans `tools/verify.py` (lint, formatage, typage, tests, six notebooks
+exécutés, pipeline complet `data → train → evaluate → predict`).
 
-| Projet | Stack | Modèle | ROC AUC (test) | PR AUC | Accuracy | F1 | Log loss | Durée `fit` |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| [`with-sklearn`](data-science/classification/with-sklearn) | scikit-learn | `random_forest` | 0,8654 | 0,7240 | 0,8175 | 0,6636 | 0,4190 | 0,73 s |
-| [`with-xgboost`](data-science/classification/with-xgboost) | XGBoost | `xgboost` | 0,8586 | 0,7140 | 0,7963 | 0,6418 | 0,4242 | 0,09 s |
-| [`with-lightgbm`](data-science/classification/with-lightgbm) | LightGBM | `lightgbm` | 0,8574 | 0,7167 | 0,7887 | 0,6318 | 0,4259 | 0,10 s |
-| [`with-pytorch`](data-science/classification/with-pytorch) | PyTorch | `mlp` (4 161 paramètres) | **0,8726** | **0,7352** | 0,7925 | 0,6570 | 0,4416 | 0,60 s |
-| [`with-keras`](data-science/classification/with-keras) | Keras (API fonctionnelle) | `mlp` (4 161 paramètres) | 0,8675 | 0,7306 | 0,8137 | **0,6740** | 0,4216 | 5,11 s |
-| [`with-tensorflow`](data-science/classification/with-tensorflow) | TensorFlow (`GradientTape`) | `mlp` (4 161 paramètres) | 0,8604 | 0,7230 | 0,7975 | 0,6463 | 0,4340 | 3,11 s |
+### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks
+
+| Projet | Stack | Modèle | ROC AUC (test) | PR AUC | Accuracy | F1 | Log loss |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-sklearn`](data-science/classification/with-sklearn) | scikit-learn | `random_forest` | 0,8654 | 0,7240 | **0,8175** | 0,6636 | 0,4190 |
+| [`with-xgboost`](data-science/classification/with-xgboost) | XGBoost | `xgboost` (47 rounds) | 0,8580 | 0,7049 | **0,8237** | 0,5889 | **0,3882** |
+| [`with-lightgbm`](data-science/classification/with-lightgbm) | LightGBM | `lightgbm` (72 rounds) | 0,8544 | 0,6925 | 0,8150 | 0,5843 | 0,3947 |
+| [`with-pytorch`](data-science/classification/with-pytorch) | PyTorch | `mlp` (4 161 paramètres) | **0,8727** | **0,7365** | 0,7937 | 0,6570 | 0,4388 |
+| [`with-keras`](data-science/classification/with-keras) | Keras (API fonctionnelle) | `mlp` (4 161 paramètres) | 0,8655 | 0,7282 | 0,8137 | **0,6711** | 0,4251 |
+| [`with-tensorflow`](data-science/classification/with-tensorflow) | TensorFlow (`GradientTape`) | `mlp` (4 161 paramètres) | 0,8709 | 0,7341 | 0,7863 | 0,6517 | 0,4515 |
 
 Chiffres mesurés sur le même jeu synthétique (4 000 clients, 15 colonnes, 25,5 % de churn),
 mêmes graines, mêmes 31 features après pré-traitement, mêmes définitions de métriques, split
@@ -37,6 +40,35 @@ bruit au regard de la variance d'un split. Le choix d'une stack se justifie donc
 l'**écosystème** (serving, GPU, compétences de l'équipe) et par l'**apprentissage**, pas par la
 performance brute. C'est exactement la conclusion que le dépôt veut rendre vérifiable plutôt que
 de l'asséner.
+
+### 1.2 `data-science/regression` — estimation de prix immobilier (AVM), six stacks
+
+Même cas d'usage, mêmes données, mêmes métriques : seul le modèle change. Cible `price_eur`
+(8 000 biens, 33 features après pré-traitement, split 65/15/20), seuil de conformité
+`RMSE ≤ 90 000 EUR`.
+
+| Projet | Stack | Modèle | RMSE (EUR) | MAE | R² | MAPE % | max_error |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-sklearn`](data-science/regression/with-sklearn) | scikit-learn | `hist_gradient_boosting` | 34 805 | 22 823 | 0,9496 | 7,51 | 279 811 |
+| [`with-xgboost`](data-science/regression/with-xgboost) | XGBoost | `xgboost` (374 rounds) | 33 674 | **22 013** | 0,9528 | **7,28** | 327 510 |
+| [`with-lightgbm`](data-science/regression/with-lightgbm) | LightGBM | `lightgbm` (387 rounds) | 33 353 | **21 897** | 0,9537 | **7,24** | 297 304 |
+| [`with-pytorch`](data-science/regression/with-pytorch) | PyTorch | `mlp` (13 057 paramètres) | **32 212** | 21 974 | **0,9568** | 7,46 | **273 692** |
+| [`with-keras`](data-science/regression/with-keras) | Keras (API fonctionnelle) | `mlp` (13 441 paramètres) | 34 127 | 22 465 | 0,9516 | 7,55 | 354 971 |
+| [`with-tensorflow`](data-science/regression/with-tensorflow) | TensorFlow (`GradientTape`) | `mlp` (13 441 paramètres) | 33 050 | 22 266 | 0,9546 | 7,70 | 348 765 |
+
+Lecture : ici les réseaux s'en sortent **mieux** que les boosters (normalisation interne de la
+cible continue + early stopping sur la validation), à l'inverse du cas churn — la comparaison des
+deux familles est précisément ce qui rend le choix de stack argumentable plutôt que dogmatique.
+
+### 1.3 `data-science/clustering` — segmentation d'une base clients retail, scikit-learn
+
+| Projet | Stack | Modèle | Silhouette | Calinski-Harabasz | Davies-Bouldin | ARI latent | Stabilité (ARI) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-sklearn`](data-science/clustering/with-sklearn) | scikit-learn | `kmeans` (k=6, 36 features) | 0,2057 | 232,89 | 1,6612 | 0,418 | 0,978 |
+
+Rapport de conformité **7/7** : qualité de structure, équilibre des tailles, stabilité par
+bootstrap, validité externe contre les segments latents du générateur, et profilage métier de
+chaque segment (le rapport nomme les segments et propose une action par segment).
 
 Chaque projet expose aussi : les six notebooks exécutés par la CI locale, les artefacts
 (`artifacts/models`, `artifacts/metrics`, `artifacts/reports`, `artifacts/figures`), une fiche
@@ -131,28 +163,36 @@ l'implémentation change. C'est ce qui rend la comparaison possible.
 | Stack | Ce qu'elle met en évidence | Persistance |
 | --- | --- | --- |
 | **scikit-learn** | `ColumnTransformer` appris sur le train uniquement, plusieurs algorithmes interchangeables, validation croisée | `model.joblib` |
-| **XGBoost** | Early stopping passé au **constructeur** (armé seulement si un split de validation existe), export natif `.json`, gestion des paramètres inutilisés selon l'algorithm | `model.joblib` + `.json` natif |
-| **LightGBM** | Early stopping par **callbacks de `fit`** (`eval_X`/`eval_y`), export natif `.txt` | `model.joblib` + `.txt` natif |
+| **XGBoost** | Early stopping natif passé au **constructeur** (armé seulement si un split de validation existe), registres `xgboost` / `xgboost_dart` / `xgboost_linear`, allow-list de paramètres par algorithme, pont `TrainingCallback` vers les callbacks du projet | `model.joblib` |
+| **LightGBM** | Early stopping par **callback de `fit`** (`eval_set` + `lightgbm.early_stopping`), croissance leaf-wise, `subsample` désactivé pour GOSS, early stopping indisponible pour DART, `best_iteration` réutilisé en prédiction | `model.joblib` |
 | **PyTorch** | Boucle d'époques écrite à la main : `DataLoader` semé, `forward`/`backward`/`step`, instantané et restauration du meilleur `state_dict` | checkpoint `model.pt` (poids + méta, rechargé en `weights_only=True`) |
-| **Keras** | API fonctionnelle : graphe déclaré puis `compile`/`fit`, callbacks natifs (`EarlyStopping(restore_best_weights)`, `ReduceLROnPlateau`, `TerminateOnNaN`) pontés vers les callbacks du projet, `class_weight` pour le déséquilibre | archive native `model.keras` + `model.meta.json` |
-| **TensorFlow** | Niveau le plus bas : modèle **subclassé**, couches maison (`DenseBlock`, `ResidualBlock`), pipeline `tf.data`, `GradientTape` + `tf.function`, pertes sur logits, écrêtage du gradient, pondération d'échantillons | poids `model.weights.h5` + `model.meta.json` |
+| **Keras** | API fonctionnelle : graphe déclaré puis `compile`/`fit`, callbacks natifs (`EarlyStopping(restore_best_weights)`, `ReduceLROnPlateau`, `TerminateOnNaN`) pontés vers les callbacks du projet, `class_weight` pour le déséquilibre | archive native `model.keras` + sidecar `model.config.json` |
+| **TensorFlow** | Niveau le plus bas : modèle **subclassé**, couches maison (`DenseBlock`, `ResidualBlock`), pipeline `tf.data`, `GradientTape` + `tf.function`, pertes sur logits, écrêtage du gradient, pondération d'échantillons | poids `model.weights.h5` + sidecar `model.config.json` |
 
 Pièges documentés dans le code (et résolus) que ces stacks partagent :
 
-- **Les schedules Keras/TensorFlow se paramètrent en pas d'optimiseur, pas en époques.** Avec
+- **Les schedules Keras se paramètrent en pas d'optimiseur, pas en époques.** Avec
   `decay_steps=epochs`, le taux d'apprentissage tombe à zéro dès la première époque et
-  l'apprentissage se fige silencieusement. `steps_per_epoch_` est calculé avant compilation,
-  journalisé, persisté et restauré au chargement.
+  l'apprentissage se fige silencieusement. `steps_per_epoch` est calculé avant compilation et
+  journalisé dans le contexte d'entraînement.
 - **Un modèle subclassé n'a pas de graphe sérialisable** : on persiste les poids et on reconstruit
-  l'architecture depuis la configuration, d'où le sidecar JSON obligatoire.
-- **On n'importe jamais un framework lourd seulement pour le semer ou lire sa version.** Faire
-  cohabiter PyTorch et TensorFlow dans un même processus peut déclencher un conflit de runtime
-  OpenMP (segfault) : `set_seed` et les collectes de versions se limitent aux modules déjà chargés.
-- **`BatchNormalization` casse sur un lot de taille 1** : le dernier lot est écarté quand
-  `n_samples % batch_size == 1`.
-- **`torch.load` est en `weights_only=True` par défaut depuis torch 2.x** : les tableaux NumPy ne
-  passent pas dans le checkpoint, les classes sont donc sérialisées en listes.
-- **`ReduceLROnPlateau` n'accepte plus `verbose=`** (supprimé depuis torch 2.7).
+  l'architecture depuis la configuration, d'où le sidecar JSON obligatoire (et les **noms de
+  couches explicites**, puisque `load_weights` apparie les variables par nom et que Keras les
+  numérote sinon depuis un compteur global au processus).
+- **`tf.function` capture les variables du réseau clos** : un pas d'entraînement compilé au niveau
+  module réutiliserait le graphe du premier réseau et échouerait au deuxième run
+  (*« only supports singleton tf.Variables »*). Le pas compilé est donc lié à un réseau précis.
+- **XGBoost 3.2 : jamais de `set_params` après construction.** L'appel reconfigure le booster C++
+  et sérialise mal un `eval_metric` en liste (*« Unknown metric function ['logloss', 'auc'] »*
+  remonté plus tard, à la prédiction). Les callbacks passent au constructeur, puis sont détachés
+  par affectation directe.
+- **Rien de picklable ne doit être défini localement** : ponts de callbacks (`RoundBridge`) et
+  constructeurs du registre d'algorithmes sont des objets de **niveau module** — une lambda dans
+  `AlgorithmSpec.builder` casse `joblib.dump` de tout le modèle.
+- **`BatchNorm1d` casse sur un lot de taille 1** à l'entraînement : le dernier lot est écarté quand
+  il est singleton (la régression du dépôt l'active, `batch_norm: true`).
+- **`torch.load` est en `weights_only=True` par défaut depuis torch 2.x** : ni tableaux NumPy, ni
+  `TorchVersion` ne passent dans le checkpoint — classes sérialisées en listes, version en `str`.
 
 ---
 
@@ -222,17 +262,26 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 
 ## 7. Feuille de route
 
-La famille `data-science/classification` est complète (six stacks). Suite du plan, par ordre de
-valeur pédagogique :
+État du générateur : `registry/families.yaml` déclare **30 familles** et `registry/stacks.yaml`
+**18 stacks** ; les couches `base/`, `modality/tabular/`, `task/{classification,regression,clustering}/`,
+`family/{binary_classification,regression,clustering}/` et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/`
+sont écrites et vérifiées. Ce qui reste, par ordre de valeur pédagogique :
 
-1. `data-science/regression`, `clustering`, `time-series`, `recommendation`, `anomaly-detection`
-   — les contrats `BaseModel`, les registres et le générateur de notebooks les acceptent déjà ;
-   les tâches sont déclarées dans `ARCHITECTURES_BY_TASK` de chaque stack.
-2. `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow, GitHub Actions + tox),
-   `analytics/` (rapports Jinja2, monitoring de drift SciPy).
-3. `ai-eng/` (LangChain, Transformers) et serving (FastAPI).
-4. `computer-vision/` et `nlp/` (spaCy, Transformers), avec des générateurs de données
-   synthétiques adaptés à chaque modalité.
+1. **Familles tabulaires restantes** — `multiclass_classification`, `anomaly_detection`,
+   `time_series_forecasting`, `recommendation`. Les métriques existent déjà dans
+   `losses_metrics.py` (macro-F1, MCC, recall@top-k, precision@budget, MAPE/sMAPE/MASE,
+   Precision@K / NDCG@K / MAP@K) et les registres de stacks déclarent déjà `isolation_forest`
+   (sklearn) et `autoencoder` (pytorch/tensorflow). Manquent : la couche `task/<tâche>`
+   (évaluateur, rapport, prédicteur, figures), la couche `family/` (générateur + valeurs par
+   défaut) et les branches correspondantes du générateur de notebooks.
+2. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
+   GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
+   `ai-eng/` (LangChain, Transformers, serving FastAPI), `computer-vision/` et `nlp/`
+   (spaCy, Transformers). Chacune demande une nouvelle couche `modality/` (loaders,
+   pré-traitement, pipelines, tests) en plus des couches `family/` et `task/`.
+3. **Stacks déjà déclarées, non implémentées** — `spacy`, `transformers`, `langchain`, `duckdb`,
+   `pandas`, `prefect`, `mlflow`, `fastapi`, `scipy`, `pandera` : l'entrée de registre existe,
+   le dossier `templates/stack/<clé>/src/models/` reste à écrire.
 
 Chaque ajout suit la même procédure : entrée de registre -> templates de stack ou de famille ->
 manifeste -> `build` -> `verify` -> commit.
