@@ -1,0 +1,221 @@
+# ==============================================================================================
+# data-science / time-series-forecasting / with-sklearn
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/time_series_forecasting.yaml` (prévision de la
+# consommation électrique régionale pour un gestionnaire de réseau de distribution). Ce manifeste
+# ne décrit QUE ce qui change avec la stack : identité du projet, modèle et point de fonctionnement.
+# ==============================================================================================
+
+key: ds-forecasting-sklearn
+title: "Prévision de consommation électrique multi-horizons avec scikit-learn"
+summary: >-
+  Pipeline de prévision de bout en bout (série quotidienne synthétique de consommation régionale ->
+  expansion en couples origine/horizon avec contrat d'antériorité -> contrats Pandera -> features de
+  décalage, de momentum et de thermo-sensibilité -> gradient boosting par histogrammes -> MAPE et
+  MASE ventilés par horizon, backtest à origine glissante, comparaison aux références naïves,
+  intervalles par quantiles de résidus, publication des sept prochains jours) pour une équipe
+  Prévisions, entièrement piloté par Hydra et structuré en objets testables. La vérité terrain du
+  jour cible (`load_mw`, `event_type`) est une métadonnée : elle sert à mesurer, jamais à entraîner.
+
+family: time_series_forecasting
+domain: data-science
+problem: time-series-forecasting
+stack: sklearn
+project_slug: electricity-load-forecasting-sklearn
+package_name: load_forecast_sklearn
+
+model:
+  display_name: "Gradient boosting par histogrammes (HistGradientBoostingRegressor)"
+  algorithm: hist_gradient_boosting
+  rationale: >-
+    Le gradient boosting par histogrammes est le meilleur rapport précision/coût de scikit-learn
+    pour une prévision tabulaire de consommation : il apprend sans transformation les **interactions**
+    qui font la prévision électrique (température x jour de la semaine x niveau récent), il est
+    **natif valeurs manquantes** (un capteur météo en panne ne casse pas la publication du matin),
+    il traite l'horizon comme une feature ordinaire — un seul modèle couvre J+1 à J+7 au lieu de
+    sept modèles à maintenir — et il reste déterministe à graine fixée, ce qui est une exigence
+    d'astreinte. Ses limites sont documentées ici plutôt que cachées : entraîné sur une perte
+    quadratique il optimise la RMSE alors que le métier pilote au MAPE, il extrapole mal au-delà du
+    domaine vu en entraînement (une vague de froid inédite sera sous-prévue) et il n'a aucune
+    notion d'ordre temporel : toute la structure temporelle doit être injectée par les features, ce
+    qui rend le contrat d'antériorité critique. La comparaison au notebook 04 avec Ridge (linéaire,
+    interprétable, mais aveugle aux interactions sans feature engineering manuel), une forêt
+    aléatoire et un SVR montre ce que l'on gagne et ce que l'on perd.
+  alternatives:
+    - "ridge : linéaire, coefficients directement lisibles en MW par degré (la thermo-sensibilité métier), mais incapable de capter les interactions sans features fabriquées à la main"
+    - "random_forest : robuste et peu sensible au réglage, mais plus lent et moins précis que le boosting par histogrammes sur ce volume"
+    - "gradient_boosting : même famille, implémentation séquentielle historique, deux à cinq fois plus lente à précision comparable"
+    - "svm (SVR, noyau RBF) : excellent sur petits volumes, mais coût quadratique et aucune gestion native des manquants"
+    - "référence naïve saisonnière : ce n'est pas un algorithme du registre, mais c'est le seul adversaire qui compte — tout modèle qui ne la bat pas de 30 % en MAPE n'a aucune valeur opérationnelle"
+    - "LSTM / N-BEATS (voir les variantes deep learning de cette famille) : apprennent la saisonnalité sans features manuelles, mais exigent beaucoup plus de données et perdent l'explicabilité par permutation"
+  # Les valeurs ci-dessous ne sont pas des défauts d'éditeur : elles sont le point retenu par un
+  # balayage en trois étapes sur le split chronologique de **validation** (jamais sur le test),
+  # moyenné sur cinq graines (42, 7, 123, 2024, 999) parce qu'un écart inférieur à l'écart-type
+  # entre graines n'est pas un gain. Protocole et mesures : notebook 04 (exploration des modèles)
+  # et notebook 05 (entraînement).
+  params:
+    # Nombre d'itérations. Le balayage {250, 400, 700, 1100} x {0.03, 0.05, 0.08, 0.12} est plat à
+    # ±0,1 point de MAPE près : au-delà de 250 itérations l'ensemble n'apporte plus rien sur la
+    # validation et ne fait que rallonger l'entraînement. 250 est donc le point le plus économe
+    # parmi les équivalents statistiques.
+    max_iter: 250
+    # Pas d'apprentissage : 0.05 plutôt que 0.06 (valeur initiale) ou 0.12, qui dégrade la
+    # validation de 0,08 point en moyenne et augmente surtout sa dispersion entre graines.
+    learning_rate: 0.05
+    # Le réglage le plus payant du balayage. 31 feuilles (défaut scikit-learn) sur ~3 100 lignes
+    # d'entraînement laissait un écart train/validation de 0,7 % contre 4,1 % : l'ensemble
+    # mémorisait les pointes isolées. À 15 feuilles le MAPE de validation passe de 3,71 % à 3,55 %
+    # et l'écart se resserre, ce qui est exactement l'effet recherché sur une série bruitée.
+    max_leaf_nodes: 15
+    # Garde-fou contre la mémorisation d'un jour unique (un arrêt industriel ne doit pas devenir
+    # une règle générale). {5, 10, 20, 40} sont indiscernables à dispersion près ; 20 est retenu
+    # comme valeur médiane, la plus stable d'une graine à l'autre.
+    min_samples_leaf: 20
+    # {0.0, 1.0, 5.0} ne changent rien de mesurable : la régularisation est portée par la faible
+    # complexité des arbres et par le sous-échantillonnage de colonnes ci-dessous. 1.0 reste une
+    # valeur défensive, utile si la base d'entraînement grossit.
+    l2_regularization: 1.0
+    # Deuxième réglage payant : chaque arbre ne voit que la moitié des colonnes (20 sur 41 après
+    # encodage). Cela décorrèle les arbres, ce qui compte ici parce que plusieurs colonnes sont des
+    # transformations monotones les unes des autres (température, anomalie, degrés-jours) et
+    # concentreraient sinon tous les splits sur la même variable. MAPE de validation : 3,44 %
+    # contre 3,55 % en utilisant toutes les colonnes.
+    max_features: 0.5
+    # Perte quadratique alors que le métier pilote au MAPE : choix assumé et documenté. L'erreur
+    # absolue (`absolute_error`) aligne la perte sur le MAPE mais dégrade la stabilité des
+    # gradients ; la comparaison des deux est un exercice du notebook 05.
+    loss: squared_error
+    # L'arrêt anticipé interne est désactivé : la validation chronologique est déjà portée par le
+    # split et par le backtest de l'évaluateur, et deux mécanismes d'arrêt concurrents rendent le
+    # résultat dépendant de l'ordre des tirages.
+    early_stopping: false
+    random_state: 42
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (8 combinaisons : l'exécution reste
+  # < 2 min). Elle est centrée sur le point retenu et porte sur les deux réglages qui ont réellement
+  # bougé la validation, pour que le notebook rejoue la décision au lieu de la paraphraser.
+  notebook_param_grid:
+    max_leaf_nodes: [15, 31]
+    max_features: [0.5, 1.0]
+    learning_rate: [0.04, 0.08]
+  # Taille des fixtures pytest : 400 lignes = 100 origines x 4 horizons, assez pour que chaque
+  # horizon reste présent dans les trois splits et que le backtest ait plusieurs replis.
+  test_n_samples: 400
+  # Options du générateur synthétique, exposées dans `conf/data/default.yaml` et transmises par
+  # `SyntheticDataGenerator.from_config` (aucune valeur codée en dur dans le code).
+  data_conf:
+    horizons: [1, 2, 3, 7]
+    start_date: "2021-01-01"
+    warmup_days: 40
+    base_load_mw: 2100.0
+    annual_amplitude: 0.18
+    trend_per_year: -0.008
+    heat_gradient: 0.035
+    # Gradient de climatisation trois fois plus faible que le gradient de chauffe : le parc
+    # français est peu climatisé. Cette asymétrie est réelle, mesurable, et elle explique
+    # pourquoi une canicule coûte moins cher en erreur de prévision qu'une vague de froid.
+    cool_gradient: 0.012
+    holiday_drop: 0.13
+    school_holiday_lift: 0.015
+    noise_sigma: 0.022
+    noise_ar: 0.60
+    forecast_error_j1: 0.35
+    forecast_error_growth: 0.14
+    missing_temperature_rate: 0.03
+    # Jours d'épisode sur toute la période simulée (~3,3 ans) : assez pour que l'analyse d'erreur
+    # par régime dispose de quelques dizaines de jours cibles, pas assez pour que le modèle les
+    # apprenne par coeur — c'est exactement la situation réelle d'un gestionnaire de réseau.
+    cold_snap_days: 18
+    heatwave_days: 18
+    shutdown_days: 9
+  # Critères de succès du cas d'usage, lus par le rapport d'évaluation.
+  #
+  # Calibration : les MAPE sont exprimés en pourcents, comme les métriques `mape` et `smape` du
+  # registre. Le plancher structurel est d'environ 1,5 % (bruit AR(1) de 2,2 % plus l'erreur de
+  # prévision météo) : un MAPE proche de 0 signerait une fuite temporelle, pas une performance.
+  # Les seuils sont calibrés sur les mesures réelles de ce générateur (seed 42, 4 800 lignes) et
+  # laissent une marge supérieure à la dispersion entre graines. Un seuil non atteint n'est pas
+  # caché : le verdict du rapport l'affiche en échec, avec la valeur mesurée.
+  # Unité : tout ce qui est un taux est exprimé en **pourcent** (30.0 et non 0.30), parce que les
+  # métriques du rapport le sont aussi ; `mase_max` est un ratio sans unité. Les deux clés de taux
+  # dont la valeur documentée est ≥ 10 sont converties automatiquement si elles sont déclarées en
+  # fraction, avec un avertissement dans le journal.
+  quality:
+    # MAPE global sur le test. Plancher structurel ~2,8 % (bruit AR(1) multiplicatif de 2,75 %
+    # d'écart-type, plus l'erreur de prévision météo) : ce seuil est donc atteignable sans fuite, et
+    # un MAPE proche de 0 signerait une fuite temporelle et non une performance.
+    mape_max: 4.0
+    # L'horizon long est le plus difficile (prévision météo dégradée, information d'origine plus
+    # ancienne) : on tolère 1,5 fois le seuil global.
+    mape_long_horizon_max: 6.0
+    mase_max: 0.75
+    # Gain minimal sur la référence naïve saisonnière : en dessous de 30 %, le modèle ne justifie
+    # pas sa complexité d'exploitation. Mesuré : ~55 %.
+    improvement_vs_naive_min: 30.0
+    # Biais moyen (surestimation ou sous-estimation systématique), en % du niveau de consommation.
+    bias_max: 1.5
+    # Couverture réalisée de l'intervalle publié, dont le niveau nominal est 90 %. Le seuil est
+    # volontairement sous le nominal : la période de test contient une vague de froid absente de la
+    # fenêtre de calibration, et aucune calibration honnête ne peut couvrir un régime qu'elle n'a
+    # jamais vu. Le rapport ventile donc la couverture entre jours calmes (~89 %, proche du nominal)
+    # et jours de régime extrême (très basse), et c'est cette ventilation qui est exploitable.
+    interval_coverage_min: 82.0
+    # Écart-type du MAPE entre les replis du backtest à origine glissante : mesure la stabilité
+    # opérationnelle, pas la performance.
+    backtest_spread_max: 2.0
+  model_conf:
+    # Aucune validation croisée aléatoire : sur une série temporelle elle mélange les époques et
+    # produit un score optimiste. La validation temporelle est portée par le backtest à origine
+    # glissante (`src/evaluation/evaluator.py`), qui respecte l'antériorité de l'information.
+    cross_validation:
+      enabled: false
+      folds: 3
+      strategy: kfold
+  root_conf:
+    load_forecasting:
+      # Colonne portant l'horizon de prévision. Lue par l'évaluateur (ventilation par horizon) et
+      # par le prédicteur (intervalle et erreur attendue) : aucun nom de colonne n'est codé en dur.
+      horizon_column: horizon_days
+      # Horizons publiés chaque matin. Doivent rester un sous-ensemble des horizons du générateur :
+      # un horizon jamais vu en entraînement serait de l'extrapolation pure.
+      horizons: [1, 2, 3, 7]
+      # Horizon considéré comme « long » dans les rapports et les alertes de dérive.
+      long_horizon: 7
+      # Niveau nominal de l'intervalle publié avec la prévision ponctuelle.
+      interval_level: 0.90
+      # Construction de l'intervalle : prédiction conforme **normalisée**, par horizon. Les scores
+      # de calibration sont les résidus absolus de la validation divisés par une échelle connue à
+      # l'origine. Deux raisons à ce choix, mesurées sur ce jeu :
+      #   - les résidus sont autocorrélés et leur dispersion croît avec l'horizon, donc une
+      #     hypothèse gaussienne globale donne un intervalle trop étroit au J+7 et trop large au J+1 ;
+      #   - le bruit de la série est multiplicatif, donc la dispersion des résidus est proportionnelle
+      #     au niveau de consommation. Un intervalle calibré sur une fenêtre estivale calme est deux
+      #     fois trop étroit pour une pointe hivernale : normaliser par la dernière valeur connue
+      #     fait passer la couverture réalisée de 73 % à 85 %.
+      interval_method: normalized_conformal
+      # Échelle de dispersion de l'intervalle normalisé. Doit être connue à l'origine (jamais la
+      # vérité du jour cible) et proportionnelle à la dispersion des résidus.
+      interval_scale_column: load_last_observed
+      # Nombre de replis du backtest à origine glissante (fenêtre d'entraînement étendue à chaque
+      # repli, jamais mélangée : c'est l'équivalent temporel d'une validation croisée).
+      backtest_folds: 5
+      # Au-delà de ce MAPE par horizon (en pourcents), la prévision est publiée avec l'indicateur
+      # « à revoir par un analyste » plutôt qu'engagée telle quelle.
+      review_mape_threshold: 6.0
+      # Écart relatif à la prévision au-delà duquel une publication est signalée comme atypique
+      # (garde-fou contre un modèle qui décroche après une rupture de régime).
+      sanity_max_relative_change: 0.35
+
+learning_objectives:
+  - "Construire un jeu supervisé par expansion temporelle (origine x horizon) et formaliser le contrat d'antériorité de chaque feature : connue à l'origine, connue par avance, ou interdite."
+  - "Comprendre pourquoi un split chronologique s'impose et ce que coûte concrètement une validation croisée aléatoire sur une série temporelle."
+  - "Comparer un modèle appris à trois références triviales (persistance, naif saisonnier, moyenne glissante) et quantifier la valeur ajoutée réelle plutôt que le R²."
+  - "Choisir les bonnes métriques de prévision : MAPE et ses pièges (asymétrie, division par zéro), sMAPE, MASE, et toujours ventiler par horizon."
+  - "Valider par backtest à origine glissante et lire la stabilité de l'erreur dans le temps plutôt qu'un score unique."
+  - "Modéliser la thermo-sensibilité (MW par degré) et les saisonnalités (annuelle, hebdomadaire, jours fériés, vacances scolaires) sans les confondre."
+  - "Traiter les manquants d'une variable exogène (capteur météo en panne, biaisés vers l'hiver) sans imputation silencieuse."
+  - "Passer d'une prévision ponctuelle à un intervalle exploitable, construit par horizon, et mesurer sa couverture réelle."
+  - "Diagnostiquer les résidus d'une prévision : autocorrélation, saisonnalité résiduelle, biais par régime, par horizon et par mois."
+  - "Analyser les erreurs sur les épisodes extrêmes (vague de froid, canicule, arrêt industriel) et produire des recommandations opérationnelles pour l'astreinte et les achats."
+  - "Industrialiser l'ensemble : configuration Hydra, artefacts traçables, tests pytest, rapports générés, prévision batch et unitaire."

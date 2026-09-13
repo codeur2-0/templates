@@ -1,0 +1,49 @@
+# =================================================================================================
+# Modèle : Gradient boosting par histogrammes (HistGradientBoostingRegressor)
+# -------------------------------------------------------------------------------------------------
+# Le gradient boosting par histogrammes est le meilleur rapport précision/coût de scikit-learn
+# pour une prévision tabulaire de consommation : il apprend sans transformation les
+# **interactions** qui font la prévision électrique (température x jour de la semaine x niveau
+# récent), il est **natif valeurs manquantes** (un capteur météo en panne ne casse pas la
+# publication du matin), il traite l'horizon comme une feature ordinaire — un seul modèle couvre
+# J+1 à J+7 au lieu de sept modèles à maintenir — et il reste déterministe à graine fixée, ce qui
+# est une exigence d'astreinte. Ses limites sont documentées ici plutôt que cachées : entraîné sur
+# une perte quadratique il optimise la RMSE alors que le métier pilote au MAPE, il extrapole mal
+# au-delà du domaine vu en entraînement (une vague de froid inédite sera sous-prévue) et il n'a
+# aucune notion d'ordre temporel : toute la structure temporelle doit être injectée par les
+# features, ce qui rend le contrat d'antériorité critique. La comparaison au notebook 04 avec
+# Ridge (linéaire, interprétable, mais aveugle aux interactions sans feature engineering manuel),
+# une forêt aléatoire et un SVR montre ce que l'on gagne et ce que l'on perd.
+#
+# Alternatives considérées : ridge : linéaire, coefficients directement lisibles en MW par degré (la thermo-sensibilité métier), mais incapable de capter les interactions sans features fabriquées à la main, random_forest : robuste et peu sensible au réglage, mais plus lent et moins précis que le boosting par histogrammes sur ce volume, gradient_boosting : même famille, implémentation séquentielle historique, deux à cinq fois plus lente à précision comparable, svm (SVR, noyau RBF) : excellent sur petits volumes, mais coût quadratique et aucune gestion native des manquants, référence naïve saisonnière : ce n'est pas un algorithme du registre, mais c'est le seul adversaire qui compte — tout modèle qui ne la bat pas de 30 % en MAPE n'a aucune valeur opérationnelle, LSTM / N-BEATS (voir les variantes deep learning de cette famille) : apprennent la saisonnalité sans features manuelles, mais exigent beaucoup plus de données et perdent l'explicabilité par permutation.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.max_iter=...
+# =================================================================================================
+
+name: "Gradient boosting par histogrammes (HistGradientBoostingRegressor)"
+algorithm: hist_gradient_boosting
+class: SklearnModel
+task: forecasting
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `SklearnModel(params=...)` (voir src/models/model.py).
+params:
+  max_iter: 250
+  learning_rate: 0.05
+  max_leaf_nodes: 15
+  min_samples_leaf: 20
+  l2_regularization: 1.0
+  max_features: 0.5
+  loss: squared_error
+  early_stopping: false
+  random_state: 42
+
+# --- options spécifiques à la stack `sklearn` ---------------------------------------
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold

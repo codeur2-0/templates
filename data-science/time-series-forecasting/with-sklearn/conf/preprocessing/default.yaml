@@ -1,0 +1,80 @@
+# =================================================================================================
+# Preprocessing & feature engineering
+# -------------------------------------------------------------------------------------------------
+# Décrit le pipeline appliqué aux données (nettoyage, encodage, scaling) ainsi que les features
+# dérivées construites par `src/features/build_features.py`.
+#
+# Règle d'or : tout ce qui est **appris** sur les données (moyennes, médianes, catégories,
+# encodeurs) doit être appris sur le train uniquement, puis appliqué au val/test. C'est le rôle
+# du pipeline scikit-learn encapsulé dans `src/preprocessing/pipelines.py`.
+# =================================================================================================
+
+numeric:
+  imputer: median
+  imputer_fill_value: 0.0
+  clip_outliers: false
+  clip_quantiles:
+  - 0.001
+  - 0.999
+  scaler: standard
+  log1p_columns: []
+categorical:
+  imputer: most_frequent
+  imputer_fill_value: unknown
+  encoder: onehot
+  handle_unknown: ignore
+  min_frequency: 0.01
+  max_categories: 12
+features:
+- type: ratio
+  name: load_momentum_7_28
+  numerator: load_rolling_mean_7d
+  denominator: load_rolling_mean_28d
+  epsilon: 1.0
+- type: difference
+  name: load_gap_to_seasonal
+  left: load_last_observed
+  right: load_seasonal_naive
+- type: boolean_flag
+  name: is_cold_snap_forecast
+  column: temperature_forecast_c
+  operator: lt
+  value: 2.0
+- type: boolean_flag
+  name: is_heatwave_forecast
+  column: temperature_forecast_c
+  operator: gt
+  value: 27.0
+- type: difference
+  name: temperature_forecast_change
+  left: temperature_forecast_c
+  right: temperature_forecast_prev_c
+- type: boolean_flag
+  name: is_long_horizon
+  column: horizon_days
+  operator: gt
+  value: 3.0
+- type: bin
+  name: load_level_bucket
+  column: load_rolling_mean_28d
+  method: quantile
+  bins: 4
+- type: group_stat
+  name: median_load_by_target_weekday
+  group_by: target_weekday
+  value_column: load_rolling_mean_7d
+  agg: median
+- type: datetime_parts
+  name: origin_period
+  column: origin_date
+  prefix: origin
+  parts:
+  - year
+  - quarter
+columns: {}
+validation:
+  raw: true
+  processed: true
+  inference: true
+  strict: true
+  lazy: false

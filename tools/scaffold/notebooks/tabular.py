@@ -39,6 +39,13 @@ NB_ROWS = 1500
 #: Volume généré dans les notebooks de détection d'anomalies : les positifs sont si rares (~1,8 %)
 #: qu'un échantillon réduit ne laisserait que quelques fraudes par split (métriques illisibles).
 NB_ROWS_ANOMALY = 12000
+
+#: Volume généré dans les notebooks de prévision. Une série saisonnière doit couvrir plusieurs
+#: cycles annuels pour que le split chronologique de validation et le backtest aient du sens : avec
+#: 1 500 lignes (≈ 1 an), la validation tomberait sur une seule saison et le backtest n'aurait que
+#: deux ou trois replis. 4 800 lignes = 1 200 origines x 4 horizons ≈ 3,3 ans, soit le volume
+#: nominal du pipeline — les chiffres des notebooks restent comparables à ceux de `make train`.
+NB_ROWS_FORECAST = 4800
 #: Époques utilisées par les notebooks pour une stack sans boucle d'époques (sans effet).
 NB_EPOCHS_DEFAULT = 3
 #: Époques utilisées par les notebooks pour une stack itérative (deep learning).
@@ -104,6 +111,23 @@ def _tokens(context: NotebookContext) -> dict[str, str]:
     }
 
 
+def _is_forecasting(context: NotebookContext) -> bool:
+    """Return ``True`` when the project predicts a future value of a time series.
+
+    Une prévision est une régression sur une cible future, donc :func:`_is_regression` renvoie aussi
+    ``True``. Ce test doit être évalué **avant** le sien dans tous les aiguillages, sinon un projet
+    de prévision hérite des cellules de régression (distribution de la cible, fourchette de prix)
+    au lieu des siennes (saisonnalités, contrat d'antériorité, références naïves).
+
+    Args:
+        context: Notebook context.
+
+    Returns:
+        ``True`` for a forecasting task, ``False`` otherwise.
+    """
+    return str(getattr(context.spec.metrics, "task", "")) == "forecasting"
+
+
 def _is_regression(context: NotebookContext) -> bool:
     """Return ``True`` when the project predicts a continuous target.
 
@@ -144,11 +168,17 @@ def _notebook_rows(context: NotebookContext) -> int:
     """Return the number of rows generated inside the notebooks.
 
     Les notebooks travaillent d'ordinaire sur un échantillon réduit (:data:`NB_ROWS`) pour rester
-    sous la minute. La détection d'anomalies fait exception : avec une prévalence de ~1,8 %, un
-    échantillon de 1 500 lignes ne laisserait que quelques fraudes dans les splits de validation et
-    de test, et les métriques affichées seraient du bruit. On génère donc le volume complet — les
-    chiffres du notebook restent ainsi comparables à ceux de ``make train``, au prix d'une exécution
-    un peu plus longue (largement sous le timeout par cellule).
+    sous la minute. Deux familles font exception :
+
+    * la détection d'anomalies (:data:`NB_ROWS_ANOMALY`), parce qu'avec une prévalence de ~1,8 % un
+      échantillon de 1 500 lignes ne laisserait que quelques fraudes par split et les métriques
+      affichées seraient du bruit ;
+    * la prévision (:data:`NB_ROWS_FORECAST`), parce qu'une série saisonnière a besoin de plusieurs
+      cycles annuels pour qu'un split chronologique et un backtest soient lisibles.
+
+    Dans les deux cas on génère le volume nominal du pipeline : les chiffres du notebook restent
+    comparables à ceux de ``make train``, au prix d'une exécution un peu plus longue (largement sous
+    le timeout par cellule).
 
     Args:
         context: Notebook context.
@@ -156,7 +186,11 @@ def _notebook_rows(context: NotebookContext) -> int:
     Returns:
         The notebook sample size.
     """
-    return NB_ROWS_ANOMALY if _is_anomaly(context) else NB_ROWS
+    if _is_anomaly(context):
+        return NB_ROWS_ANOMALY
+    if _is_forecasting(context):
+        return NB_ROWS_FORECAST
+    return NB_ROWS
 
 
 def _render(source: str, context: NotebookContext) -> str:
@@ -384,6 +418,10 @@ def prepare_matrices(frame: pd.DataFrame, config: Any) -> dict[str, Any]:
         "X_test": X_test,
         "y_test": y_test,
         "feature_names": list(pipeline.feature_names_out),
+        # Colonnes de la matrice **avant** pré-traitement (donc avant one-hot). Indispensables dès
+        # qu'un notebook ré-applique le pipeline à un nouveau cadre : sélectionner les colonnes de
+        # `X_train` (après one-hot) sur un cadre enrichi lève un KeyError sur les modalités.
+        "frame_columns": list(X_train_frame.columns),
     }
 
 
@@ -617,7 +655,16 @@ for column in categorical_columns:
     ]
 
     if data.target:
-        if _is_regression(context):
+        if _is_forecasting(context):
+            # La cible d'une prévision n'a pas une « distribution » à décrire mais une structure
+            # temporelle : saisonnalités superposées, thermo-sensibilité asymétrique, régimes
+            # exceptionnels — et un contrat d'antériorité à auditer avant toute modélisation.
+            from tools.scaffold.notebooks.forecasting import (
+                structure_cells as forecasting_structure_cells,
+            )
+
+            cells += forecasting_structure_cells(context)
+        elif _is_regression(context):
             from tools.scaffold.notebooks.regression import target_cells
 
             cells += target_cells(context)
@@ -2375,7 +2422,27 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
     """
     error_analysis = build_06_error_analysis
     model_exploration = build_04_model_exploration
-    if _is_regression(context):
+    training = build_05_training
+    if _is_forecasting(context):
+        # En prévision, les trois notebooks d'analyse changent de questions : l'exploration part du
+        # plancher naïf et se termine par une sonde de fuite ; l'entraînement oppose validation
+        # chronologique et validation aléatoire, arbitre la perte et audite les artefacts ;
+        # l'analyse d'erreurs ventile par horizon, par régime et par saison, puis mesure la
+        # couverture réelle des intervalles et le recalibrage adaptatif.
+        from tools.scaffold.notebooks.forecasting import (
+            build_04_model_exploration as build_04_forecasting,
+        )
+        from tools.scaffold.notebooks.forecasting import (
+            build_05_training as build_05_forecasting,
+        )
+        from tools.scaffold.notebooks.forecasting import (
+            build_06_error_analysis as build_06_forecasting,
+        )
+
+        model_exploration = build_04_forecasting
+        training = build_05_forecasting
+        error_analysis = build_06_forecasting
+    elif _is_regression(context):
         # L'analyse d'erreurs d'une cible continue n'a ni matrice de confusion ni seuil à arbitrer.
         from tools.scaffold.notebooks.regression import (
             build_06_error_analysis as build_06_regression,
@@ -2387,6 +2454,8 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
         # affectations, et l'analyse finale sur les profils de segments et leur validité externe.
         from tools.scaffold.notebooks.clustering import (
             build_04_model_exploration as build_04_clustering,
+        )
+        from tools.scaffold.notebooks.clustering import (
             build_06_error_analysis as build_06_clustering,
         )
 
@@ -2398,6 +2467,8 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
         # budget d'investigation, la couverture par mode opératoire et les erreurs.
         from tools.scaffold.notebooks.anomaly import (
             build_04_model_exploration as build_04_anomaly,
+        )
+        from tools.scaffold.notebooks.anomaly import (
             build_06_error_analysis as build_06_anomaly,
         )
 
@@ -2408,7 +2479,7 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
         build_02_validation,
         build_03_preprocessing,
         model_exploration,
-        build_05_training,
+        training,
         error_analysis,
     )
     return [builder(context, destination) for builder in builders]
@@ -2417,12 +2488,14 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
 __all__ = [
     "NB_ROWS",
     "NB_ROWS_ANOMALY",
+    "NB_ROWS_FORECAST",
+    "_is_anomaly",
+    "_is_clustering",
+    "_is_forecasting",
+    "_is_regression",
     "build_01_eda",
     "build_04_model_exploration",
     "build_05_training",
     "build_06_error_analysis",
     "build_all",
-    "_is_anomaly",
-    "_is_clustering",
-    "_is_regression",
 ]
