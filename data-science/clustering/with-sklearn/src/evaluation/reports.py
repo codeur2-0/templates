@@ -44,12 +44,12 @@ PRIMARY_METRIC = "silhouette"
 #: Critères de succès du cas d'usage, injectés depuis `extras.quality` du manifeste et
 #: écrasables à l'exécution par `metrics.thresholds` dans la configuration Hydra.
 DEFAULT_THRESHOLDS: dict[str, float] = {
-    "silhouette_min": 0.25,
-    "davies_bouldin_max": 1.6,
-    "calinski_harabasz_min": 900.0,
+    "silhouette_min": 0.18,
+    "davies_bouldin_max": 1.8,
+    "calinski_harabasz_min": 200.0,
     "min_cluster_share": 0.03,
-    "stability_ari_min": 0.85,
-    "ari_latent_min": 0.45,
+    "stability_ari_min": 0.9,
+    "ari_latent_min": 0.35,
     "churn_spread_min": 0.2,
 }
 

@@ -60,9 +60,14 @@ class EvaluationPipeline(BasePipeline):
         evaluation: EvaluationResult = evaluator.evaluate(
             X_test, y_test, split="test", context=test_frame
         )
+        # `threshold_analysis` n'existe que sur les évaluateurs supervisés binaires : le
+        # clustering et la régression n'ont pas de seuil de décision à analyser.
+        analyse_thresholds = getattr(evaluator, "threshold_analysis", None)
         thresholds = (
-            evaluator.threshold_analysis(X_test, y_test)
-            if y_test is not None and self.config.metrics.task == "binary"
+            analyse_thresholds(X_test, y_test)
+            if analyse_thresholds is not None
+            and y_test is not None
+            and self.config.metrics.task == "binary"
             else None
         )
 
