@@ -11,14 +11,14 @@
 
 name: "{{ spec.model.display_name }}"
 algorithm: {{ spec.model.algorithm }}
-class: {{ camel(spec.stack_key) }}Model
+class: {{ model_class }}
 task: {{ spec.metrics.task }}
 supports_proba: {{ "true" if stack.supports_proba else "false" }}
 epochs_based: {{ "true" if stack.epochs_based else "false" }}
 random_state: ${seed}
 
 # Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
-# `{{ camel(spec.stack_key) }}Model(params=...)` (voir src/models/model.py).
+# `{{ model_class }}(params=...)` (voir src/models/model.py).
 params:
 {% if spec.model.params %}
 {{ yaml_dump(spec.model.params, 2) }}

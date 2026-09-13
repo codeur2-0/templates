@@ -12,6 +12,7 @@ sklearn:
   display_name: scikit-learn
   category: classic-ml
   template_dir: sklearn
+  class_name: SklearnModel
   epochs_based: false
   supports_proba: true
   dependencies:
@@ -36,6 +37,7 @@ xgboost:
   display_name: XGBoost
   category: boosting
   template_dir: xgboost
+  class_name: XGBoostModel
   epochs_based: false
   supports_proba: true
   dependencies:
@@ -60,6 +62,7 @@ lightgbm:
   display_name: LightGBM
   category: boosting
   template_dir: lightgbm
+  class_name: LightGBMModel
   epochs_based: false
   supports_proba: true
   dependencies:
@@ -84,6 +87,7 @@ pytorch:
   display_name: PyTorch
   category: deep-learning
   template_dir: pytorch
+  class_name: PyTorchModel
   epochs_based: true
   supports_proba: true
   dependencies:
@@ -107,6 +111,7 @@ tensorflow:
   display_name: TensorFlow
   category: deep-learning
   template_dir: tensorflow
+  class_name: TensorFlowModel
   epochs_based: true
   supports_proba: true
   dependencies:
@@ -130,6 +135,7 @@ keras:
   display_name: Keras (API fonctionnelle)
   category: deep-learning
   template_dir: keras
+  class_name: KerasModel
   epochs_based: true
   supports_proba: true
   dependencies:

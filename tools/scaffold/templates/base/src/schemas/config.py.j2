@@ -269,7 +269,7 @@ class ModelConfig(BaseModel):
 
     name: str = "{{ spec.model.display_name }}"
     algorithm: str = "{{ spec.model.algorithm }}"
-    model_class: str = Field(default="{{ camel(spec.stack_key) }}Model", alias="class")
+    model_class: str = Field(default="{{ model_class }}", alias="class")
     task: Task = "{{ spec.metrics.task }}"
     supports_proba: bool = {{ "True" if stack.supports_proba else "False" }}
     epochs_based: bool = {{ "True" if stack.epochs_based else "False" }}

@@ -336,6 +336,8 @@ def build_context(spec: ProjectSpec, family: FamilySpec, stack: StackSpec) -> di
         "dataset_name": data.dataset_name,
         "year": date.today().year,
         "today": date.today().isoformat(),
+        # --- modèle -----------------------------------------------------------------------
+        "model_class": stack.class_name or camel(stack.key) + "Model",
         # --- template helpers -----------------------------------------------------------
         "py": py,
         "yaml_dump": yaml_dump,

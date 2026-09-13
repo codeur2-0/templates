@@ -217,7 +217,7 @@ AppConfig (Pydantic)                 ← conf/*.yaml validé et typé
    ├── FeatureBuilder                ← features dérivées déclaratives (ratio, bin, interaction…)
    ├── PreprocessingPipeline         ← ColumnTransformer : imputation, clipping, scaling, encodage
    │
-   ├── {{ camel(spec.stack_key) }}Model(BaseModel)   ← implémentation {{ stack.display_name }}
+   ├── {{ model_class }}(BaseModel)   ← implémentation {{ stack.display_name }}
    │        fit / predict{% if stack.supports_proba %} / predict_proba{% endif %} / save / load
    ├── Trainer                       ← split, callbacks, métriques, artefacts
    ├── Evaluator                     ← métriques + matrice/rapport d'erreurs
@@ -231,7 +231,7 @@ AppConfig (Pydantic)                 ← conf/*.yaml validé et typé
 mode=generate-data → SyntheticDataGenerator → data/raw/*.parquet
 mode=train         → RawDataLoader (validation Pandera)
                      → FeatureBuilder → PreprocessingPipeline.fit_transform
-                     → {{ camel(spec.stack_key) }}Model.fit (callbacks)
+                     → {{ model_class }}.fit (callbacks)
                      → Evaluator.evaluate → ReportBuilder → artifacts/{models,metrics,reports,figures}
 mode=evaluate      → chargement des artefacts → nouvelle évaluation + rapports
 mode=predict       → InferenceDataSchema → Predictor.predict → artifacts/reports/predictions.csv
@@ -366,7 +366,7 @@ Ou directement avec les classes (sans Hydra) :
 
 ```python
 from src.data.generators import SyntheticDataGenerator
-from src.models.model import {{ camel(spec.stack_key) }}Model
+from src.models.model import {{ model_class }}
 from src.pipelines import TrainPipeline
 from src.schemas.config import validate_config
 

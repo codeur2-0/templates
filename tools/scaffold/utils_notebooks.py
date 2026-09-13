@@ -204,7 +204,9 @@ def build_context(spec: ProjectSpec, family: FamilySpec, stack: StackSpec) -> No
     Returns:
         The :class:`NotebookContext`.
     """
-    model_class = "".join(part.capitalize() for part in stack.key.replace("-", "_").split("_")) + "Model"
+    model_class = stack.class_name or "".join(
+        part.capitalize() for part in stack.key.replace("-", "_").split("_")
+    ) + "Model"
     return NotebookContext(
         spec=spec,
         family=family,

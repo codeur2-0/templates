@@ -29,6 +29,7 @@ class StackSpec(BaseModel):
     display_name: str
     category: str
     template_dir: str
+    class_name: str | None = None
     epochs_based: bool = False
     supports_proba: bool = True
     dependencies: list[str] = Field(default_factory=list)
