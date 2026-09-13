@@ -64,7 +64,11 @@ data/external/**
 data/interim/**
 !data/**/.gitkeep
 !data/README.md
-models/
+# Jamais de règle `models/` non ancrée : elle avalait `src/models/`, c'est-à-dire la couche
+# modèle de CHAQUE projet et de CHAQUE template de stack (le code était invisible pour git).
+# Les artefacts de modèles vivent sous `artifacts/` (déjà ignoré ci-dessus) et sont de toute
+# façon couverts par les extensions listées ci-dessous.
+artifacts/models/
 *.pkl
 *.joblib
 *.pt
