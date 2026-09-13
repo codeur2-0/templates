@@ -167,9 +167,15 @@ class TestFeatureBuilder:
             drop_columns=app_config.data.drop_columns,
             target=app_config.data.target,
         )
-        assert app_config.data.target not in columns
+        target = app_config.data.target
+        assert target not in columns
         assert not set(app_config.data.drop_columns) & set(columns)
-        assert len(columns) + len(app_config.data.drop_columns) + 1 == split_frames.train.shape[1]
+        # En tâche non supervisée, il n'y a pas de colonne cible à retirer du total.
+        target_columns = 0 if target is None else 1
+        assert (
+            len(columns) + len(app_config.data.drop_columns) + target_columns
+            == split_frames.train.shape[1]
+        )
 
 
 class TestPreprocessingPipeline:

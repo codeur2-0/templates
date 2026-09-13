@@ -299,7 +299,11 @@ class Trainer:
         Returns:
             Mapping of metric name to value; empty when no validation split or no metric.
         """
-        if data.X_val is None or data.y_val is None or not self.metric_names:
+        if data.X_val is None or not self.metric_names:
+            return {}
+        # Une tâche supervisée sans cible de validation ne peut pas être scorée ; en non
+        # supervisé (clustering), les métriques internes se calculent sur X et les affectations.
+        if data.y_val is None and self.task != "clustering":
             return {}
         predictions = self.model.predict(data.X_val)
         probabilities = None
