@@ -44,26 +44,38 @@ model:
     - "local_outlier_factor : capture les anomalies relatives à un voisinage (utile pour la prise de compte), mais ne se généralise pas à de nouvelles transactions sans `novelty=True`"
     - "auto-encodeur (voir `data-science/anomaly-detection/with-pytorch`) : apprend une variété normale et score l'erreur de reconstruction, plus expressif sur des interactions non linéaires"
   params:
-    n_estimators: 300
+    # 500 arbres plutôt que 300 : à `max_features` égal, l'écart-type de la PR AUC entre 5 graines
+    # passe de 0,023 à 0,003 (mesuré sur la validation). On paie 0,014 de PR AUC moyenne pour un
+    # classement reproductible — c'est ce qui permet de défendre la file d'alertes devant le métier.
+    n_estimators: 500
     # Sous-échantillonnage : c'est le cœur de la méthode (l'isolation se mesure sur des
-    # échantillons de taille fixe, pas sur le flux complet).
+    # échantillons de taille fixe, pas sur le flux complet). 0.8 plutôt que 0.5 : à `max_features`
+    # égal et sur 5 graines, la PR AUC moyenne est identique (0,6485 contre 0,6495 — écart 30 fois
+    # plus petit que la dispersion) mais l'écart-type passe de 0,011 à 0,003. On achète la
+    # stabilité de la file d'alertes, pas un dixième de point de PR AUC.
     max_samples: 0.8
     # Part d'anomalies supposée a priori : elle déplace le seuil interne, pas le classement.
     # Alignée sur le budget d'investigation réel (2 % du flux), pas sur la prévalence inconnue.
     contamination: 0.02
-    # Sous-échantillonnage des features : avec 51 colonnes one-hot, tirer 20 % des variables par
-    # coupe (≈10) force la forêt à combiner les signaux au lieu de se reposer sur la vélocité.
-    # Mesuré sur la validation : PR AUC 0,487 à 0,20 contre 0,437 à 0,30 et 0,396 à 0,80.
-    max_features: 0.2
+    # Nombre de variables tirées **par coupe**. La matrice livrée compte 51 colonnes, dont une
+    # quarantaine de modalités one-hot peu informatives prises une à une : couper sur 2 variables
+    # force la forêt à combiner des signaux (vélocité x empreinte d'appareil, montant x pays) au
+    # lieu de se reposer sur la seule vélocité. Sélection sur la validation, 5 graines :
+    # PR AUC 0,649 à 2 features, 0,632 à 3, 0,625 à 4, 0,619 à 10 % (≈5), 0,487 à 20 % (≈10).
+    # La valeur est un ENTIER (pas une fraction) : le réglage reste identique si le preprocessing
+    # change le nombre de colonnes, ce qu'une fraction silencieuse ne garantirait pas.
+    max_features: 2
     n_jobs: -1
     random_state: 42
 
 extras:
   # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 2 min).
   notebook_param_grid:
-    n_estimators: [150, 300]
+    n_estimators: [200, 500]
     max_samples: [0.5, 0.8]
-    max_features: [0.15, 0.3]
+    # Autour du réglage retenu (2) : assez bas pour montrer le gain, assez haut pour montrer la
+    # dégradation quand la forêt se repose sur les modalités one-hot les plus bruyantes.
+    max_features: [2, 5, 12]
   # Taille des fixtures pytest (petit dataset = suite rapide, mais assez de lignes pour que le
   # split de test contienne quelques fraudes : les métriques de rang doivent rester calculables).
   test_n_samples: 3000
@@ -82,8 +94,8 @@ extras:
   #
   # Calibration : avec une prévalence de 1,8 %, le plancher d'une PR AUC est 0,018 (score
   # aléatoire). Les seuils ci-dessous sont calibrés sur les mesures réelles de ce générateur
-  # (forêt d'isolation, 12 000 transactions, seed 42) : PR AUC ~0,56, ROC AUC ~0,94, rappel au
-  # budget ~0,52, précision au budget ~0,60, lift ~26x. Le générateur injecte volontairement du
+  # (forêt d'isolation, 12 000 transactions, seed 42) : PR AUC 0,67, ROC AUC 0,95, rappel au
+  # budget 0,61, précision au budget 0,71, lift 30x. Le générateur injecte volontairement du
   # bruit irréductible (fraudes sans signature) et des outliers légitimes (luxe, voyageurs,
   # paiements d'entreprise) : une PR AUC de 0,9 signerait une fuite, pas une performance. Une
   # marge d'environ 0,10 de PR AUC et 0,07 de rappel est laissée sous la mesure pour absorber la

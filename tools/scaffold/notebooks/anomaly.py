@@ -239,6 +239,10 @@ from src.models import build_model
 # densité « normale » sur le train uniquement ; la validation sert à choisir le point de
 # fonctionnement, jamais à ajuster les hyperparamètres sur les fraudes.
 MODEL = build_model(CONFIG, feature_names=PREPARED["feature_names"])
+# `build_model(params=...)` **remplace** les réglages de `conf/model/default.yaml`. Pour ne faire
+# varier qu'un seul facteur à la fois dans les sections suivantes (graine, contamination, grille),
+# on part donc toujours de cette copie des réglages configurés.
+CONFIGURED_PARAMS = dict(CONFIG.model.params)
 FIT_RESULT = MODEL.fit(
     PREPARED["X_train"], None, X_val=PREPARED["X_val"], y_val=None, callbacks=[]
 )
@@ -313,6 +317,8 @@ display(baseline_table)
 """
 
 _ALGORITHMS_CELL = """
+import warnings
+
 from src.models.factory import available_algorithms
 
 ALGORITHMS = available_algorithms(CONFIG.metrics.task)
@@ -320,6 +326,7 @@ print(f"{len(ALGORITHMS)} algorithmes disponibles pour la tâche '{CONFIG.metric
 print(ALGORITHMS)
 
 rows = []
+warnings_par_algorithme: dict[str, dict[str, int]] = {}
 # Comparaison **loyale** : `params={}` construit chaque algorithme avec ses réglages par défaut.
 # Les `model.params` configurés sont propres à la forêt d'isolation (`n_estimators`,
 # `max_samples`, `max_features`) : les injecter dans un one-class SVM lèverait une erreur, et les
@@ -327,13 +334,25 @@ rows = []
 # réglé est, lui, évalué en section 1.
 for algorithm in ALGORITHMS:
     try:
-        candidate = build_model(
-            CONFIG, feature_names=PREPARED["feature_names"], algorithm=algorithm, params={}
-        )
-        result = candidate.fit(
-            PREPARED["X_train"], None, X_val=PREPARED["X_val"], y_val=None, callbacks=[]
-        )
-        scores = np.asarray(candidate.predict(PREPARED["X_val"]), dtype="float64").ravel()
+        # Les avertissements des bibliothèques sont **capturés puis restitués** en fin de cellule :
+        # les masquer cacherait une information diagnostique (covariance dégénérée, convergence),
+        # les laisser inonder la sortie noierait le tableau. Ni l'un ni l'autre.
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            candidate = build_model(
+                CONFIG, feature_names=PREPARED["feature_names"], algorithm=algorithm, params={}
+            )
+            result = candidate.fit(
+                PREPARED["X_train"], None, X_val=PREPARED["X_val"], y_val=None, callbacks=[]
+            )
+            scores = np.asarray(candidate.predict(PREPARED["X_val"]), dtype="float64").ravel()
+        counts: dict[str, int] = {}
+        for item in captured:
+            first_line = str(item.message).strip().splitlines()[0][:78]
+            key = f"{item.category.__name__} : {first_line}"
+            counts[key] = counts.get(key, 0) + 1
+        if counts:
+            warnings_par_algorithme[algorithm] = counts
         values = calculator.evaluate(
             MetricInputs(y_true=VAL_LABELS, y_pred=None, y_proba=scores)
         )
@@ -360,6 +379,12 @@ ranking = pd.DataFrame(rows).sort_values(
     CONFIG.metrics.primary, ascending=ascending, na_position="last"
 )
 display(ranking.round(4))
+
+if warnings_par_algorithme:
+    print("Avertissements émis pendant la comparaison (capturés, ni masqués ni perdus) :")
+    for algorithm, counts in warnings_par_algorithme.items():
+        for message, count in counts.items():
+            print(f"  - {algorithm} ({count}x) {message}")
 """
 
 _CONTAMINATION_CELL = """
@@ -373,7 +398,7 @@ for contamination in CONTAMINATIONS:
     candidate = build_model(
         CONFIG,
         feature_names=PREPARED["feature_names"],
-        params={"contamination": contamination},
+        params={**CONFIGURED_PARAMS, "contamination": contamination},
     )
     candidate.fit(PREPARED["X_train"], None, X_val=PREPARED["X_val"], y_val=None, callbacks=[])
     scores = np.asarray(candidate.predict(PREPARED["X_val"]), dtype="float64").ravel()
@@ -440,7 +465,7 @@ for seed in STABILITY_SEEDS:
     candidate = build_model(
         CONFIG,
         feature_names=PREPARED["feature_names"],
-        params={"random_state": seed},
+        params={**CONFIGURED_PARAMS, "random_state": seed},
     )
     candidate.fit(PREPARED["X_train"], None, X_val=PREPARED["X_val"], y_val=None, callbacks=[])
     scores = np.asarray(candidate.predict(PREPARED["X_val"]), dtype="float64").ravel()
@@ -477,7 +502,9 @@ print(f"{len(combinations)} combinaisons testées sur {list(GRID)}")
 
 grid_rows = []
 for combination in combinations:
-    params = dict(zip(GRID, combination, strict=True))
+    # Les paramètres balayés écrasent les réglages configurés ; les autres sont conservés à
+    # l'identique, sinon chaque combinaison changerait plusieurs facteurs à la fois.
+    params = {**CONFIGURED_PARAMS, **dict(zip(GRID, combination, strict=True))}
     candidate = build_model(CONFIG, feature_names=PREPARED["feature_names"], params=params)
     result = candidate.fit(
         PREPARED["X_train"], None, X_val=PREPARED["X_val"], y_val=None, callbacks=[]
@@ -563,8 +590,10 @@ dans toutes les sections suivantes (comparaison aux règles métier, stabilité,
         _code(_ALGORITHMS_CELL, context),
         _insight(
             [
-                "Une forêt d'isolation suppose qu'une anomalie est **facile à isoler** par des coupes aléatoires ; un auto-encodeur suppose qu'elle est **mal reconstruite** par un goulot d'étranglement. Les deux hypothèses ne capturent pas les mêmes schémas.",
-                "Un one-class SVM est sensible à l'échelle et au volume : sur des millions de transactions, son coût quadratique le rend inutilisable sans échantillonnage.",
+                "Les quatre détecteurs ne testent pas la même hypothèse : la forêt d'isolation cherche des points **faciles à isoler** par coupes aléatoires, le one-class SVM une **frontière de densité** à noyau RBF, l'enveloppe elliptique un **écart de Mahalanobis** à un centre robuste, et le LOF une rareté **relative au voisinage**.",
+                "Chacun est évalué avec ses réglages par défaut (`params={}`) : c'est la comparaison loyale. Le détecteur configuré et réglé, lui, est mesuré en section 1 — un algorithme battu « par défaut » peut très bien gagner une fois réglé.",
+                "Le LOF score bien sur un échantillon de quelques milliers de transactions, mais il doit **conserver le jeu d'entraînement** pour scorer une nouvelle ligne : coût mémoire et latence incompatibles avec un flux de millions de paiements. Le one-class SVM a le même défaut (coût quadratique).",
+                "L'enveloppe elliptique déclenche un avertissement de covariance non plein rang : sur 51 colonnes dont une quarantaine de modalités one-hot quasi constantes, la covariance robuste est dégénérée. C'est une leçon générale — les détecteurs gaussiens supportent mal le one-hot, les arbres s'en accommodent.",
                 "Un écart de PR AUC inférieur à 2x la dispersion entre graines (section 4) n'est pas un signal : ne pas choisir un algorithme sur un écart de cet ordre.",
             ]
         ),
@@ -592,7 +621,9 @@ dans toutes les sections suivantes (comparaison aux règles métier, stabilité,
             [
                 "Le tri respecte le **sens** de la métrique (`direction: maximize` pour une PR AUC) : un tri ascendant par défaut classerait les pires détecteurs en premier.",
                 "Une grille se lit aussi par sa **dispersion** : si toutes les combinaisons se tiennent en 0,01 de PR AUC, le détecteur est robuste et le réglage fin n'est pas le levier principal — les features le sont.",
-                "Gare au sur-ajustement sur le split de validation : avec quelques dizaines de fraudes seulement, l'écart-type d'une PR AUC est de l'ordre de 0,03 à 0,05. Choisir le meilleur point d'une grille sur un seul split est un biais classique.",
+                "Gare au sur-ajustement sur le split de validation : avec quelques dizaines de fraudes seulement, l'écart-type d'une PR AUC est de l'ordre de 0,01 à 0,03. Choisir le meilleur point d'une grille sur un seul split est un biais classique.",
+                "Cas concret dans cette grille : `max_samples=0.5` s'affiche en tête, avec ~0,001 de PR AUC d'avance sur `max_samples=0.8` **à une seule graine**. Rejoué sur 5 graines, l'écart de moyenne reste de 0,001 alors que la dispersion entre graines est de 0,011 (0.5) et 0,003 (0.8) : le gagnant affiché est du bruit. Le réglage retenu est 0.8, qui divise la dispersion par 3,5 — donc qui rend la file d'alertes reproductible d'un ré-entraînement à l'autre.",
+                "Règle pratique : ne retenir un point de grille que si son avance dépasse 2x la dispersion entre graines (section 4). En dessous, on tranche sur un critère non statistique — ici la stabilité, ailleurs le coût d'inférence ou la simplicité de maintenance.",
             ]
         ),
         _md(

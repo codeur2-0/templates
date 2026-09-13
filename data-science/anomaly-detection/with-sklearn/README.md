@@ -96,10 +96,11 @@ compatible avec leur capacité, en maximisant la fraude capturée.
 
 **Critères de réussite**
 
-- [ ] PR AUC ≥ 0.42 sur le split de test hors échantillon (prévalence ~1,8 % : une PR AUC de 0,018 serait un score aléatoire). Mesuré : ~0,56.
-- [ ] Rappel ≥ 0.45 au budget d'investigation retenu (2 % des transactions, soit la capacité réelle des analystes). Mesuré : ~0,52.
-- [ ] Précision au budget ≥ 0.50 : plus d'une transaction alertée sur deux est une fraude confirmée. Mesuré : ~0,60.
-- [ ] Lift au budget ≥ 20× par rapport à la prévalence (le classement concentre réellement la fraude). Mesuré : ~26×.
+- [ ] PR AUC ≥ 0.42 sur le split de test hors échantillon (prévalence ~1,8 % : une PR AUC de 0,018 serait un score aléatoire). Mesuré : 0,67 avec la stack scikit-learn.
+- [ ] Rappel ≥ 0.45 au budget d'investigation retenu (2 % des transactions, soit la capacité réelle des analystes). Mesuré : 0,61.
+- [ ] Précision au budget ≥ 0.50 : plus d'une transaction alertée sur deux est une fraude confirmée. Mesuré : 0,71.
+- [ ] Lift au budget ≥ 20x par rapport à la prévalence (le classement concentre réellement la fraude). Mesuré : 30x.
+- [ ] Rappel par mode opératoire ≥ 0.30 pour au moins 3 schémas sur 4. Mesuré : identité synthétique 0,85, carte absente 0,65, prise de compte 0,60.
 - [ ] Au moins un schéma de fraude sur quatre reste partiellement non couvert (fraude amicale) : c'est le plafond structurel d'un détecteur transactionnel, documenté comme tel et non comme un échec.
 - [ ] Aucune fuite : les colonnes de diagnostic (is_fraud, fraud_scheme) sont des métadonnées, jamais des features.
 - [ ] ROC AUC ≥ 0.90 : le score ordonne correctement les fraudes et les transactions légitimes.
@@ -371,7 +372,7 @@ python -m src.main mode=train
 
 # Overrides Hydra (aucun fichier à modifier)
 python -m src.main mode=train ++train.epochs=10 data.n_samples=2000 log_level=DEBUG
-python -m src.main mode=train model.params.n_estimators=300
+python -m src.main mode=train model.params.n_estimators=500
 
 # Afficher la configuration composée sans rien exécuter
 python -m src.main --cfg job

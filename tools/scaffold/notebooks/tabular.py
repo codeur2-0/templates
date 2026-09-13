@@ -245,14 +245,17 @@ from hydra.core.global_hydra import GlobalHydra  # noqa: E402
 from loguru import logger  # noqa: E402
 
 from src.schemas.config import validate_config  # noqa: E402
+from src.utils.logging import setup_logging  # noqa: E402
 from src.utils.paths import ProjectPaths  # noqa: E402
 
 # --- Réglages d'affichage -----------------------------------------------------------------------
 plt.rcParams.update({"figure.dpi": 110, "axes.grid": True, "grid.alpha": 0.25})
 pd.set_option("display.max_columns", 40)
 pd.set_option("display.width", 170)
-logger.remove()
-logger.add(sys.stderr, level="WARNING")
+# Le projet configure loguru au premier `get_logger()` appelé par `src`. On prend la main ici,
+# au niveau WARNING : sans cela, chaque cellule d'entraînement noierait ses tableaux sous les
+# lignes INFO de production. Les avertissements réels restent visibles — c'est l'essentiel.
+setup_logging(level="WARNING")
 
 # --- Configuration : exactement celle de `python -m src.main` ------------------------------------
 # Les notebooks travaillent sur un échantillon réduit (__ROWS__ lignes) : l'exécution complète
