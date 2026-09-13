@@ -1,0 +1,81 @@
+# ==============================================================================================
+# data-science / regression / with-xgboost
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/regression.yaml` (estimation de prix immobilier, AVM).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet et modèle.
+# ==============================================================================================
+
+key: ds-regression-xgboost
+title: "Estimation du prix de vente immobilier (AVM) avec XGBoost"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> gradient boosting régulé XGBoost avec early stopping natif -> analyse des résidus par segment) pour un modèle
+  d'évaluation automatisée de prix immobilier, entièrement piloté par Hydra et structuré en
+  objets testables. L'estimation publiée est une fourchette assortie d'un niveau de confiance.
+
+family: regression
+domain: data-science
+problem: regression
+stack: xgboost
+project_slug: real-estate-avm-xgboost
+package_name: avm_xgboost
+
+model:
+  display_name: "Gradient boosting XGBoost (régression)"
+  algorithm: xgboost
+  rationale: >-
+    XGBoost est la référence industrielle sur données tabulaires : le boosting régularisé (L1/L2,
+    subsampling, shrinkage) apprend les non-linéarités du cas (effet concave de la surface,
+    interaction étage x ascenseur, malus énergétique non linéaire) tout en restant maîtrisable
+    grâce à l'early stopping natif sur un split de validation. L'objectif `reg:squarederror`
+    cible directement la RMSE, métrique de décision du projet, et l'importance au gain fournit
+    les facteurs explicatifs affichés avec l'estimation.
+  alternatives:
+    - "xgboost_dart : dropout sur les arbres, régularise les gros ensembles (early stopping non supporté)"
+    - "xgboost_linear : booster linéaire, vérifie qu'une part du signal est bien linéaire"
+    - "random_forest : moins sensible au réglage, importance native, mais généralement moins précis"
+    - "dummy : plancher à battre — un modèle qui ne le dépasse pas n'a aucune valeur"
+  params:
+    n_estimators: 600
+    max_depth: 6
+    learning_rate: 0.06
+    subsample: 0.9
+    colsample_bytree: 0.8
+    min_child_weight: 5
+    reg_lambda: 1.5
+    reg_alpha: 0.0
+    gamma: 0.0
+    importance_type: gain
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 1 min).
+  notebook_param_grid:
+    n_estimators: [250, 600]
+    max_depth: [4, 8]
+    learning_rate: [0.04, 0.1]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    # Early stopping natif XGBoost : surveille `eval_metric` sur le split de validation.
+    early_stopping_rounds: 50
+    eval_metric: [rmse, mae]
+    native_categorical: true
+    cross_validation:
+      enabled: true
+      folds: 5
+      # Une cible continue ne se stratifie pas : plis aléatoires.
+      strategy: kfold
+  root_conf:
+    estimation:
+      tolerance_pct: 10.0            # fourchette publiée : +/- 10 % autour de l'estimation
+      depth_column: recent_sales_1km # profondeur du marché -> niveau de confiance
+      unit_column: surface_m2        # prix au m2 affiché à l'utilisateur
+      min_market_depth: 10           # en dessous, le bien est orienté vers une revue humaine
+
+learning_objectives:
+  - "Comprendre le gradient boosting : arbres séquentiels qui corrigent les résidus, shrinkage et régularisation."
+  - "Utiliser l'early stopping natif (`eval_set` + `early_stopping_rounds`) sans réinventer la boucle d'entraînement."
+  - "Choisir un objectif de régression (`reg:squarederror`, `reg:absoluteerror`) selon la métrique pilotée."
+  - "Régulariser un booster (max_depth, min_child_weight, subsample, colsample_bytree, reg_lambda, gamma)."
+  - "Lire une importance de features au gain et connaître ses limites (biais vers les features à forte cardinalité)."
+  - "Comparer les variantes de booster (gbtree, dart, gblinear) et des baselines honnêtes sur un même split."

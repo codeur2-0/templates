@@ -1,0 +1,83 @@
+# ==============================================================================================
+# data-science / regression / with-lightgbm
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/regression.yaml` (estimation de prix immobilier, AVM).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet et modèle.
+# ==============================================================================================
+
+key: ds-regression-lightgbm
+title: "Estimation du prix de vente immobilier (AVM) avec LightGBM"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> gradient boosting leaf-wise LightGBM avec early stopping natif -> analyse des résidus par segment) pour un modèle
+  d'évaluation automatisée de prix immobilier, entièrement piloté par Hydra et structuré en
+  objets testables. L'estimation publiée est une fourchette assortie d'un niveau de confiance.
+
+family: regression
+domain: data-science
+problem: regression
+stack: lightgbm
+project_slug: real-estate-avm-lightgbm
+package_name: avm_lightgbm
+
+model:
+  display_name: "Gradient boosting LightGBM (régression)"
+  algorithm: lightgbm
+  rationale: >-
+    LightGBM entraîne un boosting leaf-wise (histogrammes + croissance par feuille) : à précision
+    comparable, il est nettement plus rapide que les boosters level-wise sur les gros volumes, ce
+    qui compte pour une estimation recalculée à chaque nouvelle annonce. `num_leaves` pilote la
+    capacité du modèle, l'early stopping natif évite le sur-apprentissage sans réglage manuel du
+    nombre d'arbres, et le support natif des variables catégorielles (quartier, DPE) supprime une
+    partie du one-hot encoding.
+  alternatives:
+    - "lightgbm_dart : dropout sur les arbres, régularise les gros ensembles (early stopping indisponible)"
+    - "lightgbm_goss : échantillonnage par gradient, plus rapide encore sur les très gros volumes"
+    - "random_forest : moins sensible au réglage, importance native, mais généralement moins précis"
+    - "dummy : plancher à battre — un modèle qui ne le dépasse pas n'a aucune valeur"
+  params:
+    n_estimators: 700
+    num_leaves: 31
+    max_depth: -1
+    learning_rate: 0.05
+    min_child_samples: 20
+    subsample: 0.9
+    subsample_freq: 1
+    colsample_bytree: 0.8
+    reg_lambda: 1.5
+    reg_alpha: 0.0
+    min_split_gain: 0.0
+    importance_type: gain
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 1 min).
+  notebook_param_grid:
+    n_estimators: [250, 700]
+    num_leaves: [15, 63]
+    learning_rate: [0.04, 0.1]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    # Early stopping natif LightGBM : surveille `eval_metric` sur le split de validation.
+    early_stopping_rounds: 50
+    eval_metric: [rmse, mae]
+    native_categorical: true
+    cross_validation:
+      enabled: true
+      folds: 5
+      # Une cible continue ne se stratifie pas : plis aléatoires.
+      strategy: kfold
+  root_conf:
+    estimation:
+      tolerance_pct: 10.0            # fourchette publiée : +/- 10 % autour de l'estimation
+      depth_column: recent_sales_1km # profondeur du marché -> niveau de confiance
+      unit_column: surface_m2        # prix au m2 affiché à l'utilisateur
+      min_market_depth: 10           # en dessous, le bien est orienté vers une revue humaine
+
+learning_objectives:
+  - "Comprendre la croissance leaf-wise et son arbitrage avec `num_leaves` / `max_depth` / `min_child_samples`."
+  - "Utiliser l'early stopping natif de LightGBM (callback de fit) sans réinventer la boucle d'entraînement."
+  - "Choisir un objectif de régression (`regression`, `regression_l1`, `huber`) selon la métrique pilotée."
+  - "Exploiter le support natif des catégorielles (quartier, DPE) plutôt qu'un one-hot systématique."
+  - "Lire une importance de features (gain vs split) et connaître leurs biais respectifs."
+  - "Comparer les variantes (gbdt, dart, goss) et des baselines honnêtes sur un même split."
