@@ -234,6 +234,24 @@ class TestProcessedSchema:
             ProcessedDataSchema.validate(pd.DataFrame({"a": pd.Series([], dtype="float64")}))
 
 
+def _without_target(frame: pd.DataFrame, target: str | None) -> pd.DataFrame:
+    """Retire la colonne cible d'un jeu brut.
+
+    En tâche non supervisée (clustering), ``target`` vaut ``None`` et le jeu est renvoyé tel quel :
+    un payload d'inférence ne contient de toute façon jamais de cible.
+
+    Args:
+        frame: Jeu brut généré.
+        target: Nom de la colonne cible, ou ``None``.
+
+    Returns:
+        Le jeu sans sa colonne cible.
+    """
+    if target is not None and target in frame.columns:
+        return frame.drop(columns=[target])
+    return frame
+
+
 class TestInferenceSchema:
     """Contrat des payloads de prédiction."""
 
@@ -241,20 +259,20 @@ class TestInferenceSchema:
         self, raw_dataset: pd.DataFrame, app_config: Any
     ) -> None:
         """Un payload d'inférence ne contient pas la cible : le contrat doit l'accepter."""
-        payload = raw_dataset.drop(columns=[app_config.data.target]).head(10)
+        payload = _without_target(raw_dataset, app_config.data.target).head(10)
         validated = InferenceDataSchema.validate(payload)
         assert len(validated) == 10
 
     def test_tolerates_missing_values(self, raw_dataset: pd.DataFrame, app_config: Any) -> None:
         """Les valeurs manquantes sont tolérées : le preprocessing imputera."""
-        payload = raw_dataset.drop(columns=[app_config.data.target]).head(20).copy()
+        payload = _without_target(raw_dataset, app_config.data.target).head(20).copy()
         payload.iloc[0, 0] = None
         validated = InferenceDataSchema.validate(payload)
         assert len(validated) == 20
 
     def test_tolerates_extra_columns(self, raw_dataset: pd.DataFrame, app_config: Any) -> None:
         """Un payload peut contenir des colonnes supplémentaires (elles seront ignorées)."""
-        payload = raw_dataset.drop(columns=[app_config.data.target]).head(5).copy()
+        payload = _without_target(raw_dataset, app_config.data.target).head(5).copy()
         payload["canal_inutile"] = "web"
         assert len(InferenceDataSchema.validate(payload)) == 5
 
@@ -263,7 +281,7 @@ class TestInferenceSchema:
         column = _bounded_numeric_column()
         if column is None:
             pytest.skip("aucune colonne numérique bornée dans ce schéma")
-        payload = raw_dataset.drop(columns=[app_config.data.target]).head(5).copy()
+        payload = _without_target(raw_dataset, app_config.data.target).head(5).copy()
         payload[column] = "pas-un-nombre"
         with pytest.raises(SchemaViolation):
             InferenceDataSchema.validate(payload)

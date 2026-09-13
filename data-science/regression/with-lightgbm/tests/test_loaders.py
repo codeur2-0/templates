@@ -208,6 +208,24 @@ class TestProcessedDataLoader:
             loader.load()
 
 
+def _without_target(frame: pd.DataFrame, target: str | None) -> pd.DataFrame:
+    """Retire la colonne cible d'un jeu brut.
+
+    En tâche non supervisée (clustering), ``target`` vaut ``None`` et le jeu est renvoyé tel quel :
+    un payload d'inférence ne contient de toute façon jamais de cible.
+
+    Args:
+        frame: Jeu brut généré.
+        target: Nom de la colonne cible, ou ``None``.
+
+    Returns:
+        Le jeu sans sa colonne cible.
+    """
+    if target is not None and target in frame.columns:
+        return frame.drop(columns=[target])
+    return frame
+
+
 class TestInferenceDataLoader:
     """Chargement des payloads de prédiction."""
 
@@ -217,7 +235,7 @@ class TestInferenceDataLoader:
         """Un payload partiel est accepté : le preprocessing imputera."""
         nullable = _nullable_inference_column(raw_dataset, app_config)
         loader = InferenceDataLoader(ProjectPaths.from_root(tmp_path), dataset_name="inference")
-        payload = raw_dataset.drop(columns=[app_config.data.target]).head(15).copy()
+        payload = _without_target(raw_dataset, app_config.data.target).head(15).copy()
         if nullable is not None:
             payload[nullable] = None
         validated = loader.load_from_frame(payload)
@@ -228,7 +246,7 @@ class TestInferenceDataLoader:
     ) -> None:
         """Un fichier JSON (format d'échange API) est lu puis validé."""
         loader = InferenceDataLoader(ProjectPaths.from_root(tmp_path), dataset_name="inference")
-        payload = raw_dataset.drop(columns=[app_config.data.target]).head(5)
+        payload = _without_target(raw_dataset, app_config.data.target).head(5)
         path = tmp_path / "payload.json"
         payload.to_json(path, orient="records")
         assert len(loader.load_from(path)) == 5
@@ -336,13 +354,17 @@ class TestFeatureTargetHelpers:
 
     def test_target_and_drops_are_excluded(self, split_frames: Any, app_config: Any) -> None:
         """La cible et les colonnes non modélisables ne doivent jamais devenir des features."""
+        target = app_config.data.target
         features, labels = feature_target_split(
-            split_frames.train, app_config.data.target, app_config.data.drop_columns
+            split_frames.train, target, app_config.data.drop_columns
         )
-        assert app_config.data.target not in features.columns
+        assert target not in features.columns
         for column in app_config.data.drop_columns:
             assert column not in features.columns
-        assert labels is not None and len(labels) == len(features)
+        if target is None:
+            assert labels is None  # tâche non supervisée : aucune cible à extraire
+        else:
+            assert labels is not None and len(labels) == len(features)
 
     def test_unsupervised_split_has_no_target(self, split_frames: Any) -> None:
         """Sans cible, ``feature_target_split`` renvoie ``None`` pour y (tâches non supervisées)."""
@@ -352,7 +374,10 @@ class TestFeatureTargetHelpers:
 
     def test_target_distribution_is_normalised(self, split_frames: Any, app_config: Any) -> None:
         """La distribution de la cible somme à 1 (utilisée dans les rapports)."""
-        distribution = target_distribution(split_frames.train[app_config.data.target])
+        target = app_config.data.target
+        if target is None:
+            pytest.skip("tâche non supervisée : aucune distribution de cible à normaliser")
+        distribution = target_distribution(split_frames.train[target])
         assert distribution
         assert sum(distribution.values()) == pytest.approx(1.0)
         assert all(0.0 <= value <= 1.0 for value in distribution.values())
