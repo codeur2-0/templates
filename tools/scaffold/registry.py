@@ -32,6 +32,8 @@ class StackSpec(BaseModel):
     class_name: str | None = None
     epochs_based: bool = False
     supports_proba: bool = True
+    #: Nom du fichier modèle persisté (dépend du format natif du framework).
+    model_file: str = "model.joblib"
     dependencies: list[str] = Field(default_factory=list)
     docs: list[DocLink] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

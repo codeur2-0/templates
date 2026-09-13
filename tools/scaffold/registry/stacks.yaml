@@ -89,6 +89,8 @@ pytorch:
   template_dir: pytorch
   class_name: PyTorchModel
   epochs_based: true
+  # Checkpoint torch (poids + métadonnées), relu avec `weights_only=True`.
+  model_file: model.pt
   supports_proba: true
   dependencies:
     - "numpy>=1.26"
@@ -113,6 +115,8 @@ tensorflow:
   template_dir: tensorflow
   class_name: TensorFlowModel
   epochs_based: true
+  # Modèle subclassé : les poids sont persistés séparément des méta-données JSON.
+  model_file: model.weights.h5
   supports_proba: true
   dependencies:
     - "numpy>=1.26"
@@ -137,6 +141,8 @@ keras:
   template_dir: keras
   class_name: KerasModel
   epochs_based: true
+  # Archive native Keras 3 (graphe + poids + configuration de compilation).
+  model_file: model.keras
   supports_proba: true
   dependencies:
     - "numpy>=1.26"
@@ -184,6 +190,7 @@ transformers:
   category: llm
   template_dir: transformers
   epochs_based: true
+  model_file: model.pt
   supports_proba: true
   dependencies:
     - "numpy>=1.26"

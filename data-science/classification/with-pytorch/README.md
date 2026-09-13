@@ -436,7 +436,7 @@ Après `make all`, le dépôt local contient :
 | --- | --- |
 | `data/raw/telecom_churn.parquet` | jeu de données synthétique (4,000 lignes) |
 | `data/processed/*.parquet` | splits et données transformées |
-| `artifacts/models/model.joblib` | modèle entraîné |
+| `artifacts/models/model.pt` | modèle entraîné |
 | `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
 | `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
 | `artifacts/metrics/training_metrics.json` | métriques d'entraînement et d'évaluation |

@@ -23,6 +23,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from tools.scaffold.registry import get_stack
+
 Modality = Literal["tabular", "text", "image", "platform"]
 Task = Literal[
     "binary",
@@ -281,6 +283,21 @@ def load_manifest(path: Path, defaults_dir: Path | None = None) -> ProjectSpec:
             payload = _deep_merge(
                 payload, yaml.safe_load(global_defaults_path.read_text(encoding="utf-8")) or {}
             )
+        # Couche 1bis : valeurs dérivées de la stack déclarée dans le manifeste. Le nom du
+        # fichier modèle dépend du format de persistance du framework (joblib pour scikit-learn
+        # et les boosters, checkpoint `.pt` pour PyTorch, archive `.keras`, poids `.weights.h5`
+        # pour TensorFlow bas niveau) : il ne peut donc pas être figé dans les défauts globaux.
+        stack_key = raw.get("stack")
+        if stack_key:
+            try:
+                stack = get_stack(str(stack_key))
+            except KeyError:
+                # Stack inconnue : build.py lève l'erreur explicite (message listant les stacks).
+                pass
+            else:
+                payload = _deep_merge(
+                    payload, {"train": {"artifacts": {"model_file": stack.model_file}}}
+                )
         # Couche 2 : valeurs par défaut de la famille (cas d'usage, données, métriques).
         # La famille doit être déclarée dans le manifeste lui-même : c'est elle qui sélectionne
         # cette couche.

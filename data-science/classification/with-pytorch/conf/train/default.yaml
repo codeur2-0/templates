@@ -27,7 +27,7 @@ callbacks:
   progress_bar: true
   metric_history: true
 artifacts:
-  model_file: model.joblib
+  model_file: model.pt
   pipeline_file: preprocessing.joblib
   feature_builder_file: feature_builder.joblib
   metrics_file: training_metrics.json

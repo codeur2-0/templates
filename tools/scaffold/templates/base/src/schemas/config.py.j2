@@ -220,12 +220,15 @@ class CallbacksConfig(BaseModel):
     metric_history: bool = True
 
 
+{# Extension du fichier modèle selon la stack : joblib (sklearn/boosting), pt (PyTorch),
+   keras (API fonctionnelle : archive native graphe + poids), weights.h5 (TensorFlow bas niveau :
+   modèle subclassé, poids seuls + méta-données JSON séparées). #}
 class ArtifactsConfig(BaseModel):
     """File names of every artefact written by the training pipeline."""
 
     model_config = _FLEXIBLE
 
-    model_file: str = "model.{{ 'joblib' if not stack.epochs_based else ('pt' if spec.stack_key == 'pytorch' else 'keras') }}"
+    model_file: str = "model.{{ {'pytorch': 'pt', 'keras': 'keras', 'tensorflow': 'weights.h5', 'transformers': 'pt', 'spacy': 'joblib'}.get(spec.stack_key, 'keras' if stack.epochs_based else 'joblib') }}"
     pipeline_file: str = "preprocessing.joblib"
     feature_builder_file: str = "feature_builder.joblib"
     metrics_file: str = "training_metrics.json"
