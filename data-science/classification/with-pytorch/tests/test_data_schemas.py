@@ -72,9 +72,24 @@ def _column_with_check(check_name: str) -> tuple[str, Any] | None:
 
 
 def _categorical_column() -> str | None:
-    """Find the first column constrained by an ``isin`` check."""
-    found = _column_with_check("isin")
-    return None if found is None else found[0]
+    """Find the first **textual** column constrained by an ``isin`` check.
+
+    Les booléens codés 0/1 portent souvent un ``isin`` eux aussi : les retenir ferait échouer
+    l'affectation d'une valeur texte (pandas refuse d'écrire une chaîne dans une colonne
+    numérique), ce qui n'est pas l'intention du test. On cherche donc une colonne réellement
+    catégorielle (``str``, ``object`` ou ``category``).
+
+    Returns:
+        The column name, or ``None`` when the schema declares no textual ``isin`` column.
+    """
+    textual = ("str", "object", "category")
+    for name, column in RawDataSchema.to_schema().columns.items():
+        dtype = str(getattr(column, "dtype", "")).lower()
+        if not any(marker in dtype for marker in textual):
+            continue
+        if any(getattr(check, "name", "") == "isin" for check in column.checks or []):
+            return str(name)
+    return None
 
 
 def _bounded_numeric_column() -> str | None:

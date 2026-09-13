@@ -326,7 +326,8 @@ class MetricThresholdCallback(BaseCallback):
         Args:
             monitor: Metric key to watch.
             threshold: Target value.
-            mode: ``max`` when higher is better, ``min`` otherwise.
+            mode: ``max`` when higher is better (ROC AUC, R2), ``min`` when lower is better
+                (RMSE, MAE, log loss).
             fail_fast: Stop the training as soon as the rule cannot be satisfied.
         """
         self.monitor = monitor
@@ -349,10 +350,11 @@ class MetricThresholdCallback(BaseCallback):
         )
         self.satisfied = self.satisfied or ok
         if not ok:
+            requirement = "au moins" if self.mode == "max" else "au plus"
             logger.warning(
-                "Metric '{}' = {:.5f} is below requirement ({} {:.5f})",
+                "Metric '{}' = {:.5f} ne respecte pas le seuil de qualité ({} {})",
                 self.monitor,
                 float(value),
-                self.mode,
+                requirement,
                 self.threshold,
             )

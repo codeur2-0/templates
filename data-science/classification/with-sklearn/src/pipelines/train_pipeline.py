@@ -73,6 +73,7 @@ class TrainPipeline(BasePipeline):
             task=self.config.metrics.task,
             min_primary_metric=self.config.metrics.min_primary,
             primary_metric=f"val_{self.config.metrics.primary}",
+            primary_direction=str(self.config.metrics.direction),
         )
         outcome = trainer.train(
             TrainingData(
