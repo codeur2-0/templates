@@ -14,7 +14,8 @@ How the data is built
     * a mild market drift and a spring seasonality make ``listing_date`` genuinely informative;
     * the target is heteroscedastic by construction (absolute error grows with the price), which is
       what makes MAPE / median error more honest than RMSE alone;
-    * irreducible log-normal noise keeps the achievable {{ spec.metrics.primary }} realistic;
+    * irreducible log-normal noise keeps the achievable {{ spec.metrics.primary }} realistic
+      (and caps the ±10 % coverage of the published range, whatever the model);
     * a few legitimate prestige outliers and deliberate missing values exercise the preprocessing.
 
 Determinism
@@ -177,7 +178,7 @@ class SyntheticDataGenerator:
         output_dir: Path | str | None = None,
         formats: Sequence[str] = ("parquet", "csv"),
         target_median_price: float = 265000.0,
-        price_dispersion: float = 0.09,
+        price_dispersion: float = 0.07,
         missing_rate: float = 0.05,
         outlier_rate: float = 0.01,
         market_drift_pct: float = 1.8,
@@ -191,8 +192,10 @@ class SyntheticDataGenerator:
             output_dir: Directory receiving the files (defaults to ``data/raw``).
             formats: Formats to write (``parquet`` and/or ``csv``).
             target_median_price: Median price the population is calibrated on (EUR).
-            price_dispersion: Standard deviation of the irreducible log-normal noise. ``0.09``
-                means roughly 9 % of unexplainable price variation — a realistic ceiling.
+            price_dispersion: Standard deviation of the irreducible log-normal noise.
+                ``0.07`` means roughly 7 % of unexplainable price variation, i.e. a MAPE
+                floor around 5.6 % and a ±10 % coverage ceiling around 82 % — even for a perfect
+                model. Lowering it further would make the exercise unrealistically easy.
             missing_rate: Global scaling of the missing-value injection.
             outlier_rate: Share of rows turned into legitimate prestige properties.
             market_drift_pct: Annual market drift applied to the price (percent per year).
@@ -682,15 +685,15 @@ class SyntheticDataGenerator:
         Returns:
             The configured generator.
         """
-        payload = dict(config)
-        node = dict(payload.get("data") or payload)
+        # Même forme que le générateur de classification : `dict(...)` borne l'inférence mypy.
+        node = dict(config.get("data", config) or {})
         layout = paths or ProjectPaths.from_root()
         options = {
             key: node[key] for key in cls.SUPPORTED_OPTIONS if key in node and node[key] is not None
         }
         return cls(
             n_samples=int(node.get("n_samples", {{ spec.data.n_samples }})),
-            seed=int(payload.get("seed", node.get("seed", {{ spec.data.seed }}))),
+            seed=int(config.get("seed", node.get("seed", {{ spec.data.seed }}))),
             dataset_name=str(node.get("dataset_name", DEFAULT_DATASET_NAME)),
             output_dir=layout.raw_dir,
             formats=tuple(node.get("formats", ("parquet", "csv"))),

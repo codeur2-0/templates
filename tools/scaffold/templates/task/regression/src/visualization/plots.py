@@ -203,7 +203,7 @@ class RegressionPlots:
             )
             axes.legend(loc="best", fontsize=9)
         axes.set_xlabel("valeur prédite")
-        axes.set_ylabel("résidu (prédit − observé)")
+        axes.set_ylabel("résidu (prédit - observé)")
         axes.set_title("Résidus vs prédiction — biais et hétéroscédasticité")
         return _save(fig, self.figures_dir / name)
 
@@ -248,26 +248,30 @@ class RegressionPlots:
         """Box plot of the signed relative error per target bucket (bias by price range).
 
         Args:
-            result: Evaluation result (expects ``extras["error_by_bucket"]``).
+            result: Evaluation result (uses the row-level frame: ``price_bucket`` and
+                ``relative_error_pct``).
             name: Output file name.
 
         Returns:
             The written path, or ``None`` when the data is unavailable.
         """
-        extras = getattr(result, "extras", None) or {}
-        frame = extras.get("error_by_bucket")
-        if frame is None or len(frame) == 0:
+        frame = _diagnostic_frame(result)
+        required = {"price_bucket", "relative_error_pct"}
+        if frame.empty or not required <= set(frame.columns):
             return None
-        data = frame.copy()
-        data["bucket"] = data["bucket"].astype(str)
+        data = frame.loc[:, ["price_bucket", "relative_error_pct"]].copy()
+        data["bucket"] = data["price_bucket"].astype(str)
+        data["relative_error_pct"] = data["relative_error_pct"].astype("float64")
 
         fig, axes = plt.subplots(figsize=(8.4, 5.2))
         sns.boxplot(
             data=data,
             x="bucket",
             y="relative_error_pct",
+            hue="bucket",
             ax=axes,
             palette=self.palette,
+            legend=False,
             showfliers=False,
         )
         axes.axhline(0.0, color="black", linewidth=1.2)
@@ -299,7 +303,7 @@ class RegressionPlots:
 
         fig, axes = plt.subplots(figsize=(8.4, 5.0))
         bars = axes.bar(data["bucket"], data["coverage"], color="steelblue", alpha=0.85)
-        axes.axhline(75.0, color="crimson", linestyle="--", linewidth=1.4, label="cible métier (75 %)")
+        axes.axhline(70.0, color="crimson", linestyle="--", linewidth=1.4, label="cible métier (70 %)")
         for bar, value in zip(bars, data["coverage"], strict=False):
             axes.text(
                 bar.get_x() + bar.get_width() / 2.0,

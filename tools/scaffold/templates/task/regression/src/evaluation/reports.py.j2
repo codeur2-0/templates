@@ -179,12 +179,12 @@ class ReportBuilder:
         lines += [
             "## Limites assumées",
             "",
-            "- Les données sont **synthétiques** et générées hors ligne : les niveaux de performance",
-            "  illustrent une méthode, pas un marché immobilier réel.",
-            "- Une seule passe d'évaluation sur un split unique : la variance inter-exécutions n'est",
-            "  pas mesurée ici (voir le notebook 05 pour la stabilité et la validation croisée).",
-            "- Le générateur injecte un bruit multiplicatif volontaire : une erreur nulle signerait",
-            "  une fuite de données, pas un bon modèle.",
+            "- Les données sont **synthétiques** et générées hors ligne : les niveaux de",
+            "  performance illustrent une méthode, pas un marché immobilier réel.",
+            "- Une seule passe d'évaluation sur un split unique : la variance inter-exécutions",
+            "  n'est pas mesurée ici (voir le notebook 05, §4, pour la stabilité).",
+            "- Le générateur injecte un bruit multiplicatif volontaire : une erreur nulle",
+            "  signerait une fuite de données, pas un bon modèle.",
             "",
         ]
         return "\n".join(lines)
@@ -192,17 +192,21 @@ class ReportBuilder:
     # ------------------------------------------------------------------ sections --------
     def _header_block(self, result: EvaluationResult, model: Any) -> list[str]:
         """Render the model identity header."""
-        summary = dict((result.extras or {}).get("model") or {})
+        # `BaseModel.summary()` renvoie une **chaîne** descriptive (classe, framework, état).
+        extras = dict(result.extras or {})
+        model_summary = str(extras.get("model") or getattr(model, "summary", lambda: "-")())
+        n_features = extras.get("n_features", "n/a")
         lines = [
             "## 1. Modèle évalué",
             "",
             "| Élément | Valeur |",
             "| --- | --- |",
             f"| Framework | `{getattr(model, 'framework', 'n/a')}` |",
-            f"| Algorithme | `{summary.get('algorithm', getattr(model, 'algorithm', 'n/a'))}` |",
+            f"| Algorithme | `{getattr(model, 'algorithm', 'n/a')}` |",
             f"| Tâche | `{result.task}` |",
-            f"| Features | {summary.get('n_features', (result.extras or {}).get('n_features', 'n/a'))} |",
+            f"| Features | {n_features} |",
             f"| Artefact | `{self._config_artifact('model_file', 'model.joblib')}` |",
+            f"| Résumé | `{model_summary}` |",
             "",
         ]
         return lines
@@ -214,17 +218,20 @@ class ReportBuilder:
         coverage = result.coverage
         bias = result.bias
         median_error = _float(extras.get("median_absolute_error"))
+        primary_text = _format(metrics.get(PRIMARY_METRIC))
+        mape_text = _percent_from_pct(metrics.get("mape"))
+        tolerance = _float(extras.get("tolerance_pct", TOLERANCE_PCT))
+        direction = "sur-estimation" if bias > 0 else "sous-estimation"
         return [
             "## 2. Verdict synthétique",
             "",
-            f"- **{PRIMARY_METRIC} = {_format(metrics.get(PRIMARY_METRIC))}** (métrique de décision).",
-            f"- **MAPE = {_percent(metrics.get('mape'))}** — erreur relative moyenne, lisible par le métier.",
+            f"- **{PRIMARY_METRIC} = {primary_text}** (métrique de décision).",
+            f"- **MAPE = {mape_text}** — erreur relative moyenne, lisible par le métier.",
             f"- **R² = {_format(metrics.get('r2'))}** — part de variance expliquée.",
-            f"- **Couverture ± {result.extras.get('tolerance_pct', TOLERANCE_PCT):.0f} % = {_percent(coverage)}**"
-            f" (cible : ≥ 75 %).",
-            f"- **Biais moyen = {_format(bias)}** ({'sur-estimation' if bias > 0 else 'sous-estimation'}"
-            f" systématique, {_percent(extras.get('bias_pct'))} en relatif).",
-            f"- **Erreur médiane = {_format(median_error)}** — bien plus informative que la RMSE seule.",
+            f"- **Couverture ± {tolerance:.0f} % = {_percent(coverage)}** (cible : >= 70 %).",
+            f"- **Biais moyen = {_format(bias)}** ({direction} systématique,"
+            f" {_percent_from_pct(extras.get('bias_pct'))} en relatif).",
+            f"- **Erreur médiane = {_format(median_error)}** — plus informative que la RMSE seule.",
             "",
         ]
 
@@ -240,8 +247,12 @@ class ReportBuilder:
             "max_error": "pire erreur individuelle (risque opérationnel)",
             "median_absolute_error": "erreur typique du portefeuille",
         }
+        relative_metrics = {"mape", "smape"}
         for name, value in metrics.items():
-            lines.append(f"| `{name}` | {_format(value)} | {readings.get(str(name), '—')} |")
+            text_value = (
+                _percent_from_pct(value) if str(name) in relative_metrics else _format(value)
+            )
+            lines.append(f"| `{name}` | {text_value} | {readings.get(str(name), '—')} |")
         lines.append("")
         return lines
 
@@ -251,11 +262,11 @@ class ReportBuilder:
         lines = [
             "## 4. Lecture des résidus",
             "",
-            "Un résidu est la différence `prédit − observé`. Trois lectures comptent :",
+            "Un résidu est la différence `prédit - observé`. Trois lectures comptent :",
             "",
-            "1. **le biais** (moyenne des résidus) : une estimation systématiquement haute ou basse",
-            "   se corrige, et coûte cher en négociation ;",
-            "2. **la dispersion** (écart-type, P95) : elle fixe la largeur de fourchette à publier ;",
+            "1. **le biais** (moyenne des résidus) : une estimation systématiquement haute",
+            "   ou basse se corrige, et coûte cher en négociation ;",
+            "2. **la dispersion** (écart-type, P95) : elle fixe la largeur de fourchette publiée ;",
             "3. **l'hétéroscédasticité** : si l'erreur croît avec le prix, la RMSE est dominée par",
             "   les biens chers et les petits biens sont sacrifiés en silence.",
             "",
@@ -278,14 +289,20 @@ class ReportBuilder:
                 "| --- | --- | --- | --- | --- | --- |",
             ]
             for _, row in bucket_frame.iterrows():
+                median_relative = row.get("median_relative_error_pct")
+                median_text = (
+                    _percent(float(median_relative) / 100.0)
+                    if pd.notna(median_relative)
+                    else "n/a"
+                )
                 lines.append(
                     f"| {row['bucket']} | {int(row['n'])} | {_format(row.get('bias'))} "
-                    f"| {_percent(row.get('median_relative_error_pct') / 100.0 if pd.notna(row.get('median_relative_error_pct')) else None)} "
-                    f"| {_format(row.get('rmse'))} | {_percent(row.get('coverage'))} |"
+                    f"| {median_text} | {_format(row.get('rmse'))} "
+                    f"| {_percent(row.get('coverage'))} |"
                 )
             lines += [
                 "",
-                "> Une RMSE qui croît avec la classe de prix est **attendue** (erreur multiplicative).",
+                "> Une RMSE croissante avec le prix est **attendue** : erreur multiplicative.",
                 "> Ce qui ne l'est pas, c'est un **biais de signe constant** sur une classe : il",
                 "> indique un effet non appris (plafonnement, transformation manquante).",
                 "",
@@ -301,17 +318,20 @@ class ReportBuilder:
         lines = [
             "## 5. Analyse par segment",
             "",
-            "La même erreur, recomposée par quartier, par classe énergétique et par tranche de prix :",
+            "La même erreur, recomposée par quartier, par DPE et par tranche de prix :",
             "c'est là que se décide la prochaine itération du modèle.",
             "",
             "| Axe | Segment | n | RMSE | MAE | Biais | Biais relatif | Couverture |",
             "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for _, row in frame.head(24).iterrows():
+            bias_pct = row.get("bias_pct")
+            bias_text = _percent(float(bias_pct) / 100.0) if pd.notna(bias_pct) else "n/a"
             lines.append(
-                f"| {row['axis']} | `{row['segment']}` | {int(row['n'])} | {_format(row.get('rmse'))} "
-                f"| {_format(row.get('mae'))} | {_format(row.get('bias'))} "
-                f"| {_percent((row.get('bias_pct') or float('nan')) / 100.0)} | {_percent(row.get('coverage'))} |"
+                f"| {row['axis']} | `{row['segment']}` | {int(row['n'])} "
+                f"| {_format(row.get('rmse'))} | {_format(row.get('mae'))} "
+                f"| {_format(row.get('bias'))} | {bias_text} "
+                f"| {_percent(row.get('coverage'))} |"
             )
         lines.append("")
 
@@ -328,8 +348,8 @@ class ReportBuilder:
             return [
                 "## 6. Facteurs explicatifs",
                 "",
-                "Le modèle n'expose pas d'importance native et l'importance par permutation n'a pas",
-                "pu être calculée dans ce run.",
+                "Le modèle n'expose pas d'importance native et la permutation n'a pas",
+                "abouti dans ce run.",
                 "",
             ]
         frame = result.feature_importance.head(12)
@@ -342,12 +362,14 @@ class ReportBuilder:
         ]
         for _, row in frame.iterrows():
             share = abs(float(row["importance"])) / total
+            method = row.get("method", "n/a")
             lines.append(
-                f"| `{row['feature']}` | {_format(row['importance'])} | {share:.1%} | {row.get('method', 'n/a')} |"
+                f"| `{row['feature']}` | {_format(row['importance'])} "
+                f"| {share:.1%} | {method} |"
             )
         lines += [
             "",
-            "Ces facteurs sont ceux affichés à l'utilisateur final : une estimation sans explication",
+            "Ces facteurs sont affichés à l'utilisateur final : une estimation sans explication",
             "n'est pas adoptée par les négociateurs.",
             "",
         ]
@@ -366,16 +388,12 @@ class ReportBuilder:
         lines = ["## 7. Pires erreurs individuelles", "", "| " + " | ".join(columns) + " |",
                  "| " + " | ".join("---" for _ in columns) + " |"]
         for _, row in frame.iterrows():
-            cells = [
-                _format(row[column]) if isinstance(row[column], (int, float, np.floating, np.integer))
-                else str(row[column])
-                for column in columns
-            ]
+            cells = [_cell_text(column, row[column]) for column in columns]
             lines.append("| " + " | ".join(cells) + " |")
         lines += [
             "",
-            "Le détail complet est écrit dans `artifacts/reports/top_errors.csv` : il sert de support",
-            "à la revue d'erreurs hebdomadaire.",
+            "Le détail complet est écrit dans `artifacts/reports/top_errors.csv` : support",
+            "de la revue d'erreurs hebdomadaire.",
             "",
         ]
         return lines
@@ -433,22 +451,24 @@ class ReportBuilder:
 
     def _reproducibility_block(self, result: EvaluationResult) -> list[str]:
         """Render the reproducibility footer (seed, artefacts, configuration)."""
-        extras = dict(result.extras or {})
-        summary = dict(extras.get("model") or {})
+        train_node = dict(self.config.get("train") or {})
+        seed = self.config.get("seed", train_node.get("random_state", "n/a"))
+        model_file = self._config_artifact("model_file", "model.joblib")
+        pipeline_file = self._config_artifact("pipeline_file", "preprocessing.joblib")
         return [
             "## 11. Reproductibilité",
             "",
             "| Élément | Valeur |",
             "| --- | --- |",
-            f"| Seed | `{summary.get('random_state', self._config_artifact('random_state', 'n/a'))}` |",
-            f"| Modèle | `artifacts/models/{self._config_artifact('model_file', 'model.joblib')}` |",
-            f"| Pré-traitement | `artifacts/models/{self._config_artifact('pipeline_file', 'preprocessing.joblib')}` |",
-            f"| Métriques JSON | `artifacts/metrics/regression_report.json` |",
-            f"| Segments CSV | `artifacts/reports/error_by_segment.csv` |",
+            f"| Seed | `{seed}` |",
+            f"| Modèle | `artifacts/models/{model_file}` |",
+            f"| Pré-traitement | `artifacts/models/{pipeline_file}` |",
+            "| Métriques JSON | `artifacts/metrics/regression_report.json` |",
+            "| Segments CSV | `artifacts/reports/error_by_segment.csv` |",
             "",
-            "Rejouer exactement cette évaluation : `python scripts/evaluate.py` (ou `make evaluate`).",
-            "La configuration est entièrement pilotée par Hydra (`conf/`), aucune valeur n'est codée",
-            "en dur dans le code source.",
+            "Rejouer exactement cette évaluation : `python scripts/evaluate.py`",
+            "(ou `make evaluate`). La configuration est entièrement pilotée par Hydra",
+            "(`conf/`) : aucune valeur n'est codée en dur dans le code source.",
             "",
         ]
 
@@ -470,8 +490,8 @@ class ReportBuilder:
         if np.isfinite(bias_pct) and abs(bias_pct) > 2.0:
             direction = "sur-estime" if bias_pct > 0 else "sous-estime"
             hypotheses.append(
-                f"Le modèle {direction} systématiquement ({bias_pct:+.2f} % en moyenne) : la cause la"
-                " plus fréquente est une retransformation du log-prix sans correction de biais"
+                f"Le modèle {direction} systématiquement ({bias_pct:+.2f} % en moyenne) : la cause"
+                " la plus fréquente est une retransformation du log-prix sans correction de biais"
                 " (`exp(mean(log y))` ≠ `mean(y)`), ou une cible tronquée par le clipping."
             )
         rmse = _float(metrics.get("rmse"))
@@ -491,11 +511,20 @@ class ReportBuilder:
                     f" {float(weakest['coverage']):.0%} de couverture : volume d'apprentissage"
                     " insuffisant ou effet spécifique non modélisé."
                 )
+        shrinkage = _shrinkage_signal(result)
+        if shrinkage is not None:
+            low_bias, high_bias = shrinkage
+            hypotheses.append(
+                "Rétraction vers la moyenne : les biens les moins chers sont sur-estimés"
+                f" ({low_bias:+.1f} %) et les plus chers sous-estimés ({high_bias:+.1f} %)."
+                " Cause habituelle : un entraînement en erreur quadratique sur une cible"
+                " multiplicative, que corrige un apprentissage en log-prix (ou une perte L1)."
+            )
         if not result.feature_importance.empty:
             top = result.feature_importance.head(3)["feature"].tolist()
             hypotheses.append(
-                f"L'estimation repose surtout sur {top} : si ces variables sont bruitées, manquantes"
-                " ou dérivent en production, l'erreur se dégrade immédiatement."
+                f"L'estimation repose surtout sur {top} : si ces variables sont bruitées ou"
+                " manquantes, ou dérivent en production, l'erreur se dégrade immédiatement."
             )
         hypotheses.append(
             "Une partie de l'erreur est **irréductible** : le générateur injecte un bruit"
@@ -508,12 +537,11 @@ class ReportBuilder:
         """Metric-driven recommendations (actionable next steps)."""
         recommendations: list[str] = []
         metrics = dict(result.metrics)
-        extras = dict(result.extras or {})
         coverage = _float(result.coverage)
 
-        if np.isfinite(coverage) and coverage < 0.75:
+        if np.isfinite(coverage) and coverage < 0.70:
             recommendations.append(
-                f"Couverture de {coverage:.0%} sous la cible métier (75 %) : élargir la fourchette"
+                f"Couverture de {coverage:.0%} sous la cible métier (70 %) : élargir la fourchette"
                 " publiée, ou ajouter les features manquantes (transactions voisines, tension du"
                 " marché) avant de promettre ± 10 %."
             )
@@ -523,9 +551,9 @@ class ReportBuilder:
                 " exogènes, historique plus long) plutôt qu'à l'hyperparamétrage."
             )
         mape = _float(metrics.get("mape"))
-        if np.isfinite(mape) and mape > 0.15:
+        if np.isfinite(mape) and mape > 15.0:
             recommendations.append(
-                f"MAPE de {mape:.1%} : vérifier la transformation de la cible (travailler en"
+                f"MAPE de {mape:.1f} % : vérifier la transformation de la cible (travailler en"
                 " log-prix) et la gestion des valeurs extrêmes (winsorising 0,5-99,5 %)."
             )
         if not result.per_segment.empty:
@@ -539,6 +567,13 @@ class ReportBuilder:
                     f" (axe `{worst['axis']}`) : ajouter un recalibrage par segment ou une feature"
                     " dédiée plutôt qu'un modèle global unique."
                 )
+        shrinkage = _shrinkage_signal(result)
+        if shrinkage is not None:
+            recommendations.append(
+                "Rétraction vers la moyenne détectée entre les extrêmes de prix : entraîner sur"
+                " le log-prix (puis corriger la retransformation) ou recalibrer par tranche de"
+                " prix avant de publier les estimations."
+            )
         if not result.feature_importance.empty:
             total = float(result.feature_importance["importance"].abs().sum()) or 1.0
             share = float(result.feature_importance.head(3)["importance"].abs().sum()) / total
@@ -565,6 +600,30 @@ class ReportBuilder:
         return default
 
 
+#: Colonnes du tableau des pires erreurs qui portent un identifiant entier (jamais de décimales).
+INTEGER_COLUMNS: tuple[str, ...] = ("row_index", "rooms", "floor_level", "recent_sales_1km")
+
+
+def _cell_text(column: str, value: Any) -> str:
+    """Format one table cell of the worst-errors table.
+
+    Args:
+        column: Column name (drives the integer / amount formatting).
+        value: Cell value.
+
+    Returns:
+        The formatted cell.
+    """
+    if isinstance(value, (np.integer, int)) or str(column) in INTEGER_COLUMNS:
+        try:
+            return f"{int(float(value)):d}"
+        except (TypeError, ValueError):
+            return str(value)
+    if isinstance(value, (np.floating, float)):
+        return _format(value)
+    return str(value)
+
+
 def _worst_segments(frame: pd.DataFrame, limit: int = 3) -> list[str]:
     """Describe the segments with the weakest coverage or the largest bias.
 
@@ -582,11 +641,45 @@ def _worst_segments(frame: pd.DataFrame, limit: int = 3) -> list[str]:
     scored["bias_pct"] = scored["bias_pct"].astype("float64")
     weakest = scored.sort_values("coverage").head(limit)
     sentences = [
-        f"`{row['segment']}` (axe `{row['axis']}`, n={int(row['n'])}) : couverture"
-        f" {row['coverage']:.0%}, biais relatif {row['bias_pct']:+.1f} %, RMSE {_format(row['rmse'])}."
+        f"`{row['segment']}` (axe `{row['axis']}`, n={int(row['n'])}) : couverture "
+        f"{row['coverage']:.0%}, biais relatif {row['bias_pct']:+.1f} %, "
+        f"RMSE {_format(row['rmse'])}."
         for _, row in weakest.iterrows()
     ]
     return sentences
+
+
+def _shrinkage_signal(result: EvaluationResult) -> tuple[float, float] | None:
+    """Detect the classic « shrinkage to the mean » pattern of a price model.
+
+    Le signal : les tranches basses sont sur-estimées (biais relatif positif) **et** les tranches
+    hautes sous-estimées (biais relatif négatif), avec un écart marqué. C'est la signature d'une
+    perte quadratique appliquée à une cible multiplicative.
+
+    Args:
+        result: Evaluation result (uses the per-bucket table).
+
+    Returns:
+        ``(low_bucket_bias_pct, high_bucket_bias_pct)`` when the pattern is clear, else ``None``.
+    """
+    buckets = (result.extras or {}).get("error_by_bucket")
+    if not isinstance(buckets, pd.DataFrame) or len(buckets) < 3:
+        return None
+    if "bias_pct" not in buckets.columns and "bias" not in buckets.columns:
+        return None
+    ordered = buckets.sort_values("bucket") if "bucket" in buckets.columns else buckets
+    frame = ordered.copy()
+    if "median_relative_error_pct" in frame.columns:
+        biases = frame["median_relative_error_pct"].astype("float64")
+    else:
+        biases = frame["bias"].astype("float64")
+    low_bias = float(biases.iloc[0])
+    high_bias = float(biases.iloc[-1])
+    if not (np.isfinite(low_bias) and np.isfinite(high_bias)):
+        return None
+    if low_bias > 1.5 and high_bias < -1.5:
+        return low_bias, high_bias
+    return None
 
 
 def _float(value: Any) -> float:
@@ -613,6 +706,25 @@ def _format(value: Any, digits: int = 2) -> str:
     if abs(number) >= 1000:
         return f"{number:,.0f}".replace(",", " ")
     return f"{number:.{digits}f}"
+
+
+def _percent_from_pct(value: Any) -> str:
+    """Format a value **already expressed in percent** (MAPE, sMAPE, relative errors).
+
+    Le registre de métriques (``src/training/losses_metrics.py``) renvoie ``mape`` et ``smape``
+    multipliés par 100, et l'évaluateur stocke ``relative_error_pct`` / ``bias_pct`` dans la même
+    unité. Les repasser par :func:`_percent` afficherait 750 % au lieu de 7,5 %.
+
+    Args:
+        value: Nombre en unités de pourcentage (ou NaN).
+
+    Returns:
+        The formatted percentage.
+    """
+    number = _float(value)
+    if not np.isfinite(number):
+        return "n/a"
+    return f"{number:.1f} %"
 
 
 def _percent(value: Any) -> str:

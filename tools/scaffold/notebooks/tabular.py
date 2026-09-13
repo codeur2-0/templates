@@ -80,6 +80,10 @@ def _tokens(context: NotebookContext) -> dict[str, str]:
         "__TASK__": str(spec.metrics.task),
         "__PRIMARY__": str(spec.metrics.primary),
         "__ALGO__": str(spec.model.algorithm),
+        # Le libellé de la baseline dépend de la tâche : classe majoritaire vs médiane.
+        "__BASELINE_LABEL__": (
+            "baseline (médiane)" if _is_regression(context) else "baseline (classe majoritaire)"
+        ),
         "__MODEL_CLASS__": context.model_class,
         "__FRAMEWORK__": spec.stack_key,
         "__DROP__": context.py_list(
@@ -94,6 +98,18 @@ def _tokens(context: NotebookContext) -> dict[str, str]:
         # époques (sklearn, boosting), il borne l'exécution des stacks itératives (deep learning).
         "__NB_EPOCHS__": str(NB_EPOCHS_DEEP if context.stack.epochs_based else NB_EPOCHS_DEFAULT),
     }
+
+
+def _is_regression(context: NotebookContext) -> bool:
+    """Return ``True`` when the project predicts a continuous target.
+
+    Args:
+        context: Notebook context.
+
+    Returns:
+        ``True`` for a regression / forecasting task, ``False`` otherwise.
+    """
+    return str(getattr(context.spec.metrics, "task", "")) in {"regression", "forecasting"}
 
 
 def _render(source: str, context: NotebookContext) -> str:
@@ -551,7 +567,12 @@ for column in categorical_columns:
     ]
 
     if data.target:
-        cells += _target_cells(context)
+        if _is_regression(context):
+            from tools.scaffold.notebooks.regression import target_cells
+
+            cells += target_cells(context)
+        else:
+            cells += _target_cells(context)
 
     cells += [
         _md("## 6. Colinéarité et structure"),
@@ -926,11 +947,18 @@ show_violation("colonne manquante", corrupted)
         ),
         _code(
             """
-categorical_checked = [
-    name
-    for name, column in RawDataSchema.to_schema().columns.items()
-    if any(getattr(check, "name", "") == "isin" for check in (getattr(column, "checks", []) or []))
-]
+# Une colonne catégorielle **textuelle** contrainte par `isin` : c'est la seule que l'on puisse
+# corrompre avec une chaîne. Un booléen codé 0/1 porte souvent un `isin` lui aussi, mais pandas
+# refuse d'y écrire du texte (TypeError) — ce n'est pas la violation que l'on veut démontrer.
+textual_dtypes = ("str", "object", "category")
+categorical_checked = []
+for name, column in RawDataSchema.to_schema().columns.items():
+    dtype = str(getattr(column, "dtype", "")).lower()
+    if not any(marker in dtype for marker in textual_dtypes):
+        continue
+    checks = getattr(column, "checks", []) or []
+    if any(getattr(check, "name", "") == "isin" for check in checks):
+        categorical_checked.append(str(name))
 if categorical_checked:
     column = categorical_checked[0]
     corrupted = raw.copy()
@@ -1474,7 +1502,7 @@ model_metrics = calculator.evaluate(
 
 comparison = pd.DataFrame(
     {
-        "modèle": ["__ALGO__", "baseline (classe majoritaire)"],
+        "modèle": ["__ALGO__", "__BASELINE_LABEL__"],
         CONFIG.metrics.primary: [model_metrics.get(CONFIG.metrics.primary, float("nan")),
                                  baseline_metrics.get(f"baseline_{CONFIG.metrics.primary}", float("nan"))],
     }
@@ -1486,11 +1514,11 @@ comparison.round(4)
         _insight(
             [
                 "Un modèle qui ne bat pas la baseline n'apporte **aucune** valeur : il ne doit pas aller en production.",
-                f"La métrique primaire du projet est `{spec.metrics.primary}` ; le seuil cible déclaré est {spec.metrics.min_primary}.",
+                f"La métrique primaire du projet est `{spec.metrics.primary}` (sens : {spec.metrics.direction}) ; le seuil de qualité déclaré est {spec.metrics.min_primary}.",
                 "La baseline est recalculée sur le **même** split de validation : la comparaison est loyale.",
             ]
         ),
-        _md("## 2. Comparaison des algorithmes de la stack"),
+        _md("## 2. Comparaison des algorithmes de la stack (réglages par défaut)"),
         _code(
             """
 from src.models.factory import available_algorithms
@@ -1500,9 +1528,15 @@ print(f"{len(ALGORITHMS)} algorithmes disponibles pour la tâche '{CONFIG.metric
 print(ALGORITHMS)
 
 rows = []
+# Comparaison **loyale** : chaque algorithme est construit avec ses réglages par défaut.
+# Les `model.params` configurés sont réglés pour l'algorithme retenu ; les réutiliser
+# ailleurs fausserait le classement (`max_leaf_nodes` bride une forêt aléatoire).
+# Le modèle configuré et réglé est, lui, évalué en section 1.
 for algorithm in ALGORITHMS:
     try:
-        candidate = build_model(CONFIG, feature_names=PREPARED["feature_names"], algorithm=algorithm)
+        candidate = build_model(
+            CONFIG, feature_names=PREPARED["feature_names"], algorithm=algorithm, params={}
+        )
         result = candidate.fit(
             PREPARED["X_train"], PREPARED["y_train"],
             X_val=PREPARED["X_val"], y_val=PREPARED["y_val"], callbacks=[],
@@ -1527,7 +1561,13 @@ for algorithm in ALGORITHMS:
         rows.append({"algorithme": algorithm, CONFIG.metrics.primary: float("nan"), "secondes": float("nan")})
         print(f"  ! {algorithm} ignoré : {type(error).__name__}: {error}")
 
-ranking = pd.DataFrame(rows).sort_values(CONFIG.metrics.primary, ascending=False).reset_index(drop=True)
+# Le meilleur en tête, quel que soit le sens de la métrique (AUC : décroissant, RMSE : croissant).
+meilleur_d_abord = str(CONFIG.metrics.direction) == "minimize"
+ranking = (
+    pd.DataFrame(rows)
+    .sort_values(CONFIG.metrics.primary, ascending=meilleur_d_abord)
+    .reset_index(drop=True)
+)
 ranking.round(4)
 """,
             context,
@@ -1535,6 +1575,7 @@ ranking.round(4)
         _insight(
             [
                 "Le classement se lit **avec** le temps d'entraînement : un gain de 0.005 pour 20x plus lent est rarement rentable.",
+                "Chaque algorithme est comparé **à réglages par défaut** : un algorithme perdant ici peut gagner une fois réglé (section 3).",
                 "Un écart faible entre algorithmes indique que la limite vient des **données**, pas du modèle.",
                 "Les valeurs manquantes (NaN) signalent une métrique non définie pour l'algorithme (ex. probabilités absentes).",
             ]
@@ -1586,7 +1627,9 @@ for combination in combinations:
     row[CONFIG.metrics.primary] = values.get(CONFIG.metrics.primary, float("nan"))
     rows.append(row)
 
-grid_frame = pd.DataFrame(rows).sort_values(CONFIG.metrics.primary, ascending=False)
+grid_frame = pd.DataFrame(rows).sort_values(
+    CONFIG.metrics.primary, ascending=str(CONFIG.metrics.direction) == "minimize"
+)
 grid_frame.round(4)
 """,
                 context,
@@ -1875,10 +1918,21 @@ threshold_callback = next(
 )
 threshold = CONFIG.metrics.min_primary
 observed = OUTCOME.metrics.get(f"val_{CONFIG.metrics.primary}", float("nan"))
-verdict = "INCONNU" if not np.isfinite(observed) else ("OK" if observed >= float(threshold) else "ÉCHEC")
-print(f"métrique          : val_{CONFIG.metrics.primary}")
-print(f"valeur observée   : {observed:.4f}")
-print(f"seuil configuré   : {threshold}")
+seuil = float(threshold) if threshold is not None else float("nan")
+
+# Le sens du seuil dépend de la métrique : un ROC AUC doit le dépasser, un RMSE rester en dessous.
+if not np.isfinite(observed) or not np.isfinite(seuil):
+    verdict = "INCONNU"
+elif CONFIG.metrics.direction == "maximize":
+    verdict = "OK" if observed >= seuil else "ÉCHEC"
+else:
+    verdict = "OK" if observed <= seuil else "ÉCHEC"
+
+formatage = "{:,.2f}" if abs(observed) >= 1000 else "{:.4f}"
+sens = "plus c'est haut, mieux c'est" if CONFIG.metrics.direction == "maximize" else "plus c'est bas, mieux c'est"
+print(f"métrique          : val_{CONFIG.metrics.primary} ({sens})")
+print(f"valeur observée   : {formatage.format(observed)}")
+print(f"seuil configuré   : {formatage.format(seuil) if np.isfinite(seuil) else 'aucun'}")
 print(f"verdict           : {verdict}")
 print(f"callback satisfait: {getattr(threshold_callback, 'satisfied', 'n/a')}")
 """,
@@ -2254,15 +2308,23 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
     Returns:
         The written notebook paths, in order.
     """
+    error_analysis = build_06_error_analysis
+    if _is_regression(context):
+        # L'analyse d'erreurs d'une cible continue n'a ni matrice de confusion ni seuil à arbitrer.
+        from tools.scaffold.notebooks.regression import (
+            build_06_error_analysis as build_06_regression,
+        )
+
+        error_analysis = build_06_regression
     builders = (
         build_01_eda,
         build_02_validation,
         build_03_preprocessing,
         build_04_model_exploration,
         build_05_training,
-        build_06_error_analysis,
+        error_analysis,
     )
     return [builder(context, destination) for builder in builders]
 
 
-__all__ = ["NB_ROWS", "build_01_eda", "build_06_error_analysis", "build_all"]
+__all__ = ["NB_ROWS", "build_01_eda", "build_06_error_analysis", "build_all", "_is_regression"]

@@ -57,7 +57,7 @@ CONFIDENCE_BAND_FACTORS: tuple[tuple[str, float], ...] = (
 #: Seuils de profondeur de marché (nombre de comparables) déterminant le niveau de confiance.
 CONFIDENCE_BOUNDS: tuple[tuple[float, str], ...] = ((30.0, "élevée"), (10.0, "moyenne"), (0.0, "faible"))
 
-#: Colonnes candidates pour la profondeur de marché (détectées si la configuration n'en déclare pas).
+#: Colonnes candidates pour la profondeur de marché (détection si non configurée).
 DEPTH_COLUMN_CANDIDATES: tuple[str, ...] = (
     "recent_sales_1km",
     "comparable_sales",
@@ -118,6 +118,8 @@ class Predictor:
         self.tolerance_pct = float(tolerance_pct)
         self.depth_column = depth_column
         self.unit_column = unit_column
+        #: Colonne unitaire effectivement résolue lors du dernier appel à :meth:`predict`.
+        self.unit_column_used: str | None = unit_column
 
     # ------------------------------------------------------------------ factories -------
     @classmethod
@@ -274,6 +276,8 @@ class Predictor:
         output["estimate_high"] = output["estimate"] * (1.0 + output["band_pct"] / 100.0)
 
         unit_column = self._resolve_unit_column(payload)
+        # Mémorisé pour libeller la raison d'estimation (« 3 877 EUR par surface_m2 »).
+        self.unit_column_used = unit_column
         if unit_column is not None:
             denominator = pd.to_numeric(payload[unit_column], errors="coerce").to_numpy(dtype="float64")
             with np.errstate(divide="ignore", invalid="ignore"):
@@ -436,7 +440,8 @@ class Predictor:
         band = float(row.get("band_pct", self.tolerance_pct))
         confidence = str(row.get("confidence", "n/a"))
         unit_price = row.get("unit_price")
-        unit_text = f" • {float(unit_price):,.0f}/unité" if _is_number(unit_price) else ""
+        unit_label = self.unit_column_used or "unité"
+        unit_text = f" • {float(unit_price):,.0f} par {unit_label}" if _is_number(unit_price) else ""
         return (
             f"estimation {float(estimate):,.0f} ± {band:.1f} % (confiance {confidence}){unit_text}"
         )

@@ -658,6 +658,20 @@ class _SklearnAdapter:
         predictions = np.asarray(self.model.predict(X), dtype="float64").ravel()
         return float(r2_score(np.asarray(y, dtype="float64"), predictions))
 
+    def fit(self, X: pd.DataFrame, y: Any = None, **fit_params: Any) -> _SklearnAdapter:
+        """Delegate to the wrapped model (``permutation_importance`` requires a ``fit`` method).
+
+        Args:
+            X: Features.
+            y: Observed values.
+            **fit_params: Extra keyword arguments accepted by the wrapped model.
+
+        Returns:
+            ``self``, as expected by the scikit-learn estimator protocol.
+        """
+        self.model.fit(X, y, **fit_params)
+        return self
+
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """Delegate to the wrapped model.
 
@@ -688,10 +702,18 @@ def _segment_candidates(context: pd.DataFrame | None) -> list[str]:
     candidates: list[str] = []
     for column in context.columns:
         series = context[column]
-        if isinstance(series.dtype, pd.CategoricalDtype) or series.dtype == object:
-            unique = int(series.nunique(dropna=True))
-            if 1 < unique <= MAX_SEGMENT_CARDINALITY:
-                candidates.append(str(column))
+        # pandas >= 3 expose les colonnes textuelles avec le dtype `str` (et non plus `object`) :
+        # `is_string_dtype` couvre les deux, ainsi que les `category`.
+        textual = (
+            isinstance(series.dtype, pd.CategoricalDtype)
+            or series.dtype == object
+            or pd.api.types.is_string_dtype(series)
+        )
+        if not textual:
+            continue
+        unique = int(series.nunique(dropna=True))
+        if 1 < unique <= MAX_SEGMENT_CARDINALITY:
+            candidates.append(str(column))
     return candidates[:4]
 
 

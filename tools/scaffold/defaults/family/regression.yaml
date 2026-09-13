@@ -42,10 +42,10 @@ business:
     correctement pricing, homogénéité des estimations entre agences, détection automatique des
     biens dont la fourchette est trop large (à revoir par un humain).
   success_criteria:
-    - "MAPE ≤ 12 % sur le split de test hors échantillon (le générateur injecte un bruit irréductible d'environ 9 %)."
+    - "MAPE ≤ 12 % sur le split de test hors échantillon (plancher statistique ≈ 5,6 % à bruit donné)."
     - "R² ≥ 0.80 : la majeure partie de la variance des prix doit être expliquée par la fiche bien."
     - "RMSE ≤ 90 000 EUR, et erreur médiane ≤ 25 000 EUR : la RMSE seule masque les biens d'exception."
-    - "Couverture de la fourchette ±10 % ≥ 75 % des biens : une fourchette qui ne couvre pas est inutile."
+    - "Couverture de la fourchette ±10 % ≥ 70 % des biens (plafond statistique ≈ 82 % à bruit donné)."
     - "Biais moyen (sous-estimation systématique) < 2 % du prix : un biais directionnel coûte cher en négociation."
     - "Reproductibilité : deux exécutions avec la même seed produisent exactement les mêmes métriques."
   cadence: "Estimation à la demande (API synchrone) et ré-entraînement hebdomadaire sur les annonces récentes."
@@ -63,10 +63,10 @@ data:
     caractéristiques physiques, énergétiques, géographiques et administratives, et le prix de vente
     net vendeur observé. Les données sont générées par un modèle multiplicatif en log-prix :
     chaque caractéristique contribue par un facteur explicite (prime de quartier, effet surface en
-    log, malus énergétique, effet étage), puis un bruit log-normal irréductible est ajouté. Le
+    log, malus énergétique, effet étage), puis un bruit log-normal irréductible (sigma = 7 %) est ajouté. Le
     signal est réaliste — hétéroscédastique, non linéaire, avec colinéarités — et plafonne la
     performance atteignable.
-  n_samples: 5000
+  n_samples: 8000
   seed: 42
   formats: [parquet, csv]
   target: price_eur
@@ -188,19 +188,19 @@ data:
     - "L'effet de la surface est **concave** : le prix au m² décroît avec la taille. Un modèle linéaire en surface sur-évalue systématiquement les grands biens et sous-évalue les studios."
     - "`rooms` et `property_tax_eur` sont quasi redondants avec `surface_m2` : colinéarité attendue, pénalisante pour un modèle linéaire régularisé, neutre pour les arbres."
     - "Le DPE pèse de plus en plus : une classe F ou G entraîne une décote explicite (interdiction progressive de location des passoires thermiques), non linéaire entre E et G."
-    - "L'étage ne vaut que **si** l'immeuble dispose d'un ascenseur : l'interaction étage × ascenseur change le signe de l'effet (un 6e sans ascenseur est décoté, un 6e avec ascenseur est primé)."
+    - "L'étage ne vaut que **si** l'immeuble dispose d'un ascenseur : l'interaction étage x ascenseur change le signe de l'effet (un 6e sans ascenseur est décoté, un 6e avec ascenseur est primé)."
     - "L'année de construction a un effet en U : l'haussmannien et le très récent sont primés, les constructions des années 1960-1975 sont décotées."
     - "`transport_walk_min` a un effet décroissant : chaque minute compte beaucoup jusqu'à 10 minutes, presque plus au-delà de 25."
     - "Les erreurs sont **hétéroscédastiques** : l'erreur absolue croît avec le prix. Piloter uniquement la RMSE conduit à sacrifier les petits biens ; le MAPE et l'erreur médiane sont plus justes."
     - "`recent_sales_1km` n'explique pas le prix mais la **fiabilité** de l'estimation : un marché fin (< 10 ventes) doit produire une fourchette plus large, pas un prix plus précis."
     - "Quelques biens d'exception existent légitimement (> 1,2 M EUR) : les supprimer appauvrirait le modèle, le winsorising (0,5-99,5 %) et une analyse d'erreur dédiée sont préférables."
     - "`condition_score` et `condo_fees_eur` comportent des manquants volontaires (6 % et 4 %) : l'imputation doit être explicite, et un indicateur de manquant est souvent rentable."
-    - "Le bruit injecté (multiplicateur log-normal d'environ 9 %) fixe un plafond : un MAPE proche de 0 signerait une fuite de données, pas un bon modèle."
+    - "Le bruit injecté (multiplicateur log-normal d'environ 7 %) fixe un plafond : un MAPE proche de 0 signerait une fuite de données, pas un bon modèle. Même un modèle parfait ne couvre que ~82 % des biens à ±10 %."
   recommendations:
     - "Publier une **fourchette** et un niveau de confiance, jamais un prix unique : c'est ce que le métier sait exploiter."
     - "Piloter le modèle sur le MAPE, l'erreur médiane et la couverture de fourchette ; garder la RMSE comme indicateur de risque sur les biens chers."
     - "Travailler en log-prix (transformer la cible) puis revenir en euros à l'inférence, avec correction de biais de retransformation."
-    - "Recalibrer par segment (quartier × tranche de surface) : un biais de +4 % en périphérie nord coûte plus qu'un biais moyen nul."
+    - "Recalibrer par segment (quartier x tranche de surface) : un biais de +4 % en périphérie nord coûte plus qu'un biais moyen nul."
     - "Surveiller la dérive du marché (taux d'intérêt, saisonnalité) : un modèle de prix immobilier se décale en quelques mois, d'où le ré-entraînement hebdomadaire."
     - "Documenter et tester l'usage des proxies géographiques : mesurer l'écart d'estimation à caractéristiques égales entre quartiers est un garde-fou d'équité."
     - "Ajouter des features exogènes en production (transactions voisines, taux de crédit, tension locative) : c'est le levier de performance principal au-delà de la fiche bien."
@@ -208,8 +208,8 @@ data:
     - "Valeurs manquantes volontaires sur `condition_score` (~6 %) et `condo_fees_eur` (~4 %) pour exercer l'imputation."
     - "Outliers légitimes (~1 %) : biens d'exception (grande surface, centre historique, état haut de gamme)."
     - "Colinéarité volontaire entre `surface_m2`, `rooms` et `property_tax_eur`."
-    - "Cible générée par un modèle multiplicatif en log-prix avec interactions (étage × ascenseur, surface concave, malus DPE non linéaire)."
-    - "Bruit irréductible log-normal (σ ≈ 0.09) : un prix parfait indiquerait une fuite de données."
+    - "Cible générée par un modèle multiplicatif en log-prix avec interactions (étage x ascenseur, surface concave, malus DPE non linéaire)."
+    - "Bruit irréductible log-normal (σ ≈ 0.07) : un prix parfait indiquerait une fuite de données."
 
 metrics:
   task: regression

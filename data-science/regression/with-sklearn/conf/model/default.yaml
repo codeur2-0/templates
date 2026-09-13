@@ -1,0 +1,42 @@
+# =================================================================================================
+# Modèle : Gradient boosting histogrammé scikit-learn (régression)
+# -------------------------------------------------------------------------------------------------
+# Le gradient boosting histogrammé est l'estimateur scikit-learn le plus solide sur données
+# tabulaires : il apprend les non-linéarités du cas (effet concave de la surface, interaction
+# étage x ascenseur, malus énergétique non linéaire), gère nativement les valeurs manquantes
+# (`condition_score`, `condo_fees_eur`) sans imputation préalable, et converge en environ une
+# seconde sur 8 000 biens. Mesuré sur ce jeu (split de test) : RMSE ~34 800 EUR, MAE ~22 800 EUR,
+# R2 ~0,95, MAPE ~7,5 % et ~72 % des estimations dans la fourchette publiée de ±10 % — contre ~9,5
+# % de MAPE et ~62 % de couverture pour une forêt aléatoire réglée. Il sert de référence aux
+# autres stacks du cas d'usage.
+#
+# Alternatives considérées : random_forest : robuste, importance native, mais ~2 points de MAPE au-dessus et couverture plus faible, logistic_regression (Ridge en régression) : baseline linéaire interprétable, sous-estime les effets concaves, gradient_boosting : variante historique, plus lente à entraîner, extra_trees : plus de variance aléatoire, parfois plus robuste au bruit, svm (SVR) : bon sur petits volumes, coûteux au-delà de 100k lignes.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.max_iter=...
+# =================================================================================================
+
+name: "Gradient boosting histogrammé scikit-learn (régression)"
+algorithm: hist_gradient_boosting
+class: SklearnModel
+task: regression
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `SklearnModel(params=...)` (voir src/models/model.py).
+params:
+  max_iter: 400
+  learning_rate: 0.05
+  max_leaf_nodes: 31
+  min_samples_leaf: 20
+  l2_regularization: 1.0
+  early_stopping: false
+  loss: squared_error
+
+# --- options spécifiques à la stack `sklearn` ---------------------------------------
+cross_validation:
+  enabled: true
+  folds: 5
+  strategy: kfold

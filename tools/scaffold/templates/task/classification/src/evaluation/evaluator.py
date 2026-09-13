@@ -570,6 +570,20 @@ class _SklearnAdapter:
         predictions = self.model.predict(X)
         return float(np.mean(np.asarray(predictions).astype(str) == np.asarray(y).astype(str)))
 
+    def fit(self, X: pd.DataFrame, y: Any = None, **fit_params: Any) -> _SklearnAdapter:
+        """Delegate to the wrapped model (``permutation_importance`` requires a ``fit`` method).
+
+        Args:
+            X: Features.
+            y: Ground truth.
+            **fit_params: Extra keyword arguments accepted by the wrapped model.
+
+        Returns:
+            ``self``, as expected by the scikit-learn estimator protocol.
+        """
+        self.model.fit(X, y, **fit_params)
+        return self
+
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """Delegate to the wrapped model.
 
