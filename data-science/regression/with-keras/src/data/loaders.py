@@ -458,7 +458,11 @@ class DatasetSplitter:
             shuffle=bool(split_node.get("shuffle", True)),
             random_state=int(seed if seed is not None else config.get("seed", 42)),
             time_column=data_node.get("time_column"),
-            time_based=bool(split_node.get("time_based", False)) or bool(data_node.get("time_column")),
+            # `time_based` explicite gagne ; à défaut, un split chronologique est retenu dès
+            # qu'une colonne temporelle existe (cas des séries temporelles).
+            time_based=bool(
+                split_node.get("time_based", bool(data_node.get("time_column")))
+            ),
         )
 
     def split(self, frame: pd.DataFrame, target: str | None = None) -> SplitFrames:
