@@ -50,7 +50,7 @@ def _failure_count(error: BaseException) -> int:
     """
     cases = getattr(error, "failure_cases", None)
     if cases is not None and len(cases):
-        return int(len(cases))
+        return len(cases)
     sub_errors = list(getattr(error, "schema_errors", []) or [])
     return max(len(sub_errors), 1)
 
@@ -250,6 +250,7 @@ def _without_target(frame: pd.DataFrame, target: str | None) -> pd.DataFrame:
     if target is not None and target in frame.columns:
         return frame.drop(columns=[target])
     return frame
+
 
 class TestInferenceSchema:
     """Contrat des payloads de prédiction."""

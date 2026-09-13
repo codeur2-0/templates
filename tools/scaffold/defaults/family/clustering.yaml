@@ -1,0 +1,343 @@
+# ==============================================================================================
+# Famille « clustering » — cas d'usage : segmentation client d'un e-commerçant (mode & maison).
+# Toutes les stacks de cette famille partagent EXACTEMENT ce cas d'usage, ces données et ces
+# métriques : seule l'implémentation de l'algorithme change. C'est ce qui rend la comparaison
+# pédagogique et honnête.
+# ==============================================================================================
+
+domain: data-science
+problem: clustering
+modality: tabular
+family: clustering
+
+business:
+  persona: >-
+    Équipe CRM & Data d'un e-commerçant français (mode et maison, ~250 000 clients actifs), avec
+    un data scientist qui construit la segmentation, un responsable CRM qui pilote les campagnes
+    d'acquisition et de rétention, et un outil de marketing automation qui consomme le segment de
+    chaque client pour choisir le message, le canal et la pression publicitaire.
+  context: >-
+    La segmentation actuelle est artisanale : trois seuils RFM (récence, fréquence, montant) posés
+    à la main dans un tableur, revus une fois par an. Elle classe 62 % des clients dans un seul
+    groupe « standard », ignore complètement le comportement promotionnel, le taux de retour et la
+    pression sur le service client, et ne dit rien des nouveaux inscrits qui n'ont pas encore
+    commandé. Résultat : les campagnes sont indifférenciées, le coût d'acquisition augmente, et le
+    churn des clients à fort potentiel n'est détecté qu'après six mois d'inactivité.
+  problem: >-
+    Découvrir **sans étiquette préalable** des groupes de clients homogènes et actionnables à
+    partir de leur comportement d'achat et d'engagement sur douze mois glissants, choisir le
+    nombre de groupes de façon argumentée (et non arbitraire), profiler chaque groupe, puis
+    affecter tout nouveau client au groupe le plus proche avec un niveau de confiance.
+  inputs: >-
+    Agrégats client sur douze mois glissants : récence du dernier achat, nombre de commandes,
+    chiffre d'affaires, panier moyen, largeur du catalogue achetée, part du chiffre d'affaires
+    réalisée en promotion, taux de retour, tickets de service client, ouvertures de newsletter,
+    sessions web et part mobile, palier de fidélité, canal d'acquisition, région, NPS déclaré,
+    consentement marketing, date d'inscription.
+  outputs: >-
+    Identifiant de segment, probabilité d'appartenance (quand l'algorithme en produit), distance au
+    centre du segment, niveau de confiance de l'affectation, profil du segment (effectif, part du
+    chiffre d'affaires, comportement dominant, taux de churn observé) et recommandation d'action
+    CRM associée.
+  value: >-
+    Campagnes différenciées (message, canal, remise) au lieu d'un envoi unique, détection précoce
+    des clients à fort potentiel qui décrochent, arbitrage du budget promotionnel (ne plus remiser
+    les clients qui achètent au prix fort), et mesure de la valeur par segment pour prioriser les
+    investissements d'acquisition.
+  success_criteria:
+    - "Silhouette moyenne ≥ 0.25 sur le split de test hors échantillon (structure de groupes réelle, pas du bruit)."
+    - "Indice de Davies-Bouldin ≤ 1.60 et Calinski-Harabasz ≥ 900 : compacité et séparation simultanées."
+    - "Aucun groupe dégénéré : chaque segment représente ≥ 3 % des clients (sinon il est fusionné ou supprimé)."
+    - "Stabilité : ARI ≥ 0.85 entre deux entraînements de graines différentes (une segmentation qui bouge à chaque run n'est pas exploitable)."
+    - "Validité externe : écart de taux de churn à 90 jours ≥ 20 points entre le segment le plus sain et le plus à risque."
+    - "Accord avec la structure latente injectée dans le générateur : ARI ≥ 0.45 (diagnostic pédagogique, indisponible en production)."
+    - "Reproductibilité : deux exécutions avec la même seed produisent exactement les mêmes affectations."
+  cadence: >-
+    Segmentation recalculée chaque nuit sur les clients actifs (affectation incrémentale des
+    nouveaux), profils et seuils revus mensuellement avec le CRM, ré-entraînement complet trimestriel.
+  constraints:
+    - "Aucune donnée réelle de client : le dataset de ce dépôt est synthétique et hors ligne."
+    - "Aucune étiquette de segment en production : la variable latente du générateur sert uniquement de diagnostic pédagogique et n'est jamais une feature."
+    - "L'affectation d'un client doit être explicable en une phrase au CRM (profil du segment + distance)."
+    - "Traitement sur CPU de 250 000 clients en moins de 5 minutes (fenêtre de batch nocturne)."
+    - "Vigilance RGPD et équité : la région et le canal d'acquisition sont des proxies socio-économiques ; leur influence sur l'affectation doit être documentée et surveillée."
+
+data:
+  dataset_name: retail_customer_base
+  title: "Base clients e-commerce et comportement d'achat sur 12 mois"
+  description: >-
+    Population de clients d'un e-commerçant (mode et maison) avec leurs agrégats comportementaux
+    sur douze mois glissants. Les données sont générées à partir de **six profils latents**
+    (VIP fidèle, chasseur de promotions, acheteur occasionnel, dormeur, nouveau curieux, client
+    insatisfait) : chaque profil définit des distributions propres (fréquence, panier, part
+    promotionnelle, taux de retour, engagement), puis un bruit individuel et des chevauchements
+    volontaires sont injectés. La structure est donc réelle mais **non triviale** : les groupes se
+    recouvrent partiellement, ce qui rend le choix du nombre de clusters et la lecture de la
+    silhouette authentiquement difficiles. Deux colonnes de métadonnées (segment latent et churn
+    observé à 90 jours) permettent de mesurer la qualité de la segmentation sans jamais entrer
+    dans les features.
+  n_samples: 6000
+  seed: 42
+  formats: [parquet, csv]
+  target: null
+  id_column: customer_id
+  time_column: signup_date
+  group_column: acquisition_channel
+  columns:
+    - name: customer_id
+      dtype: str
+      role: identifier
+      description: "Identifiant unique du client"
+      unique: true
+      checks: { regex: "^CUS-[0-9]{6}$" }
+      distribution: "identifiants séquentiels uniques"
+    - name: signup_date
+      dtype: datetime
+      role: timestamp
+      description: "Date d'inscription (première création de compte)"
+      distribution: "étalement sur ~5 ans, accéléré par les campagnes d'acquisition"
+    - name: last_order_date
+      dtype: datetime
+      role: timestamp
+      description: "Date de la dernière commande"
+      distribution: "découlée de la récence ; jamais postérieure à la date de référence"
+    - name: tenure_months
+      dtype: int
+      role: feature
+      description: "Ancienneté du compte en mois"
+      unit: "mois"
+      checks: { ge: 0, le: 62 }
+      distribution: "≈ (date de référence - signup_date) ; forte densité sur les 24 derniers mois"
+    - name: recency_days
+      dtype: int
+      role: feature
+      description: "Nombre de jours depuis la dernière commande"
+      unit: "jours"
+      checks: { ge: 1, le: 730 }
+      distribution: "bimodale : acheteurs actifs (< 90 j) et dormeurs (> 250 j)"
+    - name: orders_12m
+      dtype: int
+      role: feature
+      description: "Nombre de commandes sur 12 mois glissants"
+      unit: "commandes"
+      checks: { ge: 0, le: 60 }
+      distribution: "Poisson selon le profil latent : ~0-1 pour un dormeur, ~12-20 pour un VIP"
+    - name: revenue_12m_eur
+      dtype: float
+      role: feature
+      description: "Chiffre d'affaires réalisé sur 12 mois glissants"
+      unit: "EUR"
+      checks: { ge: 0.0, le: 15000.0 }
+      distribution: "log-normale : médiane ~480 EUR, queue droite (VIP et clients d'exception)"
+    - name: avg_basket_eur
+      dtype: float
+      role: feature
+      description: "Panier moyen (chiffre d'affaires / nombre de commandes)"
+      unit: "EUR"
+      nullable: true
+      checks: { ge: 0.0, le: 950.0 }
+      distribution: "≈ revenue / orders avec bruit ; manquant quand orders_12m = 0"
+    - name: distinct_categories_12m
+      dtype: int
+      role: feature
+      description: "Nombre de catégories de produits achetées (largeur du catalogue)"
+      unit: "catégories"
+      checks: { ge: 0, le: 12 }
+      distribution: "croît avec la fréquence ; ~1-2 pour un occasionnel, 6-10 pour un VIP"
+    - name: discount_share
+      dtype: float
+      role: feature
+      description: "Part du chiffre d'affaires réalisée avec une remise"
+      unit: "%"
+      checks: { ge: 0.0, le: 1.0 }
+      distribution: "bêta : ~0.15 pour un VIP, ~0.75 pour un chasseur de promotions"
+    - name: return_rate
+      dtype: float
+      role: feature
+      description: "Taux de retour (articles retournés / articles commandés)"
+      unit: "%"
+      checks: { ge: 0.0, le: 1.0 }
+      distribution: "bêta centrée ~0.12 ; élevée (> 0.35) pour le profil insatisfait"
+    - name: support_tickets_12m
+      dtype: int
+      role: feature
+      description: "Nombre de contacts au service client (réclamation, SAV, question livraison)"
+      unit: "tickets"
+      checks: { ge: 0, le: 15 }
+      distribution: "Poisson ~0.4 en général, ~3-5 pour le profil insatisfait"
+    - name: newsletter_opens_12m
+      dtype: int
+      role: feature
+      description: "Nombre d'ouvertures de newsletter sur 12 mois"
+      unit: "ouvertures"
+      checks: { ge: 0, le: 120 }
+      distribution: "binomiale selon le consentement et le profil : très élevée chez les chasseurs de promo"
+    - name: web_sessions_12m
+      dtype: int
+      role: feature
+      description: "Nombre de sessions web ou application sur 12 mois"
+      unit: "sessions"
+      checks: { ge: 0, le: 400 }
+      distribution: "Poisson : élevé chez les nouveaux curieux (beaucoup de visites, peu d'achats)"
+    - name: mobile_share
+      dtype: float
+      role: feature
+      description: "Part des sessions réalisées sur mobile"
+      unit: "%"
+      checks: { ge: 0.0, le: 1.0 }
+      distribution: "bêta centrée ~0.62 ; plus élevée chez les inscrits récents (dérive d'usage)"
+    - name: loyalty_tier
+      dtype: category
+      role: feature
+      description: "Palier du programme de fidélité"
+      checks: { isin: [none, silver, gold, platinum] }
+      distribution: "~48 % none, ~28 % silver, ~18 % gold, ~6 % platinum (dépend du CA cumulé)"
+    - name: acquisition_channel
+      dtype: category
+      role: feature
+      description: "Canal d'acquisition du client"
+      checks: { isin: [organic, paid_search, social, marketplace, referral, email] }
+      distribution: "~26 % organic, ~22 % paid_search, ~19 % social, ~14 % marketplace, ~11 % referral, ~8 % email"
+    - name: region
+      dtype: category
+      role: feature
+      description: "Région de livraison principale"
+      checks: { isin: [ile_de_france, nord, ouest, sud_ouest, sud_est, est] }
+      distribution: "~24 % IDF, ~16 % nord, ~17 % ouest, ~13 % sud_ouest, ~18 % sud_est, ~12 % est"
+    - name: nps_score
+      dtype: int
+      role: feature
+      description: "Note de recommandation déclarée (Net Promoter Score individuel)"
+      unit: "/10"
+      nullable: true
+      checks: { ge: 0, le: 10 }
+      distribution: "~8 % de manquants (enquête non répondue) ; bimodale : détracteurs et promoteurs"
+    - name: opt_in_marketing
+      dtype: bool
+      role: feature
+      description: "Consentement aux communications marketing (1 = oui)"
+      checks: { isin: [0, 1] }
+      distribution: "~71 % de consentants ; quasi systématique chez les chasseurs de promotions"
+    - name: latent_segment
+      dtype: category
+      role: metadata
+      description: "Profil latent injecté par le générateur — diagnostic pédagogique uniquement"
+      checks: { isin: [vip_fidele, chasseur_promo, acheteur_occasionnel, dormeur, nouveau_curieux, client_insatisfait] }
+      distribution: "~8 % VIP, ~18 % promo, ~32 % occasionnel, ~20 % dormeur, ~14 % nouveau, ~8 % insatisfait"
+    - name: churned_next_90d
+      dtype: bool
+      role: metadata
+      description: "Aucune commande dans les 90 jours suivant la date de référence (validité externe)"
+      checks: { isin: [0, 1] }
+      distribution: "~4 % chez les VIP, ~55 % chez les dormeurs ; écart > 20 points entre segments"
+  insights:
+    - "Il n'y a **pas de cible** : la qualité se juge sur des critères internes (silhouette, Davies-Bouldin, Calinski-Harabasz), externes (accord avec le segment latent, écart de churn) et **métier** (taille minimale, stabilité, actionnabilité)."
+    - "La silhouette est très sensible à l'échelle des variables : `revenue_12m_eur` (euros) et `discount_share` (0-1) ne peuvent pas cohabiter sans standardisation. C'est la première raison d'échec d'un clustering en production."
+    - "`revenue_12m_eur`, `web_sessions_12m` et `orders_12m` sont fortement asymétriques (queue droite) : un passage en log et un winsorising stabilisent les centroïdes, sinon quelques clients d'exception tirent un groupe entier."
+    - "`avg_basket_eur` est quasi redondant avec `revenue_12m_eur / orders_12m` : la redondance gonfle artificiellement la séparation et biaise la silhouette au profit des variables les plus lourdes."
+    - "Les groupes se **chevauchent** volontairement : un acheteur occasionnel qui profite d'une promotion ressemble à un chasseur de promo. Une silhouette de 0.25-0.40 est donc un résultat honnête, pas un échec."
+    - "`recency_days` est bimodal (actifs vs dormeurs) : c'est la variable la plus discriminante, mais elle ne suffit pas — deux clients à 300 jours d'inactivité peuvent être un dormeur et un VIP en pause."
+    - "`discount_share` et `newsletter_opens_12m` séparent le profil promotionnel du profil fidèle plein tarif : c'est le levier d'arbitrage du budget remises."
+    - "`return_rate` et `support_tickets_12m` signalent l'insatisfaction avant le churn : un groupe à fort taux de retour est un gisement de rétention, pas un groupe à solliciter davantage."
+    - "`nps_score` comporte ~8 % de manquants (biais de non-réponse : les détracteurs répondent davantage) ; l'imputer par la médiane masque ce biais, un indicateur de manquant est préférable."
+    - "`loyalty_tier` est **calculé par le métier** à partir du chiffre d'affaires : l'utiliser comme feature introduit une circularité (on redécouvre le palier). À documenter, voire à exclure."
+    - "`region` et `acquisition_channel` sont des proxies socio-économiques : une segmentation qui sépare principalement par région poserait un problème d'équité et de conformité."
+    - "Le nombre de groupes est un **choix** : k trop petit fusionne des comportements distincts, k trop grand produit des micro-groupes inexploitables par le CRM (coût de campagne, lisibilité)."
+  recommendations:
+    - "Standardiser (et log-transformer les variables asymétriques) **avant** tout clustering : sans cela, la distance euclidienne est dominée par le chiffre d'affaires."
+    - "Choisir k par triangulation : coude d'inertie, maximum de silhouette, Davies-Bouldin, taille minimale des groupes et lisibilité métier — jamais par un seul indicateur."
+    - "Comparer KMeans (sphérique, rapide), MiniBatchKMeans (grands volumes) et GaussianMixture (groupes ellipsoïdaux, probabilités d'appartenance) sur les mêmes données et les mêmes métriques."
+    - "Mesurer la **stabilité** : ré-entraîner avec plusieurs graines et comparer les affectations (ARI). Une segmentation instable ne peut pas piloter des campagnes."
+    - "Valider en externe : taux de churn, panier moyen et part de CA par groupe doivent être nettement différenciés, sinon la segmentation n'apporte rien au CRM."
+    - "Profiler chaque groupe en langage métier (effectif, part du CA, comportement dominant) et lui associer une action : c'est la condition d'adoption."
+    - "Exclure les variables circulaires (`loyalty_tier`) ou les traiter comme descriptives et non comme features."
+    - "Publier une affectation **assortie d'une confiance** : les clients à la frontière de deux groupes doivent déclencher une règle métier (ou rester dans un groupe par défaut), pas une campagne ciblée."
+    - "Surveiller la dérive : la distribution des distances et la taille des groupes changent avec la saisonnalité ; une revue mensuelle est nécessaire."
+  notes:
+    - "Valeurs manquantes volontaires sur `nps_score` (~8 %) et `avg_basket_eur` (clients sans commande)."
+    - "Outliers légitimes (~1 %) : clients d'exception (gros volumes, paniers très élevés)."
+    - "Chevauchement volontaire entre profils : la structure latente est réelle mais floue."
+    - "`latent_segment` et `churned_next_90d` sont des **métadonnées** : exclues des features, utilisées uniquement pour le diagnostic et la validité externe."
+    - "Dérive temporelle volontaire : `mobile_share` augmente avec la date d'inscription."
+
+metrics:
+  task: clustering
+  primary: silhouette
+  secondary: [calinski_harabasz, davies_bouldin, n_clusters]
+  # Aucun estimateur trivial n'a de sens ici : la « baseline » est une affectation aléatoire,
+  # dont la silhouette est nulle par construction (plancher à battre).
+  baseline: random_assignment
+  direction: maximize
+  # Seuil de qualité : la silhouette de validation doit rester **au-dessus** de cette valeur.
+  min_primary: 0.25
+
+preprocessing:
+  numeric:
+    imputer: median
+    # Indispensable en clustering : quelques clients d'exception déplaceraient un centroïde entier.
+    clip_outliers: true
+    clip_quantiles: [0.005, 0.995]
+    scaler: standard
+    log1p_columns: [revenue_12m_eur, orders_12m, web_sessions_12m, newsletter_opens_12m]
+  categorical:
+    imputer: most_frequent
+    encoder: onehot
+    handle_unknown: ignore
+    min_frequency: 0.02
+    max_categories: 10
+  features:
+    - type: ratio
+      name: revenue_per_order
+      numerator: revenue_12m_eur
+      denominator: orders_12m
+      epsilon: 1.0
+    - type: ratio
+      name: sessions_per_order
+      numerator: web_sessions_12m
+      denominator: orders_12m
+      epsilon: 1.0
+    - type: bin
+      name: recency_bucket
+      column: recency_days
+      method: quantile
+      bins: 4
+    - type: boolean_flag
+      name: is_dormant
+      column: recency_days
+      operator: gt
+      value: 180.0
+    - type: boolean_flag
+      name: is_promo_sensitive
+      column: discount_share
+      operator: gt
+      value: 0.5
+    - type: boolean_flag
+      name: has_complaints
+      column: support_tickets_12m
+      operator: gt
+      value: 2.0
+    # Volontairement AUCUNE feature `group_stat` ni `datetime_parts` :
+    # - une statistique par canal d'acquisition (`median_revenue_by_channel`) injecte l'identité du
+    #   canal dans la géométrie euclidienne et fait redécouvrir un regroupement administratif ;
+    # - l'année/le trimestre d'inscription sont du bruit calendaire pour un clustering comportemental.
+    # Les garder ferait chuter la silhouette sans ajouter de signal métier (mesuré : -0,02).
+
+train:
+  split:
+    test_size: 0.2
+    val_size: 0.15
+    # Pas de cible : le split est aléatoire, non stratifié.
+    stratify: false
+    shuffle: true
+    time_based: false
+
+learning_objectives:
+  - "Comprendre ce qu'évalue un clustering : critères internes (silhouette, Davies-Bouldin, Calinski-Harabasz), externes (ARI/NMI) et métier (taille, stabilité, actionnabilité)."
+  - "Choisir le nombre de groupes k par triangulation d'indicateurs plutôt que par un seul chiffre."
+  - "Maîtriser l'effet de l'échelle et des queues de distribution sur une distance euclidienne : log, winsorising, standardisation."
+  - "Comparer KMeans, MiniBatchKMeans et GaussianMixture (probabilités d'appartenance) sur un même protocole."
+  - "Profiler des groupes en langage métier et les rendre actionnables (campagne, canal, remise)."
+  - "Mesurer la stabilité d'une segmentation (ARI entre graines) et la confiance d'une affectation individuelle."
+  - "Détecter les pièges classiques : variables circulaires, redondances, micro-groupes, proxies géographiques."
+  - "Formaliser un contrat de données avec Pandera et le faire respecter à l'entrée, en sortie de pré-traitement et en inférence."
+  - "Industrialiser l'ensemble : configuration Hydra, artefacts traçables, tests pytest, rapports générés."

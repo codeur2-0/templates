@@ -1,0 +1,41 @@
+# =================================================================================================
+# Modèle : KMeans (initialisation k-means++)
+# -------------------------------------------------------------------------------------------------
+# KMeans est l'algorithme de référence pour une première segmentation : il est rapide,
+# déterministe à graine fixée, et ses centroïdes se lisent directement comme des profils en
+# écarts-types — ce qui rend chaque groupe nommable par le CRM. L'initialisation k-means++ répétée
+# (`n_init`) réduit fortement le risque d'optimum local, principal défaut de la méthode. Ses
+# hypothèses (groupes convexes, de taille comparable, dans un espace standardisé) sont exactement
+# celles que ce projet documente et vérifie : la comparaison avec un mélange gaussien, au notebook
+# 04, montre ce que l'on gagne (probabilités d'appartenance, ellipsoïdes) et ce que l'on perd
+# (lisibilité, coût).
+#
+# Alternatives considérées : gaussian_mixture : groupes ellipsoïdaux et probabilités d'appartenance, plus expressif mais plus sensible aux outliers, minibatch_kmeans : même géométrie que KMeans, coût mémoire constant — l'option des bases de plusieurs millions de clients, isolation_forest : réservé à la détection d'anomalies (voir `data-science/anomaly-detection`), pas une segmentation.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_clusters=...
+# =================================================================================================
+
+name: "KMeans (initialisation k-means++)"
+algorithm: kmeans
+class: SklearnModel
+task: clustering
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `SklearnModel(params=...)` (voir src/models/model.py).
+params:
+  n_clusters: 6
+  init: k-means++
+  n_init: 20
+  max_iter: 300
+  tol: 0.0001
+  algorithm: lloyd
+
+# --- options spécifiques à la stack `sklearn` ---------------------------------------
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold

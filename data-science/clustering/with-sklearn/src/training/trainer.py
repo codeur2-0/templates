@@ -17,9 +17,10 @@ from __future__ import annotations
 import os
 import platform
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -85,8 +86,8 @@ class TrainingData:
     def describe(self) -> dict[str, Any]:
         """Return a compact summary for logs and artefacts."""
         return {
-            "n_train": int(len(self.X_train)),
-            "n_val": 0 if self.X_val is None else int(len(self.X_val)),
+            "n_train": len(self.X_train),
+            "n_val": 0 if self.X_val is None else len(self.X_val),
             "n_features": int(self.X_train.shape[1]),
             "task": self.task,
         }
@@ -248,7 +249,7 @@ class Trainer:
         merged = {**fit_result.metrics, **validation_metrics}
         fit_result.metrics = merged
         fit_result.duration_seconds = elapsed["seconds"]
-        fit_result.n_samples = int(len(data.X_train))
+        fit_result.n_samples = len(data.X_train)
         fit_result.n_features = int(data.X_train.shape[1])
 
         outcome = TrainingOutcome(

@@ -19,7 +19,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.evaluation.evaluator import Evaluator, EvaluationResult
+from src.evaluation.evaluator import EvaluationResult, Evaluator
 from src.evaluation.reports import ReportBuilder
 from src.models import load_model
 from src.pipelines.base import BasePipeline, PipelineResult

@@ -1,0 +1,17 @@
+# ==============================================================================================
+# Segmentation client d'un e-commerçant (RFM étendu) avec scikit-learn — dépendances de développement
+# ------------------------------------------------------------------------------------------------
+# Installation : `pip install -r requirements-dev.txt`  (ou `make install-dev`)
+# ==============================================================================================
+-r requirements.txt
+
+# Qualité du code
+pytest>=8.0
+pytest-cov>=5.0
+ruff>=0.5
+mypy>=1.10
+nbformat>=5.9
+nbclient>=0.10
+ipykernel>=6.29
+matplotlib>=3.8
+seaborn>=0.13

@@ -112,6 +112,18 @@ def _is_regression(context: NotebookContext) -> bool:
     return str(getattr(context.spec.metrics, "task", "")) in {"regression", "forecasting"}
 
 
+def _is_clustering(context: NotebookContext) -> bool:
+    """Return ``True`` when the project segments data without any target.
+
+    Args:
+        context: Notebook context.
+
+    Returns:
+        ``True`` for a clustering task, ``False`` otherwise.
+    """
+    return str(getattr(context.spec.metrics, "task", "")) == "clustering"
+
+
 def _render(source: str, context: NotebookContext) -> str:
     """Substitute the manifest tokens inside a code template.
 
@@ -236,7 +248,7 @@ NB_PATHS = ProjectPaths.from_root(PROJECT_ROOT / "outputs" / "notebooks").ensure
 print(f"Projet            : {CONFIG.project.name}")
 print(f"Tâche             : {CONFIG.metrics.task}")
 print(f"Métrique primaire : {CONFIG.metrics.primary} (seuil cible : __MIN_PRIMARY__)")
-print(f"Cible             : {CONFIG.data.target}")
+print(f"Cible             : {CONFIG.data.target or 'aucune (apprentissage non supervisé)'}")
 print(f"Algorithme        : {CONFIG.model.algorithm} ({CONFIG.model.name})")
 print(f"Lignes (notebook) : {NB_ROWS}")
 """
@@ -573,6 +585,12 @@ for column in categorical_columns:
             cells += target_cells(context)
         else:
             cells += _target_cells(context)
+    elif _is_clustering(context):
+        # Aucune cible : la section 5 porte sur l'échelle des variables, la structure visible en
+        # ACP et les colonnes de diagnostic (métadonnées, jamais des features).
+        from tools.scaffold.notebooks.clustering import structure_cells
+
+        cells += structure_cells(context)
 
     cells += [
         _md("## 6. Colinéarité et structure"),
@@ -1884,6 +1902,9 @@ for seed in (7, 21, 42):
             y_true=PREPARED["y_val"],
             y_pred=candidate.predict(PREPARED["X_val"]),
             y_proba=candidate.predict_proba(PREPARED["X_val"]) if candidate.supports_proba else None,
+            # Les métriques internes d'un clustering (silhouette, Davies-Bouldin) ont besoin de la
+            # matrice de features : sans `X`, elles sont simplement ignorées par le registre.
+            X=PREPARED["X_val"],
         )
     )
     scores.append(values.get(CONFIG.metrics.primary, float("nan")))
@@ -2309,6 +2330,7 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
         The written notebook paths, in order.
     """
     error_analysis = build_06_error_analysis
+    model_exploration = build_04_model_exploration
     if _is_regression(context):
         # L'analyse d'erreurs d'une cible continue n'a ni matrice de confusion ni seuil à arbitrer.
         from tools.scaffold.notebooks.regression import (
@@ -2316,15 +2338,34 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
         )
 
         error_analysis = build_06_regression
+    elif _is_clustering(context):
+        # Sans cible, l'exploration porte sur le nombre de groupes et la stabilité des
+        # affectations, et l'analyse finale sur les profils de segments et leur validité externe.
+        from tools.scaffold.notebooks.clustering import (
+            build_04_model_exploration as build_04_clustering,
+            build_06_error_analysis as build_06_clustering,
+        )
+
+        model_exploration = build_04_clustering
+        error_analysis = build_06_clustering
     builders = (
         build_01_eda,
         build_02_validation,
         build_03_preprocessing,
-        build_04_model_exploration,
+        model_exploration,
         build_05_training,
         error_analysis,
     )
     return [builder(context, destination) for builder in builders]
 
 
-__all__ = ["NB_ROWS", "build_01_eda", "build_06_error_analysis", "build_all", "_is_regression"]
+__all__ = [
+    "NB_ROWS",
+    "build_01_eda",
+    "build_04_model_exploration",
+    "build_05_training",
+    "build_06_error_analysis",
+    "build_all",
+    "_is_clustering",
+    "_is_regression",
+]
