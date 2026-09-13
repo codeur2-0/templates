@@ -1,0 +1,330 @@
+# -------------------------------------------------------------------------------------------
+# Registre des familles de problèmes.
+#
+# Une famille regroupe les projets qui partagent :
+#   * la même nature de données (modality) et la même tâche ML (task),
+#   * les mêmes schémas Pandera / générateurs de données synthétiques,
+#   * la même logique d'évaluation, de prédiction et de notebooks.
+#
+# Les stacks d'une même famille implémentent le MÊME cas d'usage avec des frameworks
+# différents : c'est ce qui rend la comparaison pédagogique possible.
+# -------------------------------------------------------------------------------------------
+
+binary_classification:
+  display_name: "Classification binaire"
+  modality: tabular
+  task: binary
+  notebook_builder: tabular
+  template_dir: binary_classification
+  description: >-
+    Prédire une étiquette binaire à partir de features tabulaires (ex. churn, défaut de
+    paiement, fraude). Métriques : ROC AUC, PR AUC, précision/rappel/F1, matrice de confusion.
+  allowed_stacks: [sklearn, xgboost, lightgbm, pytorch, tensorflow, keras, mlflow]
+
+multiclass_classification:
+  display_name: "Classification multi-classes"
+  modality: tabular
+  task: multiclass
+  notebook_builder: tabular
+  template_dir: multiclass_classification
+  description: >-
+    Prédire une étiquette parmi N classes (ex. catégorie d'incident, segment client).
+    Métriques : macro-F1, accuracy balanced, matrice de confusion normalisée.
+  allowed_stacks: [sklearn, xgboost, lightgbm, pytorch, keras]
+
+regression:
+  display_name: "Régression"
+  modality: tabular
+  task: regression
+  notebook_builder: tabular
+  template_dir: regression
+  description: >-
+    Prédire une valeur continue (ex. prix, consommation, délai). Métriques : RMSE, MAE,
+    MAPE, R2, analyse des résidus.
+  allowed_stacks: [sklearn, xgboost, lightgbm, pytorch, tensorflow, keras]
+
+clustering:
+  display_name: "Clustering / segmentation"
+  modality: tabular
+  task: clustering
+  notebook_builder: tabular
+  template_dir: clustering
+  description: >-
+    Découvrir des groupes homogènes sans supervision (ex. segmentation client). Métriques :
+    silhouette, Calinski-Harabasz, Davies-Bouldin, profiling des clusters.
+  allowed_stacks: [sklearn, pytorch, tensorflow]
+
+time_series_forecasting:
+  display_name: "Séries temporelles / forecasting"
+  modality: tabular
+  task: forecasting
+  notebook_builder: tabular
+  template_dir: time_series_forecasting
+  description: >-
+    Prévoir une série temporelle (ex. demande retail, trafic). Split temporel strict,
+    features calendaires + retards. Métriques : MAE, RMSE, MAPE, MASE, backtesting.
+  allowed_stacks: [sklearn, xgboost, lightgbm, pytorch, keras]
+
+recommendation:
+  display_name: "Systèmes de recommandation"
+  modality: tabular
+  task: ranking
+  notebook_builder: tabular
+  template_dir: recommendation
+  description: >-
+    Recommander des items à partir d'interactions utilisateur-item (ex. catalogue e-commerce).
+    Baseline popularité + factorisation matricielle. Métriques : Precision@K, Recall@K, NDCG@K, MAP@K.
+  allowed_stacks: [sklearn, pytorch]
+
+anomaly_detection:
+  display_name: "Détection d'anomalies"
+  modality: tabular
+  task: anomaly
+  notebook_builder: tabular
+  template_dir: anomaly_detection
+  description: >-
+    Détecter des évènements rares/anormaux (ex. fraude, dérive capteur). Approche non
+    supervisée / semi-supervisée. Métriques : PR AUC, recall@top-k, precision@seuil.
+  allowed_stacks: [sklearn, pytorch, tensorflow]
+
+text_classification:
+  display_name: "Classification de texte"
+  modality: text
+  task: multiclass
+  notebook_builder: text
+  template_dir: text_classification
+  description: >-
+    Classer des documents courts (tickets support, avis clients). Représentations :
+    TF-IDF, embeddings, transformers. Métriques : macro-F1, accuracy, matrice de confusion.
+  allowed_stacks: [sklearn, spacy, transformers, langchain]
+
+named_entity_recognition:
+  display_name: "Reconnaissance d'entités nommées (NER)"
+  modality: text
+  task: multiclass
+  notebook_builder: text
+  template_dir: named_entity_recognition
+  description: >-
+    Extraire des entités typées d'un texte (montants, dates, produits, organisations).
+    Métriques : précision/rappel/F1 par type d'entité (évaluation au niveau entité).
+  allowed_stacks: [spacy, transformers]
+
+summarization:
+  display_name: "Résumé automatique"
+  modality: text
+  task: generation
+  notebook_builder: text
+  template_dir: summarization
+  description: >-
+    Résumer des documents métier (comptes-rendus, tickets). Baseline extractive (TextRank-like)
+    puis seq2seq. Métriques : ROUGE-1/2/L, compression, couverture.
+  allowed_stacks: [transformers, sklearn]
+
+question_answering:
+  display_name: "Question answering"
+  modality: text
+  task: retrieval
+  notebook_builder: text
+  template_dir: question_answering
+  description: >-
+    Répondre à des questions sur un corpus métier documentaire (retrieval + réponse).
+    Métriques : recall@k du retrieveur, exact match, couverture, latency.
+  allowed_stacks: [langchain, transformers]
+
+retrieval_augmented_generation:
+  display_name: "RAG (Retrieval-Augmented Generation)"
+  modality: text
+  task: retrieval
+  notebook_builder: text
+  template_dir: retrieval_augmented_generation
+  description: >-
+    Indexer un corpus documentaire, retrouver les passages pertinents, générer une réponse
+    sourcée. Métriques : recall@k, MRR, nDCG, taux de citation, hallucination (proxy).
+  allowed_stacks: [langchain, sklearn]
+
+agent_tools:
+  display_name: "Agents IA & tool calling"
+  modality: text
+  task: retrieval
+  notebook_builder: text
+  template_dir: agent_tools
+  description: >-
+    Agent capable de planifier et d'appeler des outils (SQL, calculatrice, recherche) avec
+    mémoire et garde-fous. Métriques : taux de réussite des tâches, nombre d'étapes, coût.
+  allowed_stacks: [langchain, sklearn]
+
+embedding_pipeline:
+  display_name: "Pipelines d'embeddings"
+  modality: text
+  task: retrieval
+  notebook_builder: text
+  template_dir: embedding_pipeline
+  description: >-
+    Produire, stocker et exploiter des embeddings de documents (batching, cache, dérive
+    sémantique). Métriques : débit, coût, stabilité, recall@k de la recherche vectorielle.
+  allowed_stacks: [sklearn, langchain, transformers]
+
+llm_finetuning:
+  display_name: "Fine-tuning de LLM"
+  modality: text
+  task: generation
+  notebook_builder: text
+  template_dir: llm_finetuning
+  description: >-
+    Fine-tuner un petit modèle de langage causal sur un corpus métier (poids aléatoires,
+    aucune dépendance réseau). Métriques : perplexité, loss, génération qualitative.
+  allowed_stacks: [transformers, pytorch]
+
+image_classification:
+  display_name: "Classification d'images"
+  modality: image
+  task: multiclass
+  notebook_builder: image
+  template_dir: image_classification
+  description: >-
+    Classifier des images (dataset synthétique de formes/defects généré procéduralement).
+    Métriques : accuracy, macro-F1, matrice de confusion.
+  allowed_stacks: [pytorch, tensorflow, keras]
+
+object_detection:
+  display_name: "Détection d'objets"
+  modality: image
+  task: multiclass
+  notebook_builder: image
+  template_dir: object_detection
+  description: >-
+    Localiser et classifier des objets via une tête de détection sur grille (YOLO-like
+    simplifié) sur des scènes synthétiques. Métriques : mAP@0.5, Precision/Recall, IoU moyen.
+  allowed_stacks: [pytorch, tensorflow]
+
+image_segmentation:
+  display_name: "Segmentation sémantique"
+  modality: image
+  task: multiclass
+  notebook_builder: image
+  template_dir: image_segmentation
+  description: >-
+    Segmenter des objets au pixel près (U-Net léger) sur des images synthétiques.
+    Métriques : Dice, IoU (Jaccard), accuracy pixel.
+  allowed_stacks: [pytorch, tensorflow]
+
+etl_pipeline:
+  display_name: "Pipeline ETL / ELT"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: etl_pipeline
+  description: >-
+    Ingestion, nettoyage, jointure et chargement de plusieurs sources en table analytique
+    Parquet, avec contrats Pandera à chaque étape et idempotence.
+  allowed_stacks: [pandas, duckdb]
+
+data_quality:
+  display_name: "Qualité de données"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: data_quality
+  description: >-
+    Suite de règles de qualité (complétude, unicité, validité, cohérence, fraîcheur) exécutée
+    sur un dataset et restituée sous forme de rapport actionnable.
+  allowed_stacks: [pandera, pandas]
+
+analytics_warehouse:
+  display_name: "Entrepôt analytique / SQL"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: analytics_warehouse
+  description: >-
+    Modélisation en couches (staging -> marts) avec DuckDB, SQL versionné et tests de
+    cohérence des agrégats.
+  allowed_stacks: [duckdb]
+
+orchestration:
+  display_name: "Orchestration de pipelines"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: orchestration
+  description: >-
+    DAG de tâches avec retries, dépendances, caching et observabilité, exécutable en local
+    sans serveur.
+  allowed_stacks: [prefect, pandas]
+
+experiment_tracking:
+  display_name: "Tracking d'expériences"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: experiment_tracking
+  description: >-
+    Comparaison reproductible d'expériences (params, métriques, artefacts, modèle registry)
+    avec un tracking server local.
+  allowed_stacks: [mlflow, sklearn]
+
+model_serving:
+  display_name: "Serving de modèle (API)"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: model_serving
+  description: >-
+    Exposition d'un modèle entraîné derrière une API REST typée (Pydantic), avec health
+    checks, batching, versioning et tests d'intégration.
+  allowed_stacks: [fastapi]
+
+drift_monitoring:
+  display_name: "Monitoring & détection de drift"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: drift_monitoring
+  description: >-
+    Surveillance des données et des prédictions en production : PSI, KS test, dérive de
+    distribution des scores, alerting basé seuils.
+  allowed_stacks: [scipy, sklearn]
+
+cicd_pipeline:
+  display_name: "CI/CD pour le ML"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: cicd_pipeline
+  description: >-
+    Chaîne d'intégration continue d'un projet ML : lint, type, tests, smoke training,
+    gates de qualité, publication d'artefacts et déploiement.
+  allowed_stacks: [github-actions, sklearn]
+
+exploratory_analysis:
+  display_name: "Analyse exploratoire"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: exploratory_analysis
+  description: >-
+    Démarche d'EDA industrialisée : profiling automatique, hypothèses testées, figures
+    reproductibles et rapport de synthèse.
+  allowed_stacks: [pandas]
+
+business_metrics:
+  display_name: "Métriques métier"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: business_metrics
+  description: >-
+    Couche sémantique de métriques (définitions versionnées, calculs SQL, contrôles
+    d'invariants) consommée par le reporting.
+  allowed_stacks: [duckdb, pandas]
+
+reporting:
+  display_name: "Reporting automatisé"
+  modality: platform
+  task: pipeline
+  notebook_builder: platform
+  template_dir: reporting
+  description: >-
+    Génération de rapports HTML/Markdown reproductibles à partir de métriques et de figures,
+    avec séparation données/présentation.
+  allowed_stacks: [jinja2, pandas]

@@ -1,0 +1,38 @@
+# =================================================================================================
+# Modèle : Forêt aléatoire scikit-learn
+# -------------------------------------------------------------------------------------------------
+# La forêt aléatoire est le meilleur compromis pédagogie/performance pour un premier modèle
+# tabulaire : elle capture les non-linéarités et les interactions (contrat mensuel x jeune abonné
+# x satisfaction basse) sans réglage fin, fournit une importance de features native et expose des
+# probabilités exploitables pour le ciblage CRM. Elle sert aussi de référence pour comparer les
+# autres stacks du même cas d'usage.
+#
+# Alternatives considérées : logistic_regression : baseline interprétable, sensible au scaling et aux interactions, hist_gradient_boosting : généralement supérieur, plus coûteux à régler, gradient_boosting : variante historique, plus lente, extra_trees : plus de variance aléatoire, parfois plus robuste au bruit, svm (RBF) : bon sur petits volumes, coûteux au-delà de 100k lignes.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_estimators=...
+# =================================================================================================
+
+name: "Forêt aléatoire scikit-learn"
+algorithm: random_forest
+class: SklearnModel
+task: binary
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `SklearnModel(params=...)` (voir src/models/model.py).
+params:
+  n_estimators: 300
+  max_depth: 14
+  min_samples_leaf: 8
+  max_features: sqrt
+  class_weight: balanced_subsample
+  criterion: gini
+
+# --- options spécifiques à la stack `sklearn` ---------------------------------------
+cross_validation:
+  enabled: true
+  folds: 5
+  strategy: stratified

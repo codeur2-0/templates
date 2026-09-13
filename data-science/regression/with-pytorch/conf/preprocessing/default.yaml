@@ -1,0 +1,75 @@
+# =================================================================================================
+# Preprocessing & feature engineering
+# -------------------------------------------------------------------------------------------------
+# Décrit le pipeline appliqué aux données (nettoyage, encodage, scaling) ainsi que les features
+# dérivées construites par `src/features/build_features.py`.
+#
+# Règle d'or : tout ce qui est **appris** sur les données (moyennes, médianes, catégories,
+# encodeurs) doit être appris sur le train uniquement, puis appliqué au val/test. C'est le rôle
+# du pipeline scikit-learn encapsulé dans `src/preprocessing/pipelines.py`.
+# =================================================================================================
+
+numeric:
+  imputer: median
+  imputer_fill_value: 0.0
+  clip_outliers: true
+  clip_quantiles:
+  - 0.005
+  - 0.995
+  scaler: standard
+  log1p_columns:
+  - property_tax_eur
+  - condo_fees_eur
+categorical:
+  imputer: most_frequent
+  imputer_fill_value: unknown
+  encoder: onehot
+  handle_unknown: ignore
+  min_frequency: 0.02
+  max_categories: 10
+features:
+- type: ratio
+  name: surface_per_room
+  numerator: surface_m2
+  denominator: rooms
+  epsilon: 1.0
+- type: ratio
+  name: tax_per_surface
+  numerator: property_tax_eur
+  denominator: surface_m2
+  epsilon: 1.0
+- type: bin
+  name: surface_bucket
+  column: surface_m2
+  method: quantile
+  bins: 4
+- type: boolean_flag
+  name: thin_market
+  column: recent_sales_1km
+  operator: lt
+  value: 10.0
+- type: boolean_flag
+  name: top_floor
+  column: floor_level
+  operator: gt
+  value: 5.0
+- type: group_stat
+  name: median_surface_by_district
+  group_by: district
+  value_column: surface_m2
+  agg: median
+- type: datetime_parts
+  name: listing_period
+  column: listing_date
+  prefix: listing
+  parts:
+  - year
+  - month
+  - quarter
+columns: {}
+validation:
+  raw: true
+  processed: true
+  inference: true
+  strict: true
+  lazy: false

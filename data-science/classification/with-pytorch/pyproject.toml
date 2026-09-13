@@ -1,0 +1,139 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ===============================================================================================
+# Prédiction d'attrition client (churn télécom) avec PyTorch
+# Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature engineering -> réseau de neurones PyTorch entraîné par descente de gradient explicite -> évaluation et analyse d'erreurs) pour un cas de churn télécom, entièrement piloté par Hydra et structuré en objets testables.
+# ===============================================================================================
+[project]
+name = "churn_pytorch"
+version = "1.0.0"
+description = "Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature engineering -> réseau de neurones PyTorch entraîné par descente de gradient explicite -> évaluation et analyse d'erreurs) pour un cas de churn télécom, entièrement piloté par Hydra et structuré en objets testables."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Data & AI Platform Team" }]
+keywords = [
+    "data-science",
+    "classification",
+    "pytorch",
+    "hydra",
+    "pandera",
+    "oop",
+    "mlops",
+]
+dependencies = [
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+    "pandera[pandas]>=0.20",
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+    "loguru>=0.7",
+    "tqdm>=4.66",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "pyarrow>=15.0",
+    "scikit-learn>=1.4",
+    "torch>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "nbformat>=5.9",
+    "nbclient>=0.10",
+    "ipykernel>=6.29",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "pyarrow>=15.0",
+    "scikit-learn>=1.4",
+    "torch>=2.2",
+]
+
+[project.scripts]
+churn_pytorch = "src.main:main"
+
+# Le package applicatif s'appelle `src` (arborescence imposée par le standard du dépôt).
+[tool.setuptools]
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+namespaces = false
+
+# ---------------------------------------------------------------------------------------------
+# Ruff — lint + format
+# ---------------------------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["outputs", "multirun", "artifacts", "data", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "D", "UP", "B", "C4", "SIM", "RUF"]
+# D203/D213 : conventions pydocstyle incompatibles entre elles (une seule des deux est possible).
+# B008      : appel de fonction dans un argument par défaut — pattern standard FastAPI/Typer.
+# N803/N806 : la convention scikit-learn impose `X` et `y` (majuscule pour la matrice) ; renommer
+#             ces variables dégraderait la lisibilité pour toute personne venant de sklearn.
+# RUF022    : `src/models/__init__.py` est généré par le scaffold. Son `__all__` est ordonné par
+#             catégorie (constantes, classes, fonctions) ; le tri « naturel » de ruff placerait la
+#             classe du modèle avant ou après `ModelCard` selon la stack, ce qui rendrait le
+#             template non déterministe. L'ordre sémantique est préféré, et documenté ici.
+ignore = ["D203", "D213", "B008", "N803", "N806", "RUF022"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+"scripts/*" = ["D103"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+# ---------------------------------------------------------------------------------------------
+# mypy — typage
+# ---------------------------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+files = ["src", "scripts"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+check_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true
+exclude = ["outputs/", "multirun/", "artifacts/", "\\.venv/"]
+
+# ---------------------------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: tests lents (entraînement complet)",
+    "integration: tests de bout en bout (pipeline complet)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+# ---------------------------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["src"]
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false

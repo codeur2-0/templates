@@ -1,0 +1,81 @@
+# ==============================================================================================
+# data-science / classification / with-lightgbm
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/binary_classification.yaml` (churn télécom).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet et modèle.
+# ==============================================================================================
+
+key: ds-classification-lightgbm
+title: "Prédiction d'attrition client (churn télécom) avec LightGBM"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> gradient boosting leaf-wise LightGBM avec early stopping natif -> évaluation
+  et analyse d'erreurs) pour un cas de churn télécom, entièrement piloté par Hydra et
+  structuré en objets testables.
+
+family: binary_classification
+domain: data-science
+problem: classification
+stack: lightgbm
+project_slug: telecom-churn-lightgbm
+package_name: churn_lightgbm
+
+model:
+  display_name: "Gradient boosting LightGBM"
+  algorithm: lightgbm
+  rationale: >-
+    LightGBM entraîne un boosting leaf-wise (histogrammes + croissance par feuille) : à précision
+    comparable, il est nettement plus rapide que les boosters level-wise sur les gros volumes, ce
+    qui compte pour un score recalculé quotidiennement. `num_leaves` pilote la capacité du modèle,
+    l'early stopping natif évite le sur-apprentissage sans réglage manuel du nombre d'arbres, et le
+    support natif des variables catégorielles supprime une partie du one-hot encoding.
+  alternatives:
+    - "lightgbm_dart : dropout sur les arbres, régularise les gros ensembles (early stopping indisponible)"
+    - "lightgbm_goss : échantillonnage par gradient, plus rapide encore sur les très gros volumes"
+    - "logistic_regression : baseline interprétable, sensible au scaling et aux interactions"
+    - "dummy : plancher à battre — un modèle qui ne le dépasse pas n'a aucune valeur"
+  params:
+    n_estimators: 500
+    num_leaves: 31
+    max_depth: -1
+    learning_rate: 0.06
+    min_child_samples: 20
+    subsample: 0.9
+    subsample_freq: 1
+    colsample_bytree: 0.8
+    reg_lambda: 1.5
+    reg_alpha: 0.0
+    min_split_gain: 0.0
+    scale_pos_weight: auto
+    importance_type: gain
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 1 min).
+  notebook_param_grid:
+    n_estimators: [200, 500]
+    num_leaves: [15, 31]
+    learning_rate: [0.05, 0.1]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    # Early stopping natif LightGBM : surveille `eval_metric` sur le split de validation.
+    early_stopping_rounds: 40
+    eval_metric: auc
+    native_categorical: true
+    cross_validation:
+      enabled: true
+      folds: 5
+      strategy: stratified
+  root_conf:
+    decision:
+      threshold: 0.5
+      retention_cost_eur: 25.0
+      customer_lifetime_value_eur: 1450.0
+
+learning_objectives:
+  - "Comprendre la croissance leaf-wise (`num_leaves`) et son risque de sur-apprentissage face à `max_depth`."
+  - "Armer l'early stopping natif via un callback LightGBM (`early_stopping`, `log_evaluation`) sans réécrire la boucle."
+  - "Régulariser un booster (min_child_samples, subsample + subsample_freq, colsample_bytree, reg_lambda, min_split_gain)."
+  - "Exploiter le support natif des variables catégorielles plutôt que le one-hot encoding systématique."
+  - "Traiter un déséquilibre de classes avec `scale_pos_weight` calculé depuis les données."
+  - "Comparer gbdt / dart / goss et des baselines honnêtes sur un même split de validation."

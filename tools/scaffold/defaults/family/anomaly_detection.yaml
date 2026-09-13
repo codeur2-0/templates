@@ -1,0 +1,351 @@
+# ==============================================================================================
+# Famille « détection d'anomalies » — cas d'usage : fraude sur transactions de paiement d'un
+# prestataire de services de paiement (PSP) français. Toutes les stacks de cette famille
+# partagent EXACTEMENT ce cas d'usage, ces données et ces métriques : seule l'implémentation du
+# détecteur change. C'est ce qui rend la comparaison pédagogique et honnête.
+# ==============================================================================================
+
+domain: data-science
+problem: anomaly-detection
+modality: tabular
+family: anomaly_detection
+
+business:
+  persona: >-
+    Équipe Risques & Fraude d'un prestataire de services de paiement (PSP) français traitant
+    ~1,2 million de transactions par jour, avec un data scientist qui construit le détecteur,
+    des analystes fraude qui investiguent les alertes (capacité limitée : ~900 dossiers/jour)
+    et un moteur de règles temps réel qui consomme les scores pour bloquer ou laisser passer.
+  context: >-
+    La détection repose aujourd'hui sur ~240 règles métier écrites au fil des incidents
+    (« montant > 2 000 EUR ET pays différent du pays de facturation », etc.). Elles capturent
+    38 % de la fraude confirmée, génèrent 11 000 alertes par jour dont 96 % sont levées sans
+    suite par les analystes, et sont aveugles aux schémas inédits : une règle n'existe que
+    lorsque la fraude a déjà été vue. La fraude évolue plus vite que le catalogue de règles
+    (card testing automatisé, prise de compte, identités synthétiques).
+  problem: >-
+    Détecter **sans étiquette fiable et à jour** les transactions anormales — la fraude
+    confirmée n'est connue qu'après 30 à 90 jours (chargeback), donc un modèle supervisé
+    apprend toujours sur une vérité partielle et biaisée. Objectif : produire un score de
+    risque continu, ordonner les transactions et transmettre aux analystes un volume
+    d'alertes compatible avec leur capacité, en maximisant la fraude capturée.
+  inputs: >-
+    Contexte transactionnel : montant, catégorie marchand, canal, pays, heure ; historique
+    porteur : ancienneté de la carte et du compte, vélocité 24 h (nombre de transactions,
+    marchands distincts, pays distincts sur 7 jours), tentatives échouées récentes ; contexte
+    technique : âge de l'empreinte d'appareil, durée de session, authentification forte
+    (3-D Secure) ; historique de risque : chargebacks des 12 derniers mois.
+  outputs: >-
+    Score d'anomalie continu par transaction, rang dans la file d'investigation, décision
+    (alerter / laisser passer) au seuil piloté par la capacité des analystes, schéma de fraude
+    le plus probable, principaux facteurs contributifs et niveau de confiance.
+  value: >-
+    Hausse du taux de fraude capturée à capacité d'analyse constante (le levier n'est pas le
+    volume d'alertes mais leur classement), détection de schémas jamais vus par les règles,
+    réduction du coût opérationnel des alertes levées à tort, et diminution des pertes nettes
+    (chargebacks non récupérables).
+  success_criteria:
+    - "PR AUC ≥ 0.42 sur le split de test hors échantillon (prévalence ~1,8 % : une PR AUC de 0,018 serait un score aléatoire). Mesuré : 0,67 avec la stack scikit-learn."
+    - "Rappel ≥ 0.45 au budget d'investigation retenu (2 % des transactions, soit la capacité réelle des analystes). Mesuré : 0,61."
+    - "Précision au budget ≥ 0.50 : plus d'une transaction alertée sur deux est une fraude confirmée. Mesuré : 0,71."
+    - "Lift au budget ≥ 20x par rapport à la prévalence (le classement concentre réellement la fraude). Mesuré : 30x."
+    - "Rappel par mode opératoire ≥ 0.30 pour au moins 3 schémas sur 4. Mesuré : identité synthétique 0,85, carte absente 0,65, prise de compte 0,60."
+    - "Au moins un schéma de fraude sur quatre reste partiellement non couvert (fraude amicale) : c'est le plafond structurel d'un détecteur transactionnel, documenté comme tel et non comme un échec."
+    - "Aucune fuite : les colonnes de diagnostic (is_fraud, fraud_scheme) sont des métadonnées, jamais des features."
+    - "ROC AUC ≥ 0.90 : le score ordonne correctement les fraudes et les transactions légitimes."
+    - "Reproductibilité : deux exécutions avec la même seed produisent exactement les mêmes scores."
+  cadence: >-
+    Score calculé en quasi-temps réel à la transaction (< 50 ms) et recalculé en batch nocturne
+    pour la file d'investigation ; seuil revu hebdomadairement avec le responsable fraude ;
+    ré-entraînement mensuel sur 90 jours glissants.
+  constraints:
+    - "Aucune donnée réelle de porteur : le dataset de ce dépôt est synthétique et hors ligne (aucun PAN, aucun identifiant personnel)."
+    - "Le détecteur tourne sur CPU, sans service externe ni poids pré-entraîné téléchargé."
+    - "Toute alerte doit être explicable : schéma probable + facteurs contributifs, exigence réglementaire (LCB-FT)."
+    - "Le volume d'alertes est borné par la capacité des analystes : le seuil se choisit par un budget, pas par un F1 théorique."
+
+data:
+  dataset_name: payment_transactions
+  title: "Transactions de paiement et fraude observée"
+  description: >-
+    Flux de transactions d'un PSP français sur 90 jours, avec le contexte marchand, porteur et
+    technique de chaque paiement. Les données sont générées par un modèle latent : chaque
+    transaction légitime suit des distributions réalistes par catégorie et par canal, tandis que
+    quatre **modes opératoires** de fraude (card-not-present, prise de compte, identité
+    synthétique, fraude amicale) déforment des sous-ensembles précis de variables (vélocité,
+    montant, empreinte d'appareil, authentification, géographie). Du bruit irréductible, des
+    valeurs manquantes et des outliers **légitimes** (achats de luxe, paiements professionnels)
+    sont injectés : un détecteur qui ne fait que repérer les gros montants se fait piéger.
+    Deux colonnes de métadonnées (`is_fraud`, `fraud_scheme`) permettent de mesurer la
+    performance sans jamais entrer dans les features.
+  n_samples: 12000
+  seed: 42
+  formats: [parquet, csv]
+  target: null
+  id_column: transaction_id
+  time_column: occurred_at
+  group_column: merchant_category
+  positive_rate: 0.018
+  columns:
+    - name: transaction_id
+      dtype: str
+      role: identifier
+      description: "Identifiant unique de la transaction"
+      unique: true
+      checks: { regex: "^TXN-[0-9]{7}$" }
+      distribution: "identifiants séquentiels uniques"
+    - name: occurred_at
+      dtype: datetime
+      role: timestamp
+      description: "Horodatage de la tentative de paiement"
+      distribution: "90 jours, profil horaire réaliste (creux nocturne, pics 12 h et 19 h) ; la fraude se concentre entre 1 h et 5 h"
+    - name: amount_eur
+      dtype: float
+      role: feature
+      description: "Montant de la transaction"
+      unit: "EUR"
+      checks: { ge: 0.5, le: 12000.0 }
+      distribution: "log-normale par catégorie marchand (médiane ~48 EUR) ; queue lourde pour la fraude et pour le luxe légitime"
+    - name: merchant_category
+      dtype: category
+      role: feature
+      description: "Catégorie du marchand (MCC agrégé)"
+      checks: { isin: [grocery, electronics, travel, gaming, jewelry, utilities, fashion, restaurant] }
+      distribution: "~31 % grocery, 17 % restaurant, 14 % fashion, 12 % utilities, 10 % electronics, 7 % travel, 6 % gaming, 3 % jewelry"
+    - name: channel
+      dtype: category
+      role: feature
+      description: "Canal de saisie du paiement"
+      checks: { isin: [web, mobile_app, in_store, phone] }
+      distribution: "~44 % mobile_app, 33 % web, 19 % in_store, 4 % phone ; la fraude est très majoritairement à distance"
+    - name: shopper_country
+      dtype: category
+      role: feature
+      description: "Pays de la session d'achat"
+      checks: { isin: [FR, BE, DE, ES, IT, LU, PT, other] }
+      distribution: "~78 % FR, puis BE/DE/ES/IT/LU/PT et ~3 % other"
+    - name: billing_country
+      dtype: category
+      role: feature
+      description: "Pays de facturation de la carte"
+      checks: { isin: [FR, BE, DE, ES, IT, LU, PT, other] }
+      distribution: "~86 % FR ; la divergence session/facturation est un signal fort mais pas suffisant"
+    - name: card_age_months
+      dtype: int
+      role: feature
+      description: "Ancienneté de la carte utilisée"
+      unit: "mois"
+      checks: { ge: 0, le: 120 }
+      distribution: "~gamma, médiane 26 mois ; cartes très récentes surreprésentées dans la fraude"
+    - name: account_tenure_months
+      dtype: int
+      role: feature
+      description: "Ancienneté du compte client chez le PSP"
+      unit: "mois"
+      checks: { ge: 0, le: 108 }
+      distribution: "~gamma, médiane 19 mois ; les prises de compte visent des comptes anciens"
+    - name: transactions_24h
+      dtype: int
+      role: feature
+      description: "Nombre de tentatives de paiement sur la carte en 24 h"
+      unit: "transactions"
+      checks: { ge: 1, le: 60 }
+      distribution: "Poisson(lambda ~1,8) en légitime ; 8 à 40 en card testing"
+    - name: distinct_merchants_24h
+      dtype: int
+      role: feature
+      description: "Marchands distincts contactés par la carte en 24 h"
+      unit: "marchands"
+      checks: { ge: 1, le: 40 }
+      distribution: "1 à 3 en légitime ; élevé quand la carte est testée sur plusieurs marchands"
+    - name: distinct_countries_7d
+      dtype: int
+      role: feature
+      description: "Pays distincts observés sur la carte en 7 jours"
+      unit: "pays"
+      checks: { ge: 1, le: 9 }
+      distribution: "1 à 2 en légitime ; >= 3 en prise de compte (VPN, proxy)"
+    - name: failed_attempts_1h
+      dtype: int
+      role: feature
+      description: "Tentatives refusées dans l'heure précédente"
+      unit: "tentatives"
+      checks: { ge: 0, le: 25 }
+      distribution: "0 dans 88 % des cas légitimes ; 2 à 12 en card testing et identité synthétique"
+    - name: device_age_days
+      dtype: float
+      role: feature
+      description: "Âge de l'empreinte d'appareil (première fois vue) — flottant car la colonne est nullable"
+      unit: "jours"
+      nullable: true
+      checks: { ge: 0, le: 1080 }
+      distribution: "~log-normale ; 4 % de manquants (empreinte bloquée) ; appareil neuf = risque accru"
+    - name: session_duration_sec
+      dtype: float
+      role: feature
+      description: "Durée de la session avant paiement"
+      unit: "secondes"
+      nullable: true
+      checks: { ge: 2.0, le: 3600.0 }
+      distribution: "~log-normale (médiane 96 s) ; 6 % de manquants (paiement one-click) ; très courte en automatisé"
+    - name: billing_shipping_distance_km
+      dtype: float
+      role: feature
+      description: "Distance entre adresses de facturation et de livraison"
+      unit: "km"
+      nullable: true
+      checks: { ge: 0.0, le: 14000.0 }
+      distribution: "0 km dans 71 % des cas ; ~5 % de manquants (retrait magasin) ; très élevée en prise de compte"
+    - name: amount_to_customer_avg_ratio
+      dtype: float
+      role: feature
+      description: "Rapport du montant au panier moyen historique du porteur"
+      unit: "ratio"
+      checks: { ge: 0.02, le: 60.0 }
+      distribution: "~log-normale centrée sur 1,0 ; > 6 en fraude et en achat exceptionnel légitime"
+    - name: is_night
+      dtype: bool
+      role: feature
+      description: "Transaction entre 1 h et 5 h (heure locale)"
+      checks: { isin: [0, 1] }
+      distribution: "~9 % en légitime, ~46 % en fraude automatisée"
+    - name: three_ds_authenticated
+      dtype: bool
+      role: feature
+      description: "Authentification forte 3-D Secure aboutie"
+      checks: { isin: [0, 1] }
+      distribution: "~72 % en légitime, ~19 % en fraude (contournement ou exemption)"
+    - name: previous_chargebacks_12m
+      dtype: int
+      role: feature
+      description: "Chargebacks confirmés sur la carte dans les 12 derniers mois"
+      unit: "chargebacks"
+      checks: { ge: 0, le: 6 }
+      distribution: "0 dans 97 % des cas légitimes ; 1 à 4 en fraude amicale et identité synthétique"
+    - name: is_fraud
+      dtype: int
+      role: metadata
+      description: "Fraude confirmée par chargeback (étiquette de diagnostic, JAMAIS une feature)"
+      checks: { isin: [0, 1] }
+      distribution: "~1,8 % de la population"
+    - name: fraud_scheme
+      dtype: str
+      role: metadata
+      description: "Mode opératoire de la fraude confirmée (diagnostic pédagogique et explication)"
+      nullable: true
+      checks: { isin: [card_not_present, account_takeover, synthetic_identity, friendly_fraud] }
+      distribution: "~41 % card_not_present, 27 % account_takeover, 19 % synthetic_identity, 13 % friendly_fraud ; null si légitime"
+  insights:
+    - "La prévalence est très faible (~1,8 %) : l'accuracy est inutile (98,2 % en prédisant « légitime »), il faut piloter PR AUC, rappel et précision **à budget fixé**."
+    - "Aucune variable ne suffit : `amount_eur` élevé est aussi le signe d'achats de luxe parfaitement légitimes (3 % du flux), d'où l'intérêt des ratios (montant / panier moyen) et de la vélocité."
+    - "La vélocité (`transactions_24h`, `distinct_merchants_24h`, `failed_attempts_1h`) est le signal le plus discriminant du card testing : un porteur légitime ne tente pas 25 paiements en une heure."
+    - "`three_ds_authenticated` est fortement protecteur mais **non absolu** : 19 % des fraudes passent l'authentification forte (prise de compte sur un appareil déjà connu)."
+    - "La divergence `shopper_country` / `billing_country` est un signal classique, mais 14 % des transactions légitimes sont en déplacement professionnel : la règle brute génère des faux positifs massifs."
+    - "`device_age_days` et `session_duration_sec` comportent des manquants **informatifs** (empreinte bloquée, paiement one-click) : l'imputation doit être explicite et un indicateur de manquants est souvent plus utile que la valeur imputée."
+    - "Les quatre modes opératoires n'utilisent pas les mêmes variables : un détecteur global doit couvrir des signatures hétérogènes, ce qu'un jeu de règles figé rate."
+    - "L'étiquette arrive avec 30 à 90 jours de retard (chargeback) : c'est la raison structurelle de l'approche non supervisée, et non un choix par défaut."
+    - "`billing_shipping_distance_km` a une distribution bimodale (0 km ou très loin) : la traiter comme une variable continue gaussienne masque le signal."
+    - "Quelques transactions légitimes ressemblent exactement à de la fraude (achat de luxe nocturne à l'étranger) : le bruit irréductible fixe un plafond — un PR AUC de 1,0 signerait une fuite."
+    - "Le budget d'investigation (2 % du flux) est la vraie contrainte métier : le seuil se choisit sur la courbe rappel/précision en fonction du volume, pas sur un F1 abstrait."
+    - "Les features de vélocité sont calculées **avant** la transaction (fenêtre glissante strictement passée) : toute agrégation incluant la transaction courante créerait une fuite temporelle."
+  recommendations:
+    - "Piloter le détecteur au budget : choisir le seuil qui remplit la capacité d'analyse, puis mesurer le rappel et la précision à ce seuil (table d'arbitrage dans le rapport)."
+    - "Combiner score non supervisé et règles métier : le détecteur couvre les schémas inédits, les règles couvrent les obligations réglementaires."
+    - "Mettre en place une boucle de rétro-étiquetage : réinjecter les chargebacks confirmés à J+30 pour surveiller la dérive du détecteur (voir mlops/model-monitoring)."
+    - "Segmenter l'analyse par mode opératoire : un rappel global de 0,6 peut cacher un rappel de 0,15 sur un schéma en pleine croissance."
+    - "Documenter les manquants informatifs (`device_age_days`, `session_duration_sec`) plutôt que de les imputer silencieusement."
+    - "Surveiller la stabilité du score (PSI) et le volume d'alertes : une dérive du flux suffit à saturer les analystes sans qu'aucune métrique modèle ne bouge."
+  notes:
+    - "Valeurs manquantes volontaires sur `device_age_days` (~4 %), `session_duration_sec` (~6 %) et `billing_shipping_distance_km` (~5 %)."
+    - "Outliers légitimes (~2,5 % des lignes) : achats de luxe, paiements professionnels de fin de mois, voyageurs fréquents."
+    - "Colinéarité volontaire entre `transactions_24h` et `distinct_merchants_24h`, et entre `amount_eur` et `amount_to_customer_avg_ratio`."
+    - "Étiquettes générées par un processus latent par mode opératoire, avec bruit : une partie des fraudes est structurellement indétectable (plafond de performance)."
+    - "`is_fraud` et `fraud_scheme` sont déclarées `role: metadata` : exclues des features par `drop_columns`, utilisées uniquement par l'évaluateur."
+
+metrics:
+  task: anomaly
+  # PR AUC plutôt que ROC AUC en métrique primaire : avec 1,8 % de positifs, la ROC AUC reste
+  # flatteuse même quand la file d'alertes est noyée sous les faux positifs.
+  primary: pr_auc
+  secondary: [roc_auc, recall_at_budget, precision_at_budget, f1, precision, recall]
+  # La « baseline » d'un détecteur est un score aléatoire : sa PR AUC vaut la prévalence.
+  baseline: random_score
+  direction: maximize
+  # Calibré sur le générateur : PR AUC mesurée ~0,45 pour une prévalence de 1,8 %.
+  min_primary: 0.42
+  # Le budget d'investigation (part du flux que les analystes peuvent traiter) n'est pas une
+  # métrique : il vit dans le noeud `fraud_detection` de `conf/config.yaml`, injecté par le
+  # manifeste via `extras.root_conf`, et lu par l'évaluateur comme par le prédicteur.
+
+preprocessing:
+  numeric:
+    imputer: median
+    # Contrairement au clustering, on NE rogne PAS les outliers : une transaction extrême est
+    # précisément ce qu'un détecteur d'anomalies doit voir. Le clipping détruirait le signal.
+    clip_outliers: false
+    scaler: standard
+    log1p_columns: [amount_eur, billing_shipping_distance_km, session_duration_sec, transactions_24h]
+  categorical:
+    imputer: most_frequent
+    encoder: onehot
+    handle_unknown: ignore
+    min_frequency: 0.01
+    max_categories: 12
+  features:
+    - type: boolean_flag
+      name: country_mismatch
+      column: shopper_country
+      operator: ne
+      # Comparaison colonne à colonne : le pays de la session diffère du pays de facturation.
+      # Signal fort mais non suffisant (14 % des transactions légitimes sont en déplacement).
+      value_column: billing_country
+    - type: boolean_flag
+      name: fresh_device
+      column: device_age_days
+      operator: lt
+      value: 2.0
+    - type: boolean_flag
+      name: no_strong_auth
+      column: three_ds_authenticated
+      operator: eq
+      value: 0
+    - type: bin
+      name: amount_bucket
+      column: amount_eur
+      method: quantile
+      bins: 5
+    - type: ratio
+      name: merchants_per_transaction
+      numerator: distinct_merchants_24h
+      denominator: transactions_24h
+      epsilon: 1.0
+    - type: group_stat
+      name: amount_by_category
+      group_by: merchant_category
+      value_column: amount_eur
+      agg: median
+    - type: datetime_parts
+      name: occurred_parts
+      column: occurred_at
+      prefix: occurred
+      parts: [hour, dayofweek, is_weekend]
+
+train:
+  split:
+    test_size: 0.2
+    val_size: 0.15
+    stratify: false
+    shuffle: true
+    # Le flux est chronologique : un split aléatoire surestime la performance réelle (les
+    # campagnes de fraude se répètent d'un jour à l'autre). On garde le split aléatoire pour la
+    # comparabilité entre stacks, mais les notebooks montrent aussi un split temporel.
+    time_based: false
+
+learning_objectives:
+  - "Comprendre pourquoi la fraude se détecte sans supervision : étiquette tardive, partielle et biaisée (chargeback à J+30)."
+  - "Piloter un détecteur au **budget** plutôt qu'au seuil arbitraire : courbe rappel/précision en fonction du volume d'alertes."
+  - "Lire les bonnes métriques en forte imbalance : PR AUC, lift, recall@k — et pourquoi la ROC AUC et l'accuracy trompent."
+  - "Distinguer outlier légitime et anomalie : le clipping et le winsorising détruisent le signal qu'on cherche."
+  - "Gérer les manquants informatifs (empreinte d'appareil bloquée, paiement one-click) sans imputation silencieuse."
+  - "Expliquer une alerte : schéma probable, facteurs contributifs, exigence LCB-FT."
+  - "Mesurer l'apport réel par rapport aux règles métier existantes et au score aléatoire (plancher = prévalence)."

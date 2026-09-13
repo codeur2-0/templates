@@ -1,0 +1,48 @@
+# =================================================================================================
+# Modèle : Gradient boosting XGBoost
+# -------------------------------------------------------------------------------------------------
+# XGBoost est la référence industrielle sur données tabulaires : le boosting régularisé (L1/L2,
+# subsampling, shrinkage) capture les interactions du cas churn (contrat mensuel x jeune abonné x
+# satisfaction basse) tout en restant maîtrisable grâce à l'early stopping natif sur un split de
+# validation. L'importance de features au gain donne des facteurs explicatifs actionnables pour le
+# CRM, et `scale_pos_weight` traite le déséquilibre de classes sans sur-échantillonnage.
+#
+# Alternatives considérées : xgboost_dart : dropout sur les arbres, régularise les gros ensembles (early stopping non supporté), xgboost_linear : booster linéaire, vérifie qu'une part du signal est bien linéaire, logistic_regression : baseline interprétable, sensible au scaling et aux interactions, dummy : plancher à battre — un modèle qui ne le dépasse pas n'a aucune valeur.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_estimators=...
+# =================================================================================================
+
+name: "Gradient boosting XGBoost"
+algorithm: xgboost
+class: XGBoostModel
+task: binary
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `XGBoostModel(params=...)` (voir src/models/model.py).
+params:
+  n_estimators: 400
+  max_depth: 6
+  learning_rate: 0.08
+  subsample: 0.9
+  colsample_bytree: 0.8
+  min_child_weight: 3
+  reg_lambda: 1.5
+  reg_alpha: 0.0
+  gamma: 0.0
+  scale_pos_weight: auto
+  importance_type: gain
+
+# --- options spécifiques à la stack `xgboost` ---------------------------------------
+early_stopping_rounds: 40
+eval_metric:
+- logloss
+- auc
+native_categorical: true
+cross_validation:
+  enabled: true
+  folds: 5
+  strategy: stratified

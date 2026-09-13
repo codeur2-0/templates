@@ -1,0 +1,93 @@
+# ==============================================================================================
+# data-science / classification / with-keras
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/binary_classification.yaml` (churn télécom).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité, modèle, budget d'entraînement.
+# ==============================================================================================
+
+key: ds-classification-keras
+title: "Prédiction d'attrition client (churn télécom) avec Keras"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> réseau de neurones déclaré avec l'API fonctionnelle Keras puis compilé et
+  entraîné -> évaluation et analyse d'erreurs) pour un cas de churn télécom, entièrement piloté
+  par Hydra et structuré en objets testables.
+
+family: binary_classification
+domain: data-science
+problem: classification
+stack: keras
+project_slug: telecom-churn-keras
+package_name: churn_keras
+
+# Budget d'entraînement : propre aux stacks itératives (époques, lots, taux d'apprentissage).
+train:
+  epochs: 40
+  batch_size: 64
+  learning_rate: 0.004
+  weight_decay: 0.0001
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    patience: 8
+    min_delta: 0.0
+    mode: min
+    # Keras restaure nativement les poids de la meilleure époque (`restore_best_weights`).
+    restore_best: true
+
+model:
+  display_name: "Réseau de neurones Keras (API fonctionnelle)"
+  algorithm: mlp
+  rationale: >-
+    L'API fonctionnelle montre l'autre façon de faire du deep learning : le graphe est **déclaré**
+    (entrées -> couches -> modèle), puis **compilé** avec son optimiseur, sa perte et ses
+    métriques, avant que `fit` ne prenne en charge la boucle d'entraînement. On y gagne
+    l'inspection du réseau, la sérialisation native (.keras) et les callbacks éprouvés
+    (EarlyStopping, ReduceLROnPlateau, TerminateOnNaN) ; on y perd la visibilité fine sur chaque
+    pas de gradient, que la stack PyTorch du même cas d'usage met au contraire en évidence.
+  alternatives:
+    - "linear : modèle linéaire compilé — baseline interprétable, même contrat"
+    - "residual_mlp : MLP à blocs résiduels, utile quand on empile les couches"
+    - "autoencoder : reconstruction non supervisée, réservé à la détection d'anomalies"
+  params:
+    hidden_layers: [64, 32]
+    dropout: 0.25
+    activation: relu
+    batch_norm: false
+    optimizer: adamw
+    scheduler: cosine
+    # `auto` : poids des classes calculés depuis le déséquilibre observé à l'entraînement
+    # (équivalent Keras du `pos_weight` de PyTorch, appliqué par `fit(class_weight=...)`).
+    class_weight: auto
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (le budget reste à 12 époques en notebook).
+  notebook_param_grid:
+    dropout: [0.1, 0.3]
+    hidden_layers: [[32, 16], [64, 32]]
+    learning_rate: [0.003, 0.01]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    # Déterminisme des opérations TensorFlow : reproductibilité bit à bit, léger surcoût.
+    deterministic: true
+    # La validation croisée d'un réseau est coûteuse : elle est désactivée par défaut ici.
+    cross_validation:
+      enabled: false
+      folds: 3
+      strategy: stratified
+  root_conf:
+    decision:
+      threshold: 0.5
+      retention_cost_eur: 25.0
+      customer_lifetime_value_eur: 1450.0
+
+learning_objectives:
+  - "Déclarer un réseau avec l'API fonctionnelle Keras (Input -> couches -> Model) puis le compiler."
+  - "Choisir la bonne activation de sortie et la bonne perte selon la tâche (sigmoid/BCE, softmax/CE sparse, linear/MSE)."
+  - "Utiliser les callbacks natifs : EarlyStopping(restore_best_weights), ReduceLROnPlateau, TerminateOnNaN."
+  - "Brancher les callbacks du projet sur la boucle Keras via un pont (`keras.callbacks.Callback`)."
+  - "Traiter un déséquilibre de classes avec `fit(class_weight=...)` et comprendre la formule 'balanced'."
+  - "Ordonnancer le taux d'apprentissage : schedules (cosine, exponential) dans l'optimiseur vs callback plateau."
+  - "Sauvegarder au format natif `.keras` et documenter les méta-données métier dans un sidecar JSON."
+  - "Garantir la reproductibilité : graines Keras, déterminisme des opérations TensorFlow."

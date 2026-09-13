@@ -1,0 +1,99 @@
+# ==============================================================================================
+# data-science / clustering / with-sklearn
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/clustering.yaml` (segmentation client e-commerce).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet et modèle.
+# ==============================================================================================
+
+key: ds-clustering-sklearn
+title: "Segmentation client d'un e-commerçant (RFM étendu) avec scikit-learn"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> KMeans sur espace standardisé -> profils de segments, validité externe et
+  affectation des nouveaux clients avec niveau de confiance) pour la segmentation CRM d'un
+  e-commerçant, entièrement piloté par Hydra et structuré en objets testables. Aucun label
+  n'est utilisé : la qualité se juge sur des critères internes, de robustesse et métier.
+
+family: clustering
+domain: data-science
+problem: clustering
+stack: sklearn
+project_slug: retail-customer-segmentation-sklearn
+package_name: segmentation_sklearn
+
+model:
+  display_name: "KMeans (initialisation k-means++)"
+  algorithm: kmeans
+  rationale: >-
+    KMeans est l'algorithme de référence pour une première segmentation : il est rapide, déterministe
+    à graine fixée, et ses centroïdes se lisent directement comme des profils en écarts-types — ce
+    qui rend chaque groupe nommable par le CRM. L'initialisation k-means++ répétée (`n_init`) réduit
+    fortement le risque d'optimum local, principal défaut de la méthode. Ses hypothèses (groupes
+    convexes, de taille comparable, dans un espace standardisé) sont exactement celles que ce projet
+    documente et vérifie : la comparaison avec un mélange gaussien, au notebook 04, montre ce que
+    l'on gagne (probabilités d'appartenance, ellipsoïdes) et ce que l'on perd (lisibilité, coût).
+  alternatives:
+    - "gaussian_mixture : groupes ellipsoïdaux et probabilités d'appartenance, plus expressif mais plus sensible aux outliers"
+    - "minibatch_kmeans : même géométrie que KMeans, coût mémoire constant — l'option des bases de plusieurs millions de clients"
+    - "isolation_forest : réservé à la détection d'anomalies (voir `data-science/anomaly-detection`), pas une segmentation"
+  params:
+    n_clusters: 6
+    init: k-means++
+    # Plusieurs ré-initialisations : c'est le premier levier de stabilité des affectations.
+    n_init: 20
+    max_iter: 300
+    tol: 0.0001
+    algorithm: lloyd
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 1 min).
+  notebook_param_grid:
+    n_clusters: [4, 5, 6, 7]
+    n_init: [5, 20]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  # Date de référence de l'instantané comportemental (le générateur en déduit les dates).
+  reference_date: "2026-01-31"
+  # Critères de succès du cas d'usage, lus par le rapport d'évaluation.
+  #
+  # Calibration : les critères internes d'un clustering (silhouette, Calinski-Harabasz,
+  # Davies-Bouldin) n'ont **pas** de valeur universelle — ils dépendent de la dimension, du
+  # recouvrement réel des groupes et du pré-traitement. Ce jeu injecte volontairement 14 % de
+  # clients mélangés entre deux profils : une silhouette « texte » de 0,5 signerait une structure
+  # artificielle. Les seuils ci-dessous sont donc calibrés sur ce jeu, et le rapport les fait
+  # toujours lire **relativement au plancher** (affectation aléatoire de même k, silhouette ~0)
+  # et à la validité externe (churn), qui est le critère que le CRM regarde.
+  quality:
+    silhouette_min: 0.18
+    davies_bouldin_max: 1.80
+    calinski_harabasz_min: 200.0
+    min_cluster_share: 0.03
+    stability_ari_min: 0.90
+    ari_latent_min: 0.35
+    churn_spread_min: 0.20
+  model_conf:
+    # Aucune cible : la validation croisée supervisée n'a pas de sens ici. La robustesse se mesure
+    # autrement (stabilité entre graines, hold-out de test, critères internes sur validation).
+    cross_validation:
+      enabled: false
+      folds: 3
+      strategy: kfold
+  root_conf:
+    segmentation:
+      # Nommage métier des segments, consommé par le prédicteur (affectation des nouveaux clients).
+      # Les identifiants sont stables à graine et données fixées ; un segment absent de cette table
+      # reçoit un nom dérivé de ses drivers de centroïde.
+      labels: {}
+      # En dessous de ce niveau de confiance, le client part en revue manuelle plutôt qu'en campagne.
+      review_confidence: faible
+
+learning_objectives:
+  - "Construire un pipeline non supervisé sans fuite : les colonnes de diagnostic sont exclues des features par configuration."
+  - "Choisir le nombre de groupes par triangulation (silhouette, Davies-Bouldin, coude d'inertie, taille minimale)."
+  - "Comprendre l'effet de l'échelle et des queues de distribution sur une distance euclidienne (log, winsorising, standardisation)."
+  - "Comparer KMeans, MiniBatchKMeans et GaussianMixture à k fixé, sur un même protocole."
+  - "Mesurer la stabilité des affectations entre graines (ARI) avant toute mise en production."
+  - "Profiler des segments en unités métier et identifier leurs drivers en écarts-types."
+  - "Valider en externe : séparer un comportement observé après coup (churn à 90 jours) sans l'avoir utilisé."
+  - "Publier une affectation assortie d'une confiance et d'une action CRM, et router les cas frontières."
+  - "Industrialiser l'ensemble : configuration Hydra, artefacts traçables, tests pytest, rapports générés."
