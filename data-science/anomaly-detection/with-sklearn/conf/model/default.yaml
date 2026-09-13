@@ -1,0 +1,44 @@
+# =================================================================================================
+# Modèle : Forêt d'isolation (Isolation Forest)
+# -------------------------------------------------------------------------------------------------
+# La forêt d'isolation est le détecteur de référence pour un premier système de scoring de fraude
+# : elle ne fait **aucune hypothèse de distribution**, produit un score continu et ordonnable
+# (indispensable pour piloter au budget), passe à l'échelle (entraînement linéaire, inférence en
+# quelques millisecondes par transaction) et reste déterministe à graine fixée. Son principe — une
+# anomalie est plus facile à isoler par des coupes aléatoires — correspond exactement à la
+# structure de la fraude bancaire : vélocité explosive, empreinte d'appareil neuve, géographie
+# incohérente sont des points peu denses. Ce projet documente aussi ses limites : elle est aveugle
+# à la **fraude amicale** (transaction légitime dans sa forme) et sensible aux variables non
+# pertinentes quand `max_features` est trop élevé. La comparaison avec un one-class SVM et un
+# Elliptic Envelope, au notebook 04, montre ce que l'on gagne (robustesse, coût) et ce que l'on
+# perd (frontière de densité explicite).
+#
+# Alternatives considérées : one_class_svm : frontière de densité explicite et noyau RBF, mais coût quadratique — inutilisable sur des millions de transactions sans échantillonnage, elliptic_envelope : robuste et très rapide, mais suppose une distribution gaussienne multivariée, ce que des montants log-normaux et des vélocités de Poisson violent, local_outlier_factor : capture les anomalies relatives à un voisinage (utile pour la prise de compte), mais ne se généralise pas à de nouvelles transactions sans `novelty=True`, auto-encodeur (voir `data-science/anomaly-detection/with-pytorch`) : apprend une variété normale et score l'erreur de reconstruction, plus expressif sur des interactions non linéaires.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_estimators=...
+# =================================================================================================
+
+name: "Forêt d'isolation (Isolation Forest)"
+algorithm: isolation_forest
+class: SklearnModel
+task: anomaly
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `SklearnModel(params=...)` (voir src/models/model.py).
+params:
+  n_estimators: 300
+  max_samples: 0.8
+  contamination: 0.02
+  max_features: 0.2
+  n_jobs: -1
+  random_state: 42
+
+# --- options spécifiques à la stack `sklearn` ---------------------------------------
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold

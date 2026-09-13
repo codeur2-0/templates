@@ -26,7 +26,13 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from lightgbm import LGBMClassifier, LGBMRegressor, EarlyStopException, early_stopping, log_evaluation
+from lightgbm import (
+    EarlyStopException,
+    LGBMClassifier,
+    LGBMRegressor,
+    early_stopping,
+    log_evaluation,
+)
 
 from src.models.base import BaseModel, FitResult, ModelCard, library_versions
 from src.utils.logging import get_logger
@@ -234,7 +240,8 @@ def resolve_algorithm(algorithm: str, task: str) -> AlgorithmSpec:
         raise ValueError(msg)
     if task not in spec.tasks:
         msg = (
-            f"Algorithm '{algorithm}' does not serve task '{task}' (it serves {sorted(spec.tasks)})."
+            f"Algorithm '{algorithm}' does not serve task '{task}' "
+            f"(it serves {sorted(spec.tasks)})."
             f" Pick one of {available_for_task(task)}."
         )
         raise ValueError(msg)
@@ -512,7 +519,9 @@ class LightGBMModel(BaseModel):
                 estimator.fit(matrix, labels, **fit_kwargs)
         except EarlyStopException as stopped:
             # Arrêt demandé par un callback du projet : le booster conserve son meilleur état.
-            logger.info("Entraînement interrompu au round {}", getattr(stopped, "best_iteration", -1))
+            logger.info(
+                "Entraînement interrompu au round {}", getattr(stopped, "best_iteration", -1)
+            )
 
         self.estimator_ = estimator
         self.params = dict(params)
@@ -523,7 +532,9 @@ class LightGBMModel(BaseModel):
         if context is not None:
             context.extra["best_iteration"] = self.best_iteration_
             context.extra["n_rounds"] = bridge.rounds if bridge else None
-            context.extra["boosting_type"] = params.get("boosting_type", self.spec.defaults.get("boosting_type"))
+            context.extra["boosting_type"] = params.get(
+                "boosting_type", self.spec.defaults.get("boosting_type")
+            )
         logger.info(
             "LightGBM fitted | {} rounds | best_iteration={} | val={}",
             bridge.rounds if bridge else params.get("n_estimators"),

@@ -11,7 +11,8 @@ Supported recipe types:
 ``product``          ``a * b`` (interaction between two numeric columns)
 ``log1p``            ``log(1 + max(x, 0))``
 ``bin``              discretisation into quantile or uniform bins (edges learned in ``fit``)
-``boolean_flag``     binary flag from a comparison (``gt``, ``lt``, ``ge``, ``le``, ``eq``)
+``boolean_flag``     binary flag from a comparison (``gt``, ``lt``, ``ge``, ``le``, ``eq``,
+                     ``ne``) against a constant ``value`` **or** another column ``value_column``
 ``datetime_parts``   calendar components (year, month, day, dayofweek, quarter, is_weekend, hour)
 ``group_stat``       aggregate of a numeric column per category (learned in ``fit``)
 
@@ -62,6 +63,7 @@ COMPARISONS: dict[str, Any] = {
     "ge": lambda series, value: series >= value,
     "le": lambda series, value: series <= value,
     "eq": lambda series, value: series == value,
+    "ne": lambda series, value: series != value,
 }
 
 
@@ -143,6 +145,30 @@ def _default_recipe_name(recipe_type: str, params: Mapping[str, Any]) -> str:
         if isinstance(params.get(key), str):
             parts.append(str(params[key]))
     return "_".join(parts)
+
+
+def _flag_operand(series: pd.Series) -> pd.Series:
+    """Return a boolean-flag operand: numeric when the column is numeric, textual otherwise.
+
+    Comparing two country codes (``shopper_country != billing_country``) is a legitimate flag
+    recipe. Coercing them to numbers would silently yield NaN everywhere and an all-zero flag —
+    the worst kind of bug, because it looks like a feature that simply does not help.
+
+    Args:
+        series: Column to compare.
+
+    Returns:
+        A series comparable with a constant or with another column of the same kind.
+    """
+    if pd.api.types.is_bool_dtype(series):
+        return series.astype("int8")
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    numeric = pd.to_numeric(series, errors="coerce")
+    if series.notna().any() and float(numeric.notna().mean()) >= 0.99:
+        # Colonne objet mais numérique de bout en bout (lecture CSV) : on garde le numérique.
+        return numeric
+    return series.astype("string").fillna("")
 
 
 class FeatureBuilder:
@@ -336,16 +362,25 @@ class FeatureBuilder:
             series = pd.to_numeric(frame[_required(frame, params, "column")], errors="coerce")
             return np.log1p(series.clip(lower=0))
         if recipe.type == "boolean_flag":
-            series = pd.to_numeric(frame[_required(frame, params, "column")], errors="coerce")
             operator = str(params.get("operator", "gt"))
             if operator not in COMPARISONS:
                 msg = f"Unknown operator '{operator}'. Allowed: {sorted(COMPARISONS)}"
                 raise ValueError(msg)
+            other_column = params.get("value_column")
             threshold = params.get("value")
-            if threshold is None:
-                msg = "boolean_flag requires a 'value' threshold"
+            if other_column is None and threshold is None:
+                msg = "boolean_flag requires a 'value' threshold or a 'value_column'"
                 raise ValueError(msg)
-            return COMPARISONS[operator](series, float(threshold)).astype("int8")
+            series = _flag_operand(frame[_required(frame, params, "column")])
+            if other_column is not None:
+                # Comparaison colonne à colonne (p. ex. pays de session != pays de facturation) :
+                # les deux opérandes passent par la même coercion pour rester comparables.
+                reference: Any = _flag_operand(frame[_required(frame, params, "value_column")])
+            elif pd.api.types.is_number(threshold):
+                reference = float(threshold)  # type: ignore[arg-type]
+            else:
+                reference = str(threshold)
+            return COMPARISONS[operator](series, reference).astype("int8")
         msg = f"Recipe type '{recipe.type}' is not handled by _apply_arithmetic"
         raise ValueError(msg)
 

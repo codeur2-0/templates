@@ -767,7 +767,15 @@ class MetricCalculator:
                 if _missing(getattr(payload, requirement, None))
             ]
             if missing:
-                logger.warning("Metric '{}' skipped: missing input(s) {}", name, missing)
+                # Une tâche non supervisée n'a pas de cible : demander une métrique étiquetée est
+                # un cas attendu (le registre est déclaré pour la tâche, pas pour un split précis).
+                # On le trace en DEBUG ; le WARNING reste réservé aux entrées réellement absentes.
+                message = "Metric '{}' skipped: missing input(s) {}"
+                unsupervised = payload.y_true is None and set(missing) <= {"y_true", "y_proba"}
+                if unsupervised:
+                    logger.debug(message, name, missing)
+                else:
+                    logger.warning(message, name, missing)
                 values[name] = float("nan")
                 continue
             try:

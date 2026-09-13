@@ -91,6 +91,59 @@ def library_versions() -> dict[str, str]:
     return versions
 
 
+def _is_finite(value: Any) -> bool:
+    """Return whether a metric value is a real, finite number.
+
+    Args:
+        value: Raw value produced by the metric registry.
+
+    Returns:
+        ``True`` for finite integers and floats, ``False`` for ``None``, NaN, infinities and
+        anything non-numeric. A metric that is not finite must never reach an artefact: NaN is not
+        valid strict JSON and carries no information for whoever reads the run.
+    """
+    if isinstance(value, bool) or value is None:
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isfinite(number))
+
+
+def score_diagnostics(scores: Any) -> dict[str, float]:
+    """Summarise a model's own output when no target is available.
+
+    Unsupervised tasks (anomaly detection, density clustering) cannot compute a supervised metric
+    during training: there is nothing to compare against. Rather than reporting NaN, the model
+    describes the distribution of its own score on the training data, which is exactly what an
+    engineer needs to sanity-check a fit (is the score degenerate? is it concentrated?).
+
+    Args:
+        scores: Predictions or scores computed on the training features.
+
+    Returns:
+        Finite descriptive statistics of the score distribution; empty when the scores carry no
+        numeric signal (e.g. discrete cluster identifiers are still numeric, but a textual output
+        is not).
+    """
+    flat = pd.to_numeric(
+        pd.Series(np.asarray(scores, dtype=object).ravel()), errors="coerce"
+    ).dropna()
+    if flat.empty:
+        return {}
+    values = flat.astype("float64")
+    return {
+        "score_mean": float(values.mean()),
+        "score_std": float(values.std(ddof=0)),
+        "score_p50": float(values.quantile(0.50)),
+        "score_p95": float(values.quantile(0.95)),
+        "score_p99": float(values.quantile(0.99)),
+        "score_min": float(values.min()),
+        "score_max": float(values.max()),
+    }
+
+
 def _sanitise(value: Any) -> Any:
     """Convert NumPy/pandas scalars to JSON-serialisable Python objects.
 
@@ -178,7 +231,7 @@ class FitResult:
         Returns:
             The reconstructed :class:`FitResult`.
         """
-        known = {name for name in cls.__dataclass_fields__}  # noqa: SLF001 - dataclass API
+        known = set(cls.__dataclass_fields__)
         return cls(**{str(key): value for key, value in payload.items() if key in known})
 
 
@@ -243,7 +296,7 @@ class ModelCard:
         Returns:
             The reconstructed :class:`ModelCard`.
         """
-        known = {name for name in cls.__dataclass_fields__}  # noqa: SLF001 - dataclass API
+        known = set(cls.__dataclass_fields__)
         return cls(**{str(key): value for key, value in payload.items() if key in known})
 
 
@@ -491,7 +544,7 @@ class BaseModel(ABC):
             algorithm=self.algorithm,
             metrics=self.training_metrics(features, y),
             history=dict(context.history),
-            n_samples=int(len(features)),
+            n_samples=len(features),
             n_features=int(np.shape(features)[1]),
             started_at=started_at,
             finished_at=_utc_now(),
@@ -520,7 +573,10 @@ class BaseModel(ABC):
             y: Training target (``None`` for unsupervised tasks).
 
         Returns:
-            Mapping of metric name to value (empty when the metric registry is unavailable).
+            Mapping of metric name to **finite** value. Metrics the registry cannot compute
+            without a target are dropped rather than returned as NaN; when nothing finite remains
+            (unsupervised task with a label-based registry), the score distribution is reported
+            instead — see :func:`score_diagnostics`.
         """
         calculator = self._metric_calculator()
         if calculator is None:
@@ -532,9 +588,18 @@ class BaseModel(ABC):
                 probabilities = self._predict_proba(X)
             except (NotImplementedError, ValueError) as error:
                 logger.debug("Training probabilities unavailable: {}", error)
-        return calculator.evaluate(
+        values = calculator.evaluate(
             self._metric_inputs(y_true=y, y_pred=predictions, y_proba=probabilities, X=X)
         )
+        finite = {
+            str(name): float(value)
+            for name, value in dict(values).items()
+            if _is_finite(value)
+        }
+        if finite:
+            return finite
+        logger.debug("No finite training metric (unsupervised task): reporting score diagnostics")
+        return score_diagnostics(predictions)
 
     def _metric_calculator(self) -> Any:
         """Build the metric calculator declared in the configuration (``None`` when absent)."""
@@ -553,9 +618,7 @@ class BaseModel(ABC):
             return None
 
     @staticmethod
-    def _metric_inputs(
-        *, y_true: Any, y_pred: Any, y_proba: Any, X: Any
-    ) -> Any:
+    def _metric_inputs(*, y_true: Any, y_pred: Any, y_proba: Any, X: Any) -> Any:
         """Build the :class:`MetricInputs` payload expected by the metric registry."""
         from src.training.losses_metrics import MetricInputs
 

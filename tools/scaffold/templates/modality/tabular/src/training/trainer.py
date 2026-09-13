@@ -321,11 +321,15 @@ class Trainer:
                 extra={"groups": data.X_val.get("group") if hasattr(data.X_val, "get") else None},
             )
         )
-        prefixed = {f"val_{name}": value for name, value in values.items()}
-        logger.info(
-            "Validation metrics: {}",
-            {k: round(v, 5) for k, v in prefixed.items() if np.isfinite(v)},
-        )
+        # Une métrique non mesurable (tâche non supervisée sans cible, split dégénéré) est omise
+        # plutôt que publiée en NaN : les callbacks, les courbes et l'artefact JSON travaillent
+        # tous sur des nombres finis, et une clé absente dit exactement ce qui a été mesuré.
+        prefixed = {
+            f"val_{name}": float(value)
+            for name, value in values.items()
+            if isinstance(value, (int, float, np.floating)) and np.isfinite(float(value))
+        }
+        logger.info("Validation metrics: {}", {k: round(v, 5) for k, v in prefixed.items()})
         return prefixed
 
     # ------------------------------------------------------------------ artefacts -------
@@ -356,7 +360,7 @@ class Trainer:
             "framework": outcome.model.framework,
             "model": type(outcome.model).__name__,
             "metrics": _sanitise(outcome.metrics),
-            "history": outcome.history,
+            "history": _sanitise_history(outcome.history),
             "duration_seconds": round(outcome.duration_seconds, 4),
             "params": outcome.model.params,
             "artifacts": {key: str(path) for key, path in written.items()},
@@ -445,13 +449,58 @@ def _library_versions() -> dict[str, str]:
     return versions
 
 
+def _finite(value: Any) -> float | None:
+    """Return ``value`` as a finite float, or ``None`` when it is not one.
+
+    Args:
+        value: Raw metric value (NumPy scalar, ``None``, NaN, text, ...).
+
+    Returns:
+        The finite float, or ``None``.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
 def _sanitise(metrics: Mapping[str, Any]) -> dict[str, float]:
-    """Convert metrics to JSON-serialisable floats (NaN -> None)."""
+    """Convert metrics to JSON-serialisable **finite** floats.
+
+    A metric that could not be computed (tâche non supervisée entraînée sans cible, split
+    dégénéré) is omitted rather than published as NaN: NaN is not valid strict JSON, breaks most
+    dashboards, and pretends a measurement happened when it did not.
+
+    Args:
+        metrics: Raw metric mapping.
+
+    Returns:
+        A mapping containing only finite floats.
+    """
     sanitised: dict[str, float] = {}
     for key, value in metrics.items():
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            continue
-        sanitised[str(key)] = number if np.isfinite(number) else float("nan")
+        number = _finite(value)
+        if number is not None:
+            sanitised[str(key)] = number
+    return sanitised
+
+
+def _sanitise_history(history: Mapping[str, Any]) -> dict[str, list[float]]:
+    """Keep only the finite values of a per-epoch metric history.
+
+    Args:
+        history: Raw history filled by the metric callbacks (``train_*`` / ``val_*`` keys).
+
+    Returns:
+        A mapping of metric name to the finite values recorded during training. A key whose values
+        are all undefined disappears entirely, so no curve can be drawn from phantom epochs.
+    """
+    sanitised: dict[str, list[float]] = {}
+    for key, values in dict(history or {}).items():
+        finite = [number for number in (_finite(item) for item in list(values or [])) if number is not None]
+        if finite:
+            sanitised[str(key)] = finite
     return sanitised

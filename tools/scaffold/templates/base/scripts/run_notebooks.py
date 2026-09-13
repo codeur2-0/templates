@@ -82,7 +82,9 @@ def execute(path: Path, *, timeout: int, inplace: bool) -> tuple[bool, str, floa
             str(error).strip().splitlines()[-1] if str(error).strip() else "échec inconnu",
             time.perf_counter() - started,
         )
-    except Exception as error:  # noqa: BLE001 - un notebook cassé ne doit pas arrêter les autres
+    # Un notebook cassé ne doit pas arrêter l'exécution des autres : on capture l'erreur, on la
+    # rapporte dans le résumé, et la boucle continue.
+    except Exception as error:
         return False, f"{type(error).__name__}: {error}", time.perf_counter() - started
 
     if inplace:

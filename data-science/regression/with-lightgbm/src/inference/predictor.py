@@ -488,4 +488,4 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-__all__ = ["CONTEXT_COLUMNS", "DEFAULT_TOLERANCE_PCT", "ID_COLUMN", "TARGET_NAME", "Predictor"]
+__all__ = ["CONTEXT_COLUMNS", "DEFAULT_TOLERANCE_PCT", "ID_COLUMN", "Predictor", "TARGET_NAME"]

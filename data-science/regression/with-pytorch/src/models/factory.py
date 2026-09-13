@@ -31,8 +31,8 @@ from typing import Any
 from src.models.base import BaseModel, FitResult, ModelCard
 from src.models.model import (
     ESTIMATORS,
-    PyTorchModel,
     AlgorithmSpec,
+    PyTorchModel,
     available_for_task,
     resolve_algorithm,
 )

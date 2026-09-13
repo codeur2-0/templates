@@ -653,7 +653,9 @@ def count_parameters(network: nn.Module) -> int:
     Returns:
         The number of trainable scalars.
     """
-    return int(sum(parameter.numel() for parameter in network.parameters() if parameter.requires_grad))
+    return int(
+        sum(parameter.numel() for parameter in network.parameters() if parameter.requires_grad)
+    )
 
 
 def _resolve_device(model_node: Mapping[str, Any]) -> torch.device:
@@ -678,9 +680,7 @@ def _label_space(labels: np.ndarray | None) -> np.ndarray | None:
     return np.asarray(sorted(pd.Series(labels).unique().tolist()), dtype="object")
 
 
-def _target_statistics(
-    task: str, labels: np.ndarray | None
-) -> tuple[float | None, float | None]:
+def _target_statistics(task: str, labels: np.ndarray | None) -> tuple[float | None, float | None]:
     """Mean and standard deviation used to normalise a continuous target.
 
     Args:
@@ -1227,10 +1227,14 @@ class PyTorchModel(BaseModel):
         """
         resolved: dict[str, Any] = {**self.spec.defaults, **self._effective_params()}
         if str(resolved.get("optimizer", "adamw")).lower() not in _OPTIMIZERS:
-            msg = f"Unknown optimizer '{resolved.get('optimizer')}'. Available: {sorted(_OPTIMIZERS)}"
+            msg = (
+                f"Unknown optimizer '{resolved.get('optimizer')}'. Available: {sorted(_OPTIMIZERS)}"
+            )
             raise ValueError(msg)
         if str(resolved.get("scheduler", "none")).lower() not in _SCHEDULERS:
-            msg = f"Unknown scheduler '{resolved.get('scheduler')}'. Available: {sorted(_SCHEDULERS)}"
+            msg = (
+                f"Unknown scheduler '{resolved.get('scheduler')}'. Available: {sorted(_SCHEDULERS)}"
+            )
             raise ValueError(msg)
         if labels is not None and self.task in _CLASSIFICATION:
             counts = pd.Series(labels).value_counts().sort_index().to_numpy(dtype="float64")
@@ -1365,9 +1369,7 @@ class PyTorchModel(BaseModel):
             monitor=monitor,
         )
         per_batch = isinstance(scheduler, torch.optim.lr_scheduler.CosineAnnealingLR)
-        skip_singleton = any(
-            isinstance(layer, nn.BatchNorm1d) for layer in network.modules()
-        )
+        skip_singleton = any(isinstance(layer, nn.BatchNorm1d) for layer in network.modules())
         stopping = dict(self._train_node().get("early_stopping") or {})
         restore_best = bool(stopping.get("restore_best"))
 
@@ -1795,11 +1797,17 @@ class PyTorchModel(BaseModel):
         if labels is None or self.task in _ANOMALY:
             return features, features.clone()
         encoded = _encode_labels(
-            labels, self.task, self.classes_, target_mean=self._target_mean_, target_std=self._target_std_
+            labels,
+            self.task,
+            self.classes_,
+            target_mean=self._target_mean_,
+            target_std=self._target_std_,
         )
         dtype = torch.int64 if self.task == "multiclass" else torch.float32
         shaped = encoded.reshape(-1, 1) if dtype is torch.float32 else encoded
-        return features, torch.as_tensor(np.ascontiguousarray(shaped), dtype=dtype, device=self.device_)
+        return features, torch.as_tensor(
+            np.ascontiguousarray(shaped), dtype=dtype, device=self.device_
+        )
 
     def _train_node(self) -> Mapping[str, Any]:
         """Return the ``train`` configuration node."""

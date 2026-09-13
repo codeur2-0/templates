@@ -755,4 +755,4 @@ def _to_float(value: Any) -> float:
     return number if np.isfinite(number) else float("nan")
 
 
-__all__ = ["TOLERANCE_PCT", "EvaluationResult", "Evaluator"]
+__all__ = ["EvaluationResult", "Evaluator", "TOLERANCE_PCT"]

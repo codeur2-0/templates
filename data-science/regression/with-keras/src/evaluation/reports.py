@@ -764,4 +764,4 @@ def _percent(value: Any) -> str:
     return f"{number:.1%}"
 
 
-__all__ = ["BUSINESS_RECOMMENDATIONS", "PRIMARY_METRIC", "USE_CASE_TITLE", "ReportBuilder"]
+__all__ = ["BUSINESS_RECOMMENDATIONS", "PRIMARY_METRIC", "ReportBuilder", "USE_CASE_TITLE"]

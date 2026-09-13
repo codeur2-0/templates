@@ -19,6 +19,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from src.models.base import SUPERVISED_TASKS
 from src.pipelines.data_pipeline import DataGenerationPipeline
 from src.pipelines.evaluation_pipeline import EvaluationPipeline
 from src.pipelines.inference_pipeline import InferencePipeline
@@ -108,9 +109,18 @@ class TestTrainPipeline:
     def test_training_reports_metrics(
         self, training_result: Any, sandbox_config: AppConfig
     ) -> None:
-        """La métrique primaire est calculée et bornée."""
+        """La métrique primaire est calculée et bornée (supervisé), aucune NaN (toujours)."""
         metrics = training_result.metrics
         assert metrics
+        # Invariant transversal : l'artefact `training_metrics.json` ne contient jamais de valeur
+        # non finie. NaN n'est pas du JSON strict et ne se lit pas ; le modèle retire donc les
+        # métriques qu'il ne peut pas calculer plutôt que de les publier vides.
+        assert all(pd.notna(value) for value in metrics.values()), sorted(metrics)
+        if str(sandbox_config.metrics.task) not in SUPERVISED_TASKS:
+            # Non supervisé : pas de cible, donc pas de métrique primaire pendant l'entraînement.
+            # Le modèle rapporte la distribution de son propre score (diagnostic intrinsèque).
+            assert any(name.startswith("score_") for name in metrics), sorted(metrics)
+            return
         primary = sandbox_config.metrics.primary
         matching = [value for name, value in metrics.items() if primary in name]
         assert matching, f"'{primary}' absent des métriques {sorted(metrics)}"

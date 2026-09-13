@@ -513,4 +513,4 @@ class RegressionPlots:
         return produced
 
 
-__all__ = ["DEFAULT_BUCKETS", "TOLERANCE_PCT", "RegressionPlots"]
+__all__ = ["DEFAULT_BUCKETS", "RegressionPlots", "TOLERANCE_PCT"]

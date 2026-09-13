@@ -28,8 +28,8 @@ from typing import Any
 from src.models.base import BaseModel, FitResult, ModelCard
 from src.models.model import (
     ESTIMATORS,
-    SklearnModel,
     AlgorithmSpec,
+    SklearnModel,
     available_for_task,
     resolve_algorithm,
 )

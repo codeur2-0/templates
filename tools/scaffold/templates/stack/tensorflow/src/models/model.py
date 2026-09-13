@@ -382,9 +382,7 @@ class TabularNet(keras.Model):
                 )
                 for index, units in enumerate(reversed(widths))
             ]
-            self.decoder.append(
-                keras.layers.Dense(self.input_dim, name="reconstruction_dense")
-            )
+            self.decoder.append(keras.layers.Dense(self.input_dim, name="reconstruction_dense"))
         else:
             msg = f"Unknown TensorFlow architecture '{algorithm}'"
             raise ValueError(msg)
@@ -1314,9 +1312,7 @@ class PlateauDecay:
         decayed = max(rate * self.factor, self.min_lr)
         optimizer.learning_rate.assign(decayed)
         self.wait, self.decays = 0, self.decays + 1
-        logger.info(
-            "Plateau sur {} : taux d'apprentissage {} -> {:.6g}", value, rate, decayed
-        )
+        logger.info("Plateau sur {} : taux d'apprentissage {} -> {:.6g}", value, rate, decayed)
 
 
 def _monitored_metric(train_node: Mapping[str, Any], primary: str) -> tuple[str, str]:
@@ -1583,10 +1579,14 @@ class TensorFlowModel(BaseModel):
             raise ValueError(msg)
         resolved["activation"] = activation
         if str(resolved.get("optimizer", "adamw")).lower() not in _OPTIMIZERS:
-            msg = f"Unknown optimizer '{resolved.get('optimizer')}'. Available: {sorted(_OPTIMIZERS)}"
+            msg = (
+                f"Unknown optimizer '{resolved.get('optimizer')}'. Available: {sorted(_OPTIMIZERS)}"
+            )
             raise ValueError(msg)
         if str(resolved.get("scheduler", "none")).lower() not in _SCHEDULERS:
-            msg = f"Unknown scheduler '{resolved.get('scheduler')}'. Available: {sorted(_SCHEDULERS)}"
+            msg = (
+                f"Unknown scheduler '{resolved.get('scheduler')}'. Available: {sorted(_SCHEDULERS)}"
+            )
             raise ValueError(msg)
         if labels is not None and self.task in _CLASSIFICATION:
             counts = pd.Series(labels).value_counts().sort_index().to_numpy(dtype="float64")
@@ -1690,7 +1690,10 @@ class TensorFlowModel(BaseModel):
         steps_per_epoch = max(int(np.ceil(len(matrix) / max(batch_size, 1))), 1)
         criterion = _loss_function(self.task)
         schedule = _learning_rate_schedule(
-            params, learning_rate=self._learning_rate(), steps_per_epoch=steps_per_epoch, epochs=epochs
+            params,
+            learning_rate=self._learning_rate(),
+            steps_per_epoch=steps_per_epoch,
+            epochs=epochs,
         )
         optimizer = _optimizer(params, schedule, self._weight_decay())
         train_dataset = _dataset(
@@ -1832,7 +1835,11 @@ class TensorFlowModel(BaseModel):
             weights = np.ones(len(matrix), dtype="float32")
             return targets, weights
         encoded = _encode_labels(
-            labels, self.task, self.classes_, target_mean=self._target_mean_, target_std=self._target_std_
+            labels,
+            self.task,
+            self.classes_,
+            target_mean=self._target_mean_,
+            target_std=self._target_std_,
         )
         if self.task == "multiclass":
             targets = np.ascontiguousarray(encoded, dtype="int32")

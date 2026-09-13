@@ -101,6 +101,12 @@ class TestTrainer:
         outcome = _run_training(trainer, training_data)
         if training_data.X_val is None:
             pytest.skip("pas de split de validation configuré")
+        if str(training_data.task) not in SUPERVISED_TASKS:
+            # Tâche non supervisée : sans cible, l'entraînement ne peut produire aucune métrique
+            # de validation. Le contrat est explicite — un dictionnaire vide, jamais des NaN — et
+            # la qualité se mesure ensuite, sur les métadonnées étiquetées (mode `evaluate`).
+            assert outcome.validation_metrics == {}
+            return
         assert outcome.validation_metrics
         assert all(name.startswith("val_") for name in outcome.validation_metrics)
 

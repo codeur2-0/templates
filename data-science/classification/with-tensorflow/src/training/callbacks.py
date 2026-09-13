@@ -9,6 +9,7 @@ epoch / boosting round, while single-shot estimators (scikit-learn) only emit
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -345,9 +346,19 @@ class MetricThresholdCallback(BaseCallback):
         value = context.logs.get(self.monitor)
         if value is None:
             return
-        ok = (
-            float(value) >= self.threshold if self.mode == "max" else float(value) <= self.threshold
-        )
+        try:
+            measured = float(value)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(measured):
+            # Métrique non mesurable à cette époque (détecteur non supervisé entraîné sans cible,
+            # split de validation dégénéré) : ce n'est pas un échec de seuil. Alerter ici noierait
+            # les vrais dépassements sous du bruit.
+            logger.debug(
+                "Metric '{}' not measurable ({}): threshold check skipped", self.monitor, measured
+            )
+            return
+        ok = measured >= self.threshold if self.mode == "max" else measured <= self.threshold
         self.satisfied = self.satisfied or ok
         if not ok:
             requirement = "au moins" if self.mode == "max" else "au plus"

@@ -26,7 +26,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-
 from xgboost.callback import TrainingCallback
 
 from src.models.base import BaseModel, FitResult, ModelCard, library_versions
@@ -174,7 +173,8 @@ ESTIMATORS: dict[str, AlgorithmSpec] = {
             tasks=_CLASSIFICATION | _REGRESSION,
             builder=_booster,
             rationale=(
-                "Booster linéaire : vérifie qu'une part du signal est bien additive avant d'empiler "
+                "Booster linéaire : vérifie qu'une part du signal est bien additive "
+                "avant d'empiler "
                 "des arbres. Sert de plancher interprétable, au même titre qu'une régression "
                 "logistique ou un Ridge."
             ),
@@ -223,7 +223,8 @@ def resolve_algorithm(algorithm: str, task: str) -> AlgorithmSpec:
         raise ValueError(msg)
     if task not in spec.tasks:
         msg = (
-            f"Algorithm '{algorithm}' does not serve task '{task}' (it serves {sorted(spec.tasks)})."
+            f"Algorithm '{algorithm}' does not serve task '{task}' "
+            f"(it serves {sorted(spec.tasks)})."
             f" Pick one of {available_for_task(task)}."
         )
         raise ValueError(msg)
@@ -450,7 +451,9 @@ class XGBoostModel(BaseModel):
     def _planned_epochs(self) -> int:
         """Announce the number of boosting rounds to the callbacks."""
         try:
-            return max(int(self.params.get("n_estimators", self.spec.defaults.get("n_estimators", 100))), 1)
+            return max(
+                int(self.params.get("n_estimators", self.spec.defaults.get("n_estimators", 100))), 1
+            )
         except (TypeError, ValueError):  # pragma: no cover - défensif
             return 100
 

@@ -35,6 +35,10 @@ from tools.scaffold.utils_notebooks import (
 
 #: Nombre de lignes utilisé par les notebooks : réaliste mais exécutable en quelques secondes.
 NB_ROWS = 1500
+
+#: Volume généré dans les notebooks de détection d'anomalies : les positifs sont si rares (~1,8 %)
+#: qu'un échantillon réduit ne laisserait que quelques fraudes par split (métriques illisibles).
+NB_ROWS_ANOMALY = 12000
 #: Époques utilisées par les notebooks pour une stack sans boucle d'époques (sans effet).
 NB_EPOCHS_DEFAULT = 3
 #: Époques utilisées par les notebooks pour une stack itérative (deep learning).
@@ -66,7 +70,7 @@ def _tokens(context: NotebookContext) -> dict[str, str]:
     spec = context.spec
     data = spec.data
     return {
-        "__ROWS__": str(NB_ROWS),
+        "__ROWS__": str(_notebook_rows(context)),
         "__SEED__": str(data.seed),
         "__TITLE__": spec.title,
         "__PROJECT__": spec.project_slug,
@@ -122,6 +126,37 @@ def _is_clustering(context: NotebookContext) -> bool:
         ``True`` for a clustering task, ``False`` otherwise.
     """
     return str(getattr(context.spec.metrics, "task", "")) == "clustering"
+
+
+def _is_anomaly(context: NotebookContext) -> bool:
+    """Return ``True`` when the project detects anomalies without any training target.
+
+    Args:
+        context: Notebook context.
+
+    Returns:
+        ``True`` for an anomaly-detection task, ``False`` otherwise.
+    """
+    return str(getattr(context.spec.metrics, "task", "")) == "anomaly"
+
+
+def _notebook_rows(context: NotebookContext) -> int:
+    """Return the number of rows generated inside the notebooks.
+
+    Les notebooks travaillent d'ordinaire sur un échantillon réduit (:data:`NB_ROWS`) pour rester
+    sous la minute. La détection d'anomalies fait exception : avec une prévalence de ~1,8 %, un
+    échantillon de 1 500 lignes ne laisserait que quelques fraudes dans les splits de validation et
+    de test, et les métriques affichées seraient du bruit. On génère donc le volume complet — les
+    chiffres du notebook restent ainsi comparables à ceux de ``make train``, au prix d'une exécution
+    un peu plus longue (largement sous le timeout par cellule).
+
+    Args:
+        context: Notebook context.
+
+    Returns:
+        The notebook sample size.
+    """
+    return NB_ROWS_ANOMALY if _is_anomaly(context) else NB_ROWS
 
 
 def _render(source: str, context: NotebookContext) -> str:
@@ -591,6 +626,12 @@ for column in categorical_columns:
         from tools.scaffold.notebooks.clustering import structure_cells
 
         cells += structure_cells(context)
+    elif _is_anomaly(context):
+        # Aucune cible non plus, mais la question diffère : prévalence (et plancher de
+        # performance), pouvoir discriminant univarié, manquants informatifs.
+        from tools.scaffold.notebooks.anomaly import structure_cells as anomaly_structure_cells
+
+        cells += anomaly_structure_cells(context)
 
     cells += [
         _md("## 6. Colinéarité et structure"),
@@ -2348,6 +2389,17 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
 
         model_exploration = build_04_clustering
         error_analysis = build_06_clustering
+    elif _is_anomaly(context):
+        # Sans cible exploitable, l'exploration porte sur le plancher aléatoire, la comparaison des
+        # détecteurs et la sensibilité à la contamination ; l'analyse finale sur l'arbitrage au
+        # budget d'investigation, la couverture par mode opératoire et les erreurs.
+        from tools.scaffold.notebooks.anomaly import (
+            build_04_model_exploration as build_04_anomaly,
+            build_06_error_analysis as build_06_anomaly,
+        )
+
+        model_exploration = build_04_anomaly
+        error_analysis = build_06_anomaly
     builders = (
         build_01_eda,
         build_02_validation,
@@ -2361,11 +2413,13 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
 
 __all__ = [
     "NB_ROWS",
+    "NB_ROWS_ANOMALY",
     "build_01_eda",
     "build_04_model_exploration",
     "build_05_training",
     "build_06_error_analysis",
     "build_all",
+    "_is_anomaly",
     "_is_clustering",
     "_is_regression",
 ]

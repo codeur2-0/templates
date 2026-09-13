@@ -102,6 +102,14 @@ class TestTrainer:
         outcome = _run_training(trainer, training_data)
         if training_data.X_val is None:
             pytest.skip("pas de split de validation configuré")
+        if str(training_data.task) not in SUPERVISED_TASKS:
+            # Tâche non supervisée : sans cible, la validation publie soit des métriques
+            # intrinsèques (clustering : `val_silhouette`, `val_davies_bouldin`, et le diagnostic
+            # `n_clusters` non préfixé), soit rien du tout (détection d'anomalies, dont la qualité
+            # se mesure sur les métadonnées étiquetées, en mode `evaluate`). Le préfixe `val_`
+            # n'est donc pas un invariant universel ; l'absence de valeur non finie, si.
+            assert all(np.isfinite(value) for value in outcome.validation_metrics.values())
+            return
         assert outcome.validation_metrics
         assert all(name.startswith("val_") for name in outcome.validation_metrics)
 

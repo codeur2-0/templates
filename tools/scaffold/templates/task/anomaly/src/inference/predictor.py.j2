@@ -1,0 +1,782 @@
+{#- Predictor anomaly : score continu, rang, décision au budget, niveau de risque et raisons. -#}
+"""Inference: score new payment transactions with the trained anomaly detector.
+
+The predictor is the *production facing* object of the project. It:
+
+1. loads the artefacts written by training (model, preprocessing, feature builder),
+2. validates the incoming payload with ``InferenceDataSchema`` (fail fast, explicit message),
+3. rebuilds the exact same features and transformations as during training,
+4. returns a business-readable frame: **anomaly score, rank in the investigation queue,
+   percentile, alert decision at the operating threshold, risk level, confidence** and the
+   **reasons** that justify the alert (an LCB-FT requirement: an analyst must be able to read
+   why a transaction was flagged).
+
+Returning a score alone would be a product mistake: the fraud team needs a *decision* (alert or
+let through), a *rank* (who is investigated first when the queue is longer than the capacity) and
+an *explanation*. The threshold is not hard-coded: it is read from the configuration, otherwise
+from the evaluation artefact (``artifacts/metrics/evaluation_metrics.json``), otherwise calibrated
+on a reference sample of the flow at the declared investigation budget.
+
+Nothing here knows how the detector was trained: swapping an isolation forest for an autoencoder
+only changes ``src/models/model.py``, as long as ``predict`` returns a continuous score where
+**higher means more anomalous**.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Mapping
+
+import numpy as np
+import pandas as pd
+
+from src.data.generators import DEFAULT_DATASET_NAME, SyntheticDataGenerator
+from src.data.loaders import InferenceDataLoader
+from src.data.schemas import InferenceDataSchema
+from src.features.build_features import FeatureBuilder
+from src.models import load_model
+from src.models.base import BaseModel
+from src.preprocessing.pipelines import PreprocessingPipeline
+from src.utils.io import load_pickle, write_table
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+
+logger = get_logger(__name__)
+
+#: Identifiant métier, conservé dans les scores pour la traçabilité.
+ID_COLUMN = "{{ spec.data.id_column or 'transaction_id' }}"
+
+#: Part du flux transmise aux analystes quand aucun seuil n'est fourni (contrainte de capacité).
+DEFAULT_BUDGET_RATE = 0.02
+
+#: Taille de l'échantillon de référence utilisé pour calibrer le seuil et les raisons.
+REFERENCE_SAMPLES = 2000
+
+#: Nombre de facteurs contributifs cités par transaction.
+N_REASONS = 3
+
+#: Écart-type standardisé au-delà duquel une feature est citée comme facteur contributif.
+REASON_Z_THRESHOLD = 1.2
+
+#: Niveaux de risque, définis par l'écart au seuil d'alerte exprimé en écarts-type de la
+#: population de référence (du plus risqué au moins risqué). Les définir **relativement au seuil**
+#: plutôt qu'en percentile du lot garantit deux propriétés : la décision est stable d'un lot à
+#: l'autre (un lot de 5 transactions ne produit pas artificiellement un cas « critique ») et le
+#: niveau de risque est cohérent avec `flagged`.
+RISK_LEVELS: tuple[tuple[float, str], ...] = (
+    (0.5, "critique"),
+    (0.0, "élevé"),
+    (-1.0, "modéré"),
+    (-np.inf, "faible"),
+)
+
+#: Niveaux considérés comme une alerte (score au-dessus du seuil de fonctionnement).
+ALERT_LEVELS: tuple[str, ...] = ("critique", "élevé")
+
+#: Actions associées à chaque niveau de risque (consommées par le moteur de décision).
+RISK_ACTIONS: dict[str, str] = {
+    "critique": "bloquer et investiguer immédiatement",
+    "élevé": "placer en file d'investigation prioritaire",
+    "modéré": "surveiller, authentifier fortement le prochain paiement",
+    "faible": "laisser passer",
+}
+
+#: Libellés métier des features (le rapport d'alerte doit être lisible par un analyste fraude).
+REASON_LABELS: dict[str, str] = {
+    "transactions_24h": "vélocité de paiement sur 24 h inhabituelle",
+    "distinct_merchants_24h": "nombre de marchands distincts sur 24 h inhabituel",
+    "distinct_countries_7d": "pays distincts sur 7 jours inhabituels",
+    "failed_attempts_1h": "tentatives refusées dans la dernière heure",
+    "device_age_days": "empreinte d'appareil très récente",
+    "session_duration_sec": "durée de session anormalement courte",
+    "billing_shipping_distance_km": "distance facturation/livraison inhabituelle",
+    "amount_eur": "montant inhabituel pour la catégorie",
+    "amount_to_customer_avg_ratio": "montant très éloigné du panier habituel",
+    "card_age_months": "carte très récente",
+    "account_tenure_months": "compte très récent",
+    "previous_chargebacks_12m": "historique de chargebacks",
+    "three_ds_authenticated": "absence d'authentification forte",
+    "is_night": "paiement en heures nocturnes",
+    "channel": "canal de paiement",
+    "shopper_country": "pays de la session",
+    "billing_country": "pays de facturation",
+    "merchant_category": "catégorie de marchand",
+    "occurred_at": "moment du paiement",
+    "chargebacks_90d": "répudiations sur 90 jours",
+    "velocity_score": "score de vélocité",
+    "is_fraud": "fraude avérée",
+    "fraud_scheme": "mode opératoire de fraude",
+}
+
+{%- set agg_fr = {"mean": "moyenne", "median": "médiane", "std": "écart-type", "var": "variance",
+                  "min": "minimum", "max": "maximum", "sum": "somme", "count": "nombre",
+                  "nunique": "nombre de valeurs distinctes"} -%}
+{%- set op_fr = {"gt": "supérieur à", "gte": "supérieur ou égal à", "lt": "inférieur à",
+                 "lte": "inférieur ou égal à", "eq": "égal à", "ne": "différent de"} -%}
+#: Traduction des composantes calendaires produites par la recette ``datetime_parts``.
+DATETIME_PART_LABELS: dict[str, str] = {
+    "year": "année",
+    "month": "mois",
+    "day": "jour du mois",
+    "dayofweek": "jour de la semaine",
+    "quarter": "trimestre",
+    "hour": "heure de la journée",
+    "is_weekend": "week-end",
+    "is_month_start": "début de mois",
+    "is_month_end": "fin de mois",
+}
+
+#: Libellés des features **dérivées**, générés depuis les recettes déclarées dans
+#: `conf/preprocessing/default.yaml` : un libellé ne peut donc jamais devenir obsolète.
+DERIVED_REASON_LABELS: dict[str, str] = {
+{% for recipe in spec.preprocessing.get("features", []) or [] %}
+{% set kind = recipe.get("type") %}
+{% if kind == "group_stat" %}
+    "{{ recipe.get("name") }}": "écart à la {{ agg_fr.get(recipe.get("agg", "mean"), recipe.get("agg", "mean")) }} de {{ recipe.get("value_column", "la valeur") }} pour ce {{ recipe.get("group_by", "groupe") }}",
+{% elif kind == "bin" %}
+    "{{ recipe.get("name") }}": "palier de {{ recipe.get("column", "valeur") }} (découpage {{ recipe.get("method", "quantile") }})",
+{% elif kind == "ratio" %}
+    "{{ recipe.get("name") }}": "ratio {{ recipe.get("numerator", "numérateur") }} sur {{ recipe.get("denominator", "dénominateur") }}",
+{% elif kind == "boolean_flag" %}
+    "{{ recipe.get("name") }}": "indicateur {{ recipe.get("column", "valeur") }} {{ op_fr.get(recipe.get("operator", "gt"), recipe.get("operator", "gt")) }} {{ recipe.get("value_column", recipe.get("value", "")) }}",
+{% elif kind == "log1p" %}
+    "{{ recipe.get("name") }}": "échelle logarithmique de {{ recipe.get("column", "la valeur") }}",
+{% elif kind in ("difference", "product") %}
+    "{{ recipe.get("name") }}": "{{ kind }} de {{ recipe.get("left", recipe.get("column", "la valeur")) }} et {{ recipe.get("right", "") }}",
+{% elif kind != "datetime_parts" %}
+    "{{ recipe.get("name") }}": "feature dérivée ({{ kind }})",
+{% endif %}
+{% endfor %}
+}
+
+#: Une recette ``datetime_parts`` produit plusieurs colonnes (une par composante) : les libellés
+#: sont construits colonne par colonne, à partir du préfixe déclaré.
+_DERIVED_DATETIME_PARTS: dict[str, str] = {
+{% for recipe in spec.preprocessing.get("features", []) or [] %}
+{% if recipe.get("type") == "datetime_parts" %}
+{% for part in recipe.get("parts", []) or [] %}
+    "{{ recipe.get("prefix", recipe.get("name")) }}_{{ part }}": "{{ part }}",
+{% endfor %}
+{% endif %}
+{% endfor %}
+}
+DERIVED_REASON_LABELS |= {
+    column: f"moment du paiement ({DATETIME_PART_LABELS.get(part, part)})"
+    for column, part in _DERIVED_DATETIME_PARTS.items()
+}
+
+#: Colonnes de contexte conservées dans le fichier de scores.
+CONTEXT_COLUMNS: tuple[str, ...] = (
+    "{{ spec.data.id_column or 'transaction_id' }}",
+{% for column in spec.data.features[:6] %}
+    "{{ column.name }}",
+{% endfor %}
+    "amount_eur",
+    "merchant_category",
+    "channel",
+    "occurred_at",
+)
+
+
+class Predictor:
+    """Batch and single-record fraud scoring, with validation, decision and explanations."""
+
+    def __init__(
+        self,
+        *,
+        model: BaseModel,
+        preprocessing: PreprocessingPipeline,
+        feature_builder: FeatureBuilder | None = None,
+        config: Mapping[str, Any] | None = None,
+        paths: ProjectPaths | None = None,
+        threshold: float | None = None,
+        budget_rate: float = DEFAULT_BUDGET_RATE,
+        review_risk_level: str = "modéré",
+    ) -> None:
+        """Inject the trained artefacts and the operating point.
+
+        Args:
+            model: Fitted anomaly detector (``predict`` returns a continuous score).
+            preprocessing: Fitted preprocessing pipeline.
+            feature_builder: Fitted feature builder (``None`` when no derived feature is used).
+            config: Root configuration mapping (used for paths, seed and options).
+            paths: Project layout.
+            threshold: Explicit alert threshold. ``None`` resolves it lazily from the evaluation
+                artefact, then from a reference sample at ``budget_rate``.
+            budget_rate: Share of the flow the fraud team can investigate (used when no explicit
+                threshold is available).
+            review_risk_level: Risk level from which a transaction is routed to a manual review
+                instead of an automatic decision (declared in ``conf/config.yaml``, node
+                ``fraud_detection.review_risk_level``).
+
+        Raises:
+            ValueError: When ``budget_rate`` is outside ``]0, 0.5]`` or the risk level is unknown.
+        """
+        if not 0.0 < budget_rate <= 0.5:
+            msg = f"budget_rate must be in ]0, 0.5], got {budget_rate}"
+            raise ValueError(msg)
+        known_levels = [level for _, level in RISK_LEVELS]
+        if review_risk_level not in known_levels:
+            msg = f"review_risk_level must be one of {known_levels}, got {review_risk_level!r}"
+            raise ValueError(msg)
+        self.model = model
+        self.preprocessing = preprocessing
+        self.feature_builder = feature_builder or FeatureBuilder([])
+        self.config: dict[str, Any] = dict(config or {})
+        self.paths = paths or ProjectPaths.from_config(self.config)
+        self._threshold = None if threshold is None else float(threshold)
+        self.budget_rate = float(budget_rate)
+        self.review_risk_level = review_risk_level
+        #: Statistiques de référence (médiane / écart interquartile par feature), calculées à la
+        #: première prédiction : elles servent aux facteurs contributifs lisibles par l'analyste.
+        self._reference: pd.DataFrame | None = None
+        #: Matrice de référence pré-traitée et ses scores, mis en cache : la calibration du seuil
+        #: ne doit pas régénérer un dataset à chaque appel de `predict`.
+        self._prepared_reference: pd.DataFrame | None = None
+        self._reference_score_cache: np.ndarray | None = None
+
+    # ------------------------------------------------------------------ factories -------
+    @classmethod
+    def from_config(cls, config: Any, paths: ProjectPaths | None = None) -> Predictor:
+        """Build a predictor from a validated application configuration.
+
+        Args:
+            config: ``AppConfig`` instance (or mapping).
+            paths: Optional project layout.
+
+        Returns:
+            The predictor, with every artefact loaded from disk.
+
+        Raises:
+            FileNotFoundError: When an artefact is missing (training never ran).
+        """
+        payload: Mapping[str, Any] = (
+            config.model_dump() if hasattr(config, "model_dump") else dict(config or {})
+        )
+        layout = paths or ProjectPaths.from_config(payload)
+        artifacts = (payload.get("train") or {}).get("artifacts") or {}
+        # Le point de fonctionnement vit dans le noeud `fraud_detection` de `conf/config.yaml`
+        # (injecté par le manifeste via `extras.root_conf`) ; le noeud standard `predict` sert de
+        # repli. Rien n'est codé en dur dans le code source.
+        fraud_node = dict(payload.get("fraud_detection") or {})
+        predict_node = {**dict(payload.get("predict") or {}), **fraud_node}
+
+        model_path = layout.models_dir / str(artifacts.get("model_file", "model.joblib"))
+        pipeline_path = layout.models_dir / str(artifacts.get("pipeline_file", "preprocessing.joblib"))
+        builder_path = layout.models_dir / str(
+            artifacts.get("feature_builder_file", "feature_builder.joblib")
+        )
+
+        for required in (model_path, pipeline_path):
+            if not required.exists():
+                msg = (
+                    f"Artefact manquant : {required}. Entraînez d'abord le modèle avec "
+                    "`python scripts/train.py` (ou `make train`)."
+                )
+                raise FileNotFoundError(msg)
+
+        model = load_model(model_path, config=config)
+        preprocessing = PreprocessingPipeline.load(pipeline_path)
+        feature_builder = load_pickle(builder_path) if builder_path.exists() else FeatureBuilder([])
+
+        threshold = predict_node.get("threshold")
+        budget_rate = predict_node.get("budget_rate", DEFAULT_BUDGET_RATE)
+        logger.info(
+            "Predictor ready | model={} features={} threshold={} budget_rate={}",
+            getattr(model, "algorithm", "n/a"),
+            len(preprocessing.feature_names_out),
+            threshold if threshold is not None else "auto",
+            budget_rate,
+        )
+        return cls(
+            model=model,
+            preprocessing=preprocessing,
+            feature_builder=feature_builder,
+            config=payload,
+            paths=layout,
+            threshold=None if threshold is None else float(threshold),
+            budget_rate=float(budget_rate),
+            review_risk_level=str(predict_node.get("review_risk_level") or "modéré"),
+        )
+
+    # ------------------------------------------------------------------ inputs ----------
+    def load_inputs(self, path: str | Path) -> pd.DataFrame:
+        """Load and validate an inference file.
+
+        Args:
+            path: Parquet / CSV / JSON file.
+
+        Returns:
+            The validated frame.
+        """
+        loader = InferenceDataLoader(
+            self.paths,
+            dataset_name=str((self.config.get("data") or {}).get("dataset_name", "inference")),
+            validate=bool(
+                ((self.config.get("data") or {}).get("validation") or {}).get("inference", True)
+            ),
+        )
+        return loader.load_from(path)
+
+    def sample_inputs(self, n_samples: int = 5, *, seed: int | None = None) -> pd.DataFrame:
+        """Generate a synthetic inference payload (demo without preparing a file).
+
+        Args:
+            n_samples: Number of transactions.
+            seed: Optional seed override.
+
+        Returns:
+            A frame without the diagnostic metadata (a real scoring request has no ground truth).
+        """
+        data_node = dict(self.config.get("data") or {})
+        generator = SyntheticDataGenerator(
+            n_samples=max(int(n_samples) * 4, 400),
+            # ``config.get`` renvoie ``Any | None`` : on explicite le repli pour satisfaire mypy.
+            seed=int(
+                seed
+                if seed is not None
+                else (self.config.get("seed") or data_node.get("seed") or {{ spec.data.seed }})
+            ),
+            dataset_name=str(data_node.get("dataset_name", DEFAULT_DATASET_NAME)),
+        )
+        frame = generator.sample(max(int(n_samples), 1), with_target=False)
+        return InferenceDataSchema.validate(frame, lazy=False)
+
+    # ------------------------------------------------------------------ prediction ------
+    def prepare(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Apply feature engineering and preprocessing to a validated payload.
+
+        Args:
+            frame: Raw records (validated).
+
+        Returns:
+            The model-ready matrix.
+        """
+        enriched = self.feature_builder.transform(frame)
+        matrix = self.preprocessing.transform(enriched)
+        logger.debug("Prepared {} record(s) -> {} feature(s)", len(matrix), matrix.shape[1])
+        return matrix
+
+    def predict(self, frame: pd.DataFrame, *, validate: bool = True) -> pd.DataFrame:
+        """Score a batch of transactions and take the alert decision.
+
+        Args:
+            frame: Raw records.
+            validate: Enforce ``InferenceDataSchema`` before predicting.
+
+        Returns:
+            A frame with the context columns plus ``anomaly_score``, ``threshold``, ``flagged``,
+            ``rank`` (within the batch), ``percentile`` (within the reference population),
+            ``risk_level``, ``recommended_action``, ``decision``, ``review_required``,
+            ``confidence`` and ``reasons``.
+
+        Raises:
+            RuntimeError: When the model is not fitted.
+            ValueError: When the detector returns a number of scores different from the batch size.
+        """
+        self.model.check_is_fitted()
+        payload = InferenceDataSchema.validate(frame, lazy=False) if validate else frame.copy()
+        matrix = self.prepare(payload)
+        scores = np.asarray(self.model.predict(matrix), dtype="float64").ravel()
+        if scores.size != len(payload):
+            msg = f"Le détecteur a rendu {scores.size} scores pour {len(payload)} transactions"
+            raise ValueError(msg)
+
+        reference = self._reference_frame(matrix)
+        threshold = self.threshold(matrix, scores)
+        spread = self._score_spread(matrix, scores)
+
+        output = self._context_frame(payload).reset_index(drop=True)
+        output["anomaly_score"] = scores
+        output["threshold"] = threshold
+        output["flagged"] = (scores >= threshold).astype(int)
+        # `rank` ordonne le lot courant (qui est investigué en premier) ; `percentile` situe la
+        # transaction dans la population de référence (stable d'un lot à l'autre).
+        output["rank"] = _rank_descending(scores)
+        output["percentile"] = self._reference_percentile(scores, matrix)
+        output["risk_level"] = [_risk_level(value, threshold, spread) for value in scores]
+        output["recommended_action"] = [
+            RISK_ACTIONS.get(str(level), "laisser passer") for level in output["risk_level"]
+        ]
+        output["decision"] = np.where(output["flagged"] == 1, "alerter", "laisser_passer")
+        output["review_required"] = output["risk_level"].isin(
+            _levels_at_or_above(self.review_risk_level)
+        )
+        output["confidence"] = self._confidence(scores, threshold, spread)
+        output["reasons"] = self._reasons(matrix, reference)
+
+        logger.info(
+            "Scores d'anomalie | rows={} alertes={:.1%} seuil={:.4f} risque_critique={} revue={}",
+            len(output),
+            float(output["flagged"].mean()) if len(output) else float("nan"),
+            threshold,
+            int((output["risk_level"] == "critique").sum()),
+            int(output["review_required"].sum()),
+        )
+        return output
+
+    def predict_one(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Score a single transaction and return a JSON-serialisable payload.
+
+        Args:
+            record: Mapping of column name to value.
+
+        Returns:
+            The score and decision, readable by an API consumer.
+        """
+        frame = pd.DataFrame([dict(record)])
+        output = self.predict(frame)
+        row = output.iloc[0]
+        return {key: _jsonable(value) for key, value in row.items()}
+
+    def save(self, predictions: pd.DataFrame, path: str | Path | None = None) -> Path:
+        """Persist the scored transactions.
+
+        Args:
+            predictions: Frame produced by :meth:`predict`.
+            path: Destination (defaults to ``artifacts/reports/anomaly_scores.csv``).
+
+        Returns:
+            The written path.
+        """
+        destination = (
+            Path(path) if path is not None else (self.paths.reports_dir / "anomaly_scores.csv")
+        )
+        return write_table(predictions, destination)
+
+    # ------------------------------------------------------------------ operating point --
+    def threshold(self, matrix: pd.DataFrame, scores: np.ndarray | None = None) -> float:
+        """Resolve the alert threshold, from the most authoritative source available.
+
+        Resolution order:
+
+        1. the explicit value from the configuration (``predict.threshold``);
+        2. the threshold retained during evaluation (``artifacts/metrics/evaluation_metrics.json``,
+           node ``extras.threshold``) — this is the operating point the report documents;
+        3. a calibration on a reference sample of the flow at ``budget_rate`` (the quantile that
+           reproduces the capacité d'investigation déclarée).
+
+        Args:
+            matrix: Preprocessed features of the current batch (used for the fallback).
+            scores: Scores of the current batch (used for the fallback when no reference exists).
+
+        Returns:
+            The threshold; a transaction is alerted when ``score >= threshold``.
+        """
+        if self._threshold is not None:
+            return float(self._threshold)
+
+        artefact = self.paths.metrics_dir / "evaluation_metrics.json"
+        if artefact.exists():
+            try:
+                payload = json.loads(artefact.read_text(encoding="utf-8"))
+                value = float(dict(payload.get("extras") or {}).get("threshold", float("nan")))
+                if np.isfinite(value):
+                    self._threshold = value
+                    logger.debug("Seuil lu depuis {} : {:.6f}", artefact.name, value)
+                    return value
+            except (ValueError, TypeError, json.JSONDecodeError) as error:
+                logger.warning("Seuil illisible dans {} : {}", artefact.name, error)
+
+        reference_scores = self._reference_scores(matrix)
+        if reference_scores is not None and reference_scores.size:
+            value = float(np.quantile(reference_scores, 1.0 - self.budget_rate))
+        elif scores is not None and scores.size:
+            value = float(np.quantile(scores, 1.0 - self.budget_rate))
+            logger.warning(
+                "Seuil calibré sur le lot courant ({} lignes) : en production, figez-le sur une "
+                "fenêtre de calibration dédiée.",
+                scores.size,
+            )
+        else:
+            value = 0.0
+        self._threshold = value
+        return value
+
+    def _reference_frame(self, matrix: pd.DataFrame) -> pd.DataFrame:
+        """Build (once) the reference statistics used to explain a score.
+
+        Args:
+            matrix: Preprocessed features of the current batch.
+
+        Returns:
+            A one-row frame with the median and the IQR of every feature.
+        """
+        if self._reference is None:
+            source = self._reference_matrix(matrix)
+            numeric = source.select_dtypes(include=[np.number])
+            if numeric.empty:
+                self._reference = pd.DataFrame()
+            else:
+                self._reference = pd.DataFrame(
+                    {
+                        "median": numeric.median(),
+                        "q1": numeric.quantile(0.25),
+                        "q3": numeric.quantile(0.75),
+                    }
+                ).T
+        return self._reference
+
+    def _reference_matrix(self, matrix: pd.DataFrame) -> pd.DataFrame:
+        """Return a preprocessed reference sample (built once), falling back to the batch.
+
+        Args:
+            matrix: Preprocessed features of the current batch.
+
+        Returns:
+            The cached reference matrix, or the batch when no reference can be built.
+        """
+        if self._prepared_reference is not None:
+            return self._prepared_reference
+        try:
+            sample = self.sample_inputs(REFERENCE_SAMPLES)
+            prepared = self.prepare(sample)
+            if prepared.shape[1] == matrix.shape[1] and not prepared.empty:
+                self._prepared_reference = prepared
+                return prepared
+        except Exception as error:  # noqa: BLE001 - la référence est un confort, pas un bloquant
+            logger.debug("Échantillon de référence indisponible : {}", error)
+        self._prepared_reference = matrix
+        return matrix
+
+    def _reference_scores(self, matrix: pd.DataFrame) -> np.ndarray | None:
+        """Score the reference sample (used to calibrate the threshold at the declared budget).
+
+        Args:
+            matrix: Preprocessed features of the current batch.
+
+        Returns:
+            The cached reference scores, or ``None`` when they cannot be computed.
+        """
+        if self._reference_score_cache is not None:
+            return self._reference_score_cache
+        try:
+            prepared = self._reference_matrix(matrix)
+            if prepared.shape[1] != matrix.shape[1] or prepared.empty:
+                return None
+            self._reference_score_cache = np.asarray(
+                self.model.predict(prepared), dtype="float64"
+            ).ravel()
+            return self._reference_score_cache
+        except Exception as error:  # noqa: BLE001 - repli documenté sur le lot courant
+            logger.debug("Scores de référence indisponibles : {}", error)
+            return None
+
+    # ------------------------------------------------------------------ scale -----------
+    def _score_spread(self, matrix: pd.DataFrame, scores: np.ndarray) -> float:
+        """Return the reference dispersion of the score (standard deviation).
+
+        The risk levels and the confidence are expressed in units of this dispersion, which makes
+        them independent of the batch: scoring 5 transactions or 50 000 yields the same reading.
+
+        Args:
+            matrix: Preprocessed features of the batch.
+            scores: Scores of the batch (fallback when no reference is available).
+
+        Returns:
+            A strictly positive dispersion, in score units.
+        """
+        reference = self._reference_scores(matrix)
+        source = reference if reference is not None and reference.size > 1 else scores
+        if source is None or source.size < 2:
+            return 1.0
+        spread = float(np.std(source))
+        return spread if spread > 1e-9 else 1.0
+
+    def _reference_percentile(self, scores: np.ndarray, matrix: pd.DataFrame) -> np.ndarray:
+        """Locate each score in the reference population (0-100).
+
+        Args:
+            scores: Scores of the batch.
+            matrix: Preprocessed features of the batch (used to resolve the reference).
+
+        Returns:
+            An array of percentiles; falls back to the within-batch percentile when no reference
+            population is available.
+        """
+        if scores.size == 0:
+            return np.array([], dtype="float64")
+        reference = self._reference_scores(matrix)
+        if reference is None or reference.size < 10:
+            return 100.0 * _percentile_of(scores)
+        ordered = np.sort(reference)
+        positions = np.searchsorted(ordered, scores, side="left")
+        return 100.0 * positions / float(ordered.size)
+
+    # ------------------------------------------------------------------ explanations ----
+    def _confidence(self, scores: np.ndarray, threshold: float, spread: float) -> np.ndarray:
+        """Map the distance to the threshold onto a readable confidence level.
+
+        Args:
+            scores: Anomaly scores of the batch.
+            threshold: Operating threshold.
+            spread: Reference dispersion of the score (see :meth:`_score_spread`).
+
+        Returns:
+            An array of levels (``élevée``, ``moyenne``, ``faible``).
+        """
+        if scores.size == 0:
+            return np.array([], dtype=object)
+        scale = spread if spread > 1e-9 else 1.0
+        distance = (scores - threshold) / scale
+        return np.select(
+            [np.abs(distance) >= 1.0, np.abs(distance) >= 0.35],
+            ["élevée", "moyenne"],
+            default="faible",
+        ).astype(object)
+
+    def _reasons(self, matrix: pd.DataFrame, reference: pd.DataFrame) -> list[str]:
+        """Explain each score by the features that deviate most from the reference population.
+
+        The explanation is deliberately simple and auditable: a robust z-score against the
+        reference median and IQR. It is not a SHAP decomposition, and the report says so — the
+        goal is to give the analyst a starting point, not a proof.
+
+        Args:
+            matrix: Preprocessed features of the batch.
+            reference: Reference statistics (``median``, ``q1``, ``q3`` per feature).
+
+        Returns:
+            One semicolon-separated reason string per row.
+        """
+        if reference.empty or matrix.empty:
+            return ["aucun facteur contributif disponible"] * len(matrix)
+        numeric = matrix.select_dtypes(include=[np.number])
+        common = [name for name in numeric.columns if name in reference.columns]
+        if not common:
+            return ["aucun facteur contributif disponible"] * len(matrix)
+
+        values = numeric[common].to_numpy(dtype="float64")
+        median = reference.loc["median", common].to_numpy(dtype="float64")
+        iqr = (reference.loc["q3", common] - reference.loc["q1", common]).to_numpy(dtype="float64")
+        scale = np.where(iqr > 1e-9, iqr / 1.349, 1.0)
+        z_scores = np.nan_to_num((values - median) / scale, nan=0.0, posinf=0.0, neginf=0.0)
+
+        reasons: list[str] = []
+        for row in z_scores:
+            strong = np.flatnonzero(np.abs(row) >= REASON_Z_THRESHOLD)
+            if strong.size == 0:
+                reasons.append("profil proche de la population de référence")
+                continue
+            ordered = strong[np.argsort(-np.abs(row[strong]))][:N_REASONS]
+            parts = [f"{_reason_label(common[index])} (z={row[index]:+.1f})" for index in ordered]
+            reasons.append("; ".join(parts))
+        return reasons
+
+    # ------------------------------------------------------------------ internals -------
+    def _context_frame(self, payload: pd.DataFrame) -> pd.DataFrame:
+        """Keep the business-readable columns next to the score."""
+        kept = [name for name in dict.fromkeys(CONTEXT_COLUMNS) if name in payload.columns]
+        return payload[kept].copy() if kept else payload.head(0).copy()
+
+
+def _rank_descending(scores: np.ndarray) -> np.ndarray:
+    """Return the rank of each score, 1 being the most anomalous.
+
+    Args:
+        scores: Anomaly scores.
+
+    Returns:
+        An integer array of ranks.
+    """
+    if scores.size == 0:
+        return np.array([], dtype="int64")
+    order = np.argsort(-scores, kind="stable")
+    ranks = np.empty(scores.size, dtype="int64")
+    ranks[order] = np.arange(1, scores.size + 1)
+    return ranks
+
+
+def _percentile_of(scores: np.ndarray) -> np.ndarray:
+    """Return the empirical percentile of each score within the batch (0..1).
+
+    Args:
+        scores: Anomaly scores.
+
+    Returns:
+        A float array in ``[0, 1]``.
+    """
+    if scores.size == 0:
+        return np.array([], dtype="float64")
+    if scores.size == 1:
+        return np.array([1.0])
+    ranks = _rank_descending(scores)
+    return 1.0 - (ranks - 1) / (scores.size - 1)
+
+
+def _risk_level(score: float, threshold: float, spread: float) -> str:
+    """Map a score onto a business risk level, relative to the operating threshold.
+
+    Args:
+        score: Anomaly score of the transaction.
+        threshold: Alert threshold.
+        spread: Reference dispersion of the score.
+
+    Returns:
+        One of ``critique``, ``élevé``, ``modéré``, ``faible``. ``critique`` and ``élevé`` are
+        exactly the alerting levels, so ``risk_level`` and ``flagged`` can never contradict.
+    """
+    if not np.isfinite(score) or not np.isfinite(threshold):
+        return RISK_LEVELS[-1][1]
+    scale = spread if np.isfinite(spread) and spread > 1e-9 else 1.0
+    distance = (float(score) - float(threshold)) / float(scale)
+    for floor, level in RISK_LEVELS:
+        if distance >= floor:
+            return level
+    return RISK_LEVELS[-1][1]
+
+
+def _levels_at_or_above(level: str) -> list[str]:
+    """Return the risk levels considered as risky as (or riskier than) ``level``.
+
+    Args:
+        level: Risk level declared in the configuration.
+
+    Returns:
+        The levels routing a transaction to a manual review.
+    """
+    ordered = [name for _, name in RISK_LEVELS]
+    if level not in ordered:
+        return [ordered[0]]
+    return ordered[: ordered.index(level) + 1]
+
+
+def _reason_label(feature: str) -> str:
+    """Return a business-readable label for a preprocessed feature name.
+
+    Three cases are handled, in order: a raw business column with a documented label, a derived
+    feature declared in the preprocessing configuration, and a one-hot modality (whose suffix is
+    spelled out). Anything else falls back to a de-underscored rendering of the name, so the
+    explanation never shows a bare technical identifier without at least being readable.
+
+    Args:
+        feature: Preprocessed feature name (e.g. ``channel_web``).
+
+    Returns:
+        The French label used in the ``reasons`` column.
+    """
+    if feature in REASON_LABELS:
+        return REASON_LABELS[feature]
+    if feature in DERIVED_REASON_LABELS:
+        return DERIVED_REASON_LABELS[feature]
+    for known, label in REASON_LABELS.items():
+        if feature.startswith(f"{known}_"):
+            return f"{label} (modalité {feature[len(known) + 1 :].replace('_', ' ')})"
+    return feature.replace("_", " ")
+
+
+def _jsonable(value: Any) -> Any:
+    """Coerce a numpy/pandas scalar into a JSON-serialisable value."""
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, pd.Timestamp):
+        return str(value)
+    return value
+
+
+__all__ = ["Predictor"]

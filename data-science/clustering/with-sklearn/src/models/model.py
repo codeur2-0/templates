@@ -330,9 +330,7 @@ def filter_params(target: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     Returns:
         The applicable subset.
     """
-    signature = inspect.signature(
-        target if isinstance(target, type) else type(target).__init__
-    )
+    signature = inspect.signature(target if isinstance(target, type) else type(target).__init__)
     accepted = set(signature.parameters)
     if any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD
@@ -438,7 +436,10 @@ class SklearnModel(BaseModel):
         return {**self.spec.defaults, **self._effective_params()}
 
     # ------------------------------------------------------------------ entraînement ------
-    def _fit(  # noqa: C901 - la résolution des "auto" est linéaire et commentée
+    # Cette méthode est longue par choix : la résolution des valeurs « auto » (classes pondérées,
+    # seuils, paramètres déduits des données) est une séquence linéaire, commentée étape par étape.
+    # La factoriser en sous-méthodes disperserait la logique de réglage sans la simplifier.
+    def _fit(
         self,
         X: pd.DataFrame | np.ndarray,
         y: pd.Series | np.ndarray | None,
@@ -548,10 +549,16 @@ class SklearnModel(BaseModel):
             logs.update({f"val_{name}": float(value) for name, value in val_values.items()})
         primary = str(dict(self.config.get("metrics") or {}).get("primary", ""))
         if primary:
-            loss = logs.get(f"train_{primary}", logs.get("train_loss", float("nan")))
-            logs["loss"] = float(loss)
-            if f"val_{primary}" in logs:
-                logs["val_loss"] = float(logs[f"val_{primary}"])
+            # `loss` et `val_loss` sont les clés surveillées par les callbacks (early stopping,
+            # seuil de qualité). Sans métrique primaire calculable — détecteur non supervisé
+            # entraîné sans cible — on ne publie rien : un NaN ferait mentir les courbes et
+            # déclencherait des alertes de seuil dénuées de sens.
+            training_loss = logs.get(f"train_{primary}", logs.get("train_loss"))
+            if training_loss is not None and np.isfinite(training_loss):
+                logs["loss"] = float(training_loss)
+            validation_loss = logs.get(f"val_{primary}")
+            if validation_loss is not None and np.isfinite(validation_loss):
+                logs["val_loss"] = float(validation_loss)
         return logs
 
     def _safe_proba(self, matrix: np.ndarray) -> np.ndarray | None:
@@ -564,9 +571,7 @@ class SklearnModel(BaseModel):
             logger.debug("predict_proba indisponible : {}", error)
             return None
 
-    def _cross_validate(
-        self, matrix: np.ndarray, labels: np.ndarray | None, context: Any
-    ) -> None:
+    def _cross_validate(self, matrix: np.ndarray, labels: np.ndarray | None, context: Any) -> None:
         """Run the cross-validation declared in ``model.cross_validation`` (diagnostic).
 
         Args:
@@ -588,7 +593,9 @@ class SklearnModel(BaseModel):
 
             splitter: Any
             if labels is not None and strategy == "stratified" and len(np.unique(labels)) > 1:
-                splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=self.random_state)
+                splitter = StratifiedKFold(
+                    n_splits=folds, shuffle=True, random_state=self.random_state
+                )
                 splits = splitter.split(matrix, labels)
             else:
                 splitter = KFold(n_splits=folds, shuffle=True, random_state=self.random_state)
@@ -654,7 +661,34 @@ class SklearnModel(BaseModel):
         if self.estimator_ is None:
             msg = "No estimator is attached to this model (fit or load it first)"
             raise RuntimeError(msg)
-        return np.asarray(self.estimator_.predict(self._matrix(X))).ravel()
+        matrix = self._matrix(X)
+        if self.task in _ANOMALY:
+            # Un détecteur d'anomalies doit rendre un **score ordonnable** (plus élevé = plus
+            # anormal), pas l'étiquette binaire +/-1 de `predict` : c'est ce score qui alimente
+            # le recall@budget, la PR AUC et le choix du seuil d'alerte côté métier.
+            return self._anomaly_score(matrix)
+        return np.asarray(self.estimator_.predict(matrix)).ravel()
+
+    def _anomaly_score(self, matrix: np.ndarray) -> np.ndarray:
+        """Return a continuous anomaly score (higher = more anomalous).
+
+        scikit-learn exposes the ranking quantity under ``score_samples`` (isolation forest,
+        one-class SVM) or ``decision_function`` (covariance-based detectors); both are oriented
+        towards *normality*, hence the sign flip.
+
+        Args:
+            matrix: Aligned float matrix.
+
+        Returns:
+            A 1-D array of anomaly scores.
+        """
+        estimator = self.estimator_
+        for attribute in ("score_samples", "decision_function"):
+            scorer = getattr(estimator, attribute, None)
+            if callable(scorer):
+                return -np.asarray(scorer(matrix), dtype="float64").ravel()
+        # Repli défensif : un estimateur sans score continu ne peut pas servir de détecteur.
+        return np.asarray(estimator.predict(matrix), dtype="float64").ravel()
 
     def _predict_proba(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
         """Predict probabilities with the fitted estimator.

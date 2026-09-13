@@ -81,7 +81,11 @@ select = ["E", "W", "F", "I", "N", "D", "UP", "B", "C4", "SIM", "RUF"]
 # B008      : appel de fonction dans un argument par défaut — pattern standard FastAPI/Typer.
 # N803/N806 : la convention scikit-learn impose `X` et `y` (majuscule pour la matrice) ; renommer
 #             ces variables dégraderait la lisibilité pour toute personne venant de sklearn.
-ignore = ["D203", "D213", "B008", "N803", "N806"]
+# RUF022    : `src/models/__init__.py` est généré par le scaffold. Son `__all__` est ordonné par
+#             catégorie (constantes, classes, fonctions) ; le tri « naturel » de ruff placerait la
+#             classe du modèle avant ou après `ModelCard` selon la stack, ce qui rendrait le
+#             template non déterministe. L'ordre sémantique est préféré, et documenté ici.
+ignore = ["D203", "D213", "B008", "N803", "N806", "RUF022"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["D"]

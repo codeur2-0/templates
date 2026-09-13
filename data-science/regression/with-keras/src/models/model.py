@@ -1330,8 +1330,7 @@ class KerasModel(BaseModel):
             callbacks=keras_callbacks,
         )
         self.history_ = {
-            str(key): [float(value) for value in values]
-            for key, values in history.history.items()
+            str(key): [float(value) for value in values] for key, values in history.history.items()
         }
         self.network_ = network
         self.params = dict(params)
