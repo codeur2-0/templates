@@ -1,4 +1,6 @@
-"""Prédiction d'attrition client (churn télécom) avec PyTorch — point d'entrée principal.
+"""Point d'entrée principal du projet.
+
+Prédiction d'attrition client (churn télécom) avec PyTorch.
 
 Ce module est la seule porte d'entrée applicative du projet. Il :
 

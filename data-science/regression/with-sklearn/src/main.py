@@ -1,4 +1,6 @@
-"""Estimation du prix de vente immobilier (AVM) avec scikit-learn — point d'entrée principal.
+"""Point d'entrée principal du projet.
+
+Estimation du prix de vente immobilier (AVM) avec scikit-learn.
 
 Ce module est la seule porte d'entrée applicative du projet. Il :
 

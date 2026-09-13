@@ -1,4 +1,6 @@
-"""Estimation du prix de vente immobilier (AVM) avec XGBoost — point d'entrée principal.
+"""Point d'entrée principal du projet.
+
+Estimation du prix de vente immobilier (AVM) avec XGBoost.
 
 Ce module est la seule porte d'entrée applicative du projet. Il :
 

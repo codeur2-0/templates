@@ -1,4 +1,6 @@
-"""Prédiction d'attrition client (churn télécom) avec XGBoost — point d'entrée principal.
+"""Point d'entrée principal du projet.
+
+Prédiction d'attrition client (churn télécom) avec XGBoost.
 
 Ce module est la seule porte d'entrée applicative du projet. Il :
 

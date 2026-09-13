@@ -1,0 +1,43 @@
+# =================================================================================================
+# Modèle : Réseau de neurones Keras (API fonctionnelle)
+# -------------------------------------------------------------------------------------------------
+# L'API fonctionnelle montre l'autre façon de faire du deep learning : le graphe est **déclaré**
+# (entrées -> couches -> modèle), puis **compilé** avec son optimiseur, sa perte (erreur
+# quadratique moyenne sur une cible continue normalisée en interne) et ses métriques, avant que
+# `fit` ne prenne en charge la boucle d'entraînement. On y gagne l'inspection du réseau, la
+# sérialisation native (.keras) et les callbacks éprouvés (EarlyStopping, ReduceLROnPlateau,
+# TerminateOnNaN) ; on y perd la visibilité fine sur chaque pas de gradient, que la stack PyTorch
+# du même cas d'usage met au contraire en évidence.
+#
+# Alternatives considérées : linear : régression linéaire compilée — baseline interprétable, même contrat, residual_mlp : MLP à blocs résiduels, utile quand on empile les couches, autoencoder : reconstruction non supervisée, réservé à la détection d'anomalies.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.hidden_layers=...
+# =================================================================================================
+
+name: "Réseau de neurones Keras (API fonctionnelle)"
+algorithm: mlp
+class: KerasModel
+task: regression
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `KerasModel(params=...)` (voir src/models/model.py).
+params:
+  hidden_layers:
+  - 128
+  - 64
+  dropout: 0.2
+  activation: relu
+  batch_norm: true
+  optimizer: adamw
+  scheduler: cosine
+
+# --- options spécifiques à la stack `keras` ---------------------------------------
+deterministic: true
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold

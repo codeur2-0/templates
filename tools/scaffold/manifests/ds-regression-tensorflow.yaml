@@ -1,0 +1,96 @@
+# ==============================================================================================
+# data-science / regression / with-tensorflow
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/regression.yaml` (estimation de prix immobilier, AVM).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité, modèle, budget d'entraînement.
+# ==============================================================================================
+
+key: ds-regression-tensorflow
+title: "Estimation du prix de vente immobilier (AVM) avec TensorFlow (GradientTape)"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> réseau TensorFlow subclassé entraîné pas à pas via GradientTape -> analyse des résidus par segment) pour un modèle d'évaluation
+  automatisée de prix immobilier, entièrement piloté par Hydra et structuré en objets testables.
+  L'estimation publiée est une fourchette assortie d'un niveau de confiance.
+
+family: regression
+domain: data-science
+problem: regression
+stack: tensorflow
+project_slug: real-estate-avm-tensorflow
+package_name: avm_tensorflow
+
+# Budget d'entraînement : propre aux stacks itératives (époques, lots, taux d'apprentissage).
+train:
+  epochs: 45
+  batch_size: 128
+  learning_rate: 0.003
+  weight_decay: 0.0001
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    patience: 8
+    min_delta: 0.0
+    mode: min
+    # Restaure l'instantané des meilleurs poids (pas seulement un arrêt de la boucle).
+    restore_best: true
+
+model:
+  display_name: "Réseau TensorFlow subclassé (GradientTape)"
+  algorithm: mlp
+  rationale: >-
+    Cette stack descend au niveau le plus bas du trio deep learning du dépôt : le réseau est
+    **subclassé** (`keras.Model` + `call`), les couches sont écrites à la main (`DenseBlock`,
+    `ResidualBlock`), le pipeline d'entrée est un `tf.data.Dataset` (shuffle semé, batch,
+    prefetch) et chaque pas d'optimisation passe par `tf.GradientTape` puis
+    `optimizer.apply_gradients`, le tout compilé en graphe par `tf.function`. On y voit ce que
+    Keras masque : l'ajout des pertes de régularisation, l'écrêtage du gradient (indispensable
+    sur une cible en euros avant normalisation interne), l'instantané des meilleurs poids.
+  alternatives:
+    - "linear : modèle linéaire entraîné par gradient — baseline interprétable, même contrat"
+    - "residual_mlp : MLP à blocs résiduels écrits comme des couches personnalisées"
+    - "autoencoder : reconstruction non supervisée, réservé à la détection d'anomalies"
+  params:
+    hidden_layers: [128, 64]
+    dropout: 0.2
+    activation: relu
+    # Normalisation de lots : stabilise fortement l'apprentissage sur des features hétérogènes.
+    batch_norm: true
+    optimizer: adamw
+    scheduler: cosine
+    # Écrêtage global de la norme du gradient : stabilité numérique de l'entraînement.
+    clip_norm: 5.0
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (le budget reste à 12 époques en notebook).
+  notebook_param_grid:
+    dropout: [0.1, 0.3]
+    hidden_layers: [[64, 32], [128, 64]]
+    learning_rate: [0.002, 0.008]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    # Déterminisme des opérations TensorFlow : reproductibilité bit à bit, léger surcoût.
+    deterministic: true
+    # La validation croisée d'un réseau est coûteuse : elle est désactivée par défaut ici.
+    cross_validation:
+      enabled: false
+      folds: 3
+      # Une cible continue ne se stratifie pas : plis aléatoires.
+      strategy: kfold
+  root_conf:
+    estimation:
+      tolerance_pct: 10.0            # fourchette publiée : +/- 10 % autour de l'estimation
+      depth_column: recent_sales_1km # profondeur du marché -> niveau de confiance
+      unit_column: surface_m2        # prix au m2 affiché à l'utilisateur
+      min_market_depth: 10           # en dessous, le bien est orienté vers une revue humaine
+
+learning_objectives:
+  - "Normaliser une cible continue en interne : pourquoi un MSE sur des montants en euros diverge et comment l'éviter."
+  - "Comprendre ce que coûte le deep learning sur données tabulaires et quand lui préférer un booster."
+  - "Régulariser un réseau : dropout, weight decay, batch norm, early stopping avec restauration du meilleur état."
+  - "Ordonnancer le taux d'apprentissage (cosine, plateau) et lire son effet sur les courbes d'apprentissage."
+  - "Garantir le déterminisme : graine avant construction du graphe, mélange semé, CPU."
+  - "Écrire une boucle d'entraînement bas niveau : tf.data.Dataset, tf.GradientTape, apply_gradients, tf.function."
+  - "Écrêter le gradient (`clip_norm`) et comprendre son rôle quand la perte n'est pas bornée."
+

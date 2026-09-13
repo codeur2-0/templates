@@ -1,4 +1,6 @@
-"""Prédiction d'attrition client (churn télécom) avec LightGBM — point d'entrée principal.
+"""Point d'entrée principal du projet.
+
+Prédiction d'attrition client (churn télécom) avec LightGBM.
 
 Ce module est la seule porte d'entrée applicative du projet. Il :
 
