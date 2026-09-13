@@ -1,0 +1,429 @@
+# -------------------------------------------------------------------------------------------
+# Registre des stacks technologiques.
+#
+# Une stack == une implémentation d'un même cas d'usage avec un framework donné.
+# Le moteur de génération (`tools/scaffold`) utilise ces métadonnées pour :
+#   * sélectionner le dossier de templates `templates/stack/<key>/`,
+#   * générer `requirements.txt` et `pyproject.toml` (dépendances),
+#   * documenter la stack dans le README (liens, notes d'installation, commandes).
+# -------------------------------------------------------------------------------------------
+
+sklearn:
+  display_name: scikit-learn
+  category: classic-ml
+  template_dir: sklearn
+  epochs_based: false
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "scipy>=1.11"
+    - "joblib>=1.3"
+  docs:
+    - name: "scikit-learn User Guide"
+      url: "https://scikit-learn.org/stable/user_guide.html"
+    - name: "sklearn Pipeline & ColumnTransformer"
+      url: "https://scikit-learn.org/stable/modules/compose.html"
+  notes:
+    - "Référence absolue pour le ML tabulaire : pipelines composables, transformers custom, métriques."
+    - "`ColumnTransformer` évite toute fuite de données : le scaling/encodage est appris sur le train uniquement."
+  commands:
+    train: "python -m src.main mode=train"
+
+xgboost:
+  display_name: XGBoost
+  category: boosting
+  template_dir: xgboost
+  epochs_based: false
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "xgboost>=2.0"
+    - "joblib>=1.3"
+  docs:
+    - name: "XGBoost Documentation"
+      url: "https://xgboost.readthedocs.io/"
+    - name: "XGBoost Parameters"
+      url: "https://xgboost.readthedocs.io/en/stable/parameter.html"
+  notes:
+    - "Gradient boosting regularisé (L1/L2), très performant sur données tabulaires structurées."
+    - "Early stopping intégré via `eval_set` : surveille la métrique de validation à chaque boosting round."
+  commands:
+    train: "python -m src.main mode=train"
+
+lightgbm:
+  display_name: LightGBM
+  category: boosting
+  template_dir: lightgbm
+  epochs_based: false
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "lightgbm>=4.3"
+    - "joblib>=1.3"
+  docs:
+    - name: "LightGBM Documentation"
+      url: "https://lightgbm.readthedocs.io/"
+    - name: "Parameters Tuning"
+      url: "https://lightgbm.readthedocs.io/en/latest/Parameters-Tuning.html"
+  notes:
+    - "Histogram-based + leaf-wise growth : entraînement très rapide sur gros volumes."
+    - "Support natif des variables catégorielles (`categorical_feature`) sans one-hot encoding."
+  commands:
+    train: "python -m src.main mode=train"
+
+pytorch:
+  display_name: PyTorch
+  category: deep-learning
+  template_dir: pytorch
+  epochs_based: true
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "torch>=2.2"
+  docs:
+    - name: "PyTorch Tutorials"
+      url: "https://pytorch.org/tutorials/"
+    - name: "torch.nn"
+      url: "https://pytorch.org/docs/stable/nn.html"
+  notes:
+    - "`nn.Module` explicite, boucle d'entraînement écrite à la main : pédagogie maximale."
+    - "Déterminisme : `torch.manual_seed`, `torch.use_deterministic_algorithms` et `num_workers=0` par défaut."
+  commands:
+    train: "python -m src.main mode=train"
+
+tensorflow:
+  display_name: TensorFlow
+  category: deep-learning
+  template_dir: tensorflow
+  epochs_based: true
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "tensorflow-cpu>=2.16"
+  docs:
+    - name: "TensorFlow Guide"
+      url: "https://www.tensorflow.org/guide"
+    - name: "tf.data"
+      url: "https://www.tensorflow.org/guide/data"
+  notes:
+    - "Utilise l'API bas niveau (`tf.GradientTape`, `tf.keras.Model` subclassing) pour montrer ce que Keras masque."
+    - "`tf.data.Dataset` pour le pipeline d'entrée : shuffle, batch, prefetch, cache."
+  commands:
+    train: "python -m src.main mode=train"
+
+keras:
+  display_name: Keras (API fonctionnelle)
+  category: deep-learning
+  template_dir: keras
+  epochs_based: true
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "tensorflow-cpu>=2.16"
+  docs:
+    - name: "Keras Functional API"
+      url: "https://keras.io/guides/functional_api/"
+    - name: "Keras Callbacks"
+      url: "https://keras.io/api/callbacks/"
+  notes:
+    - "API fonctionnelle déclarative : le graphe du réseau est construit puis compilé (`compile/fit`)."
+    - "Callbacks natifs : `EarlyStopping`, `ReduceLROnPlateau`, `ModelCheckpoint`."
+  commands:
+    train: "python -m src.main mode=train"
+
+spacy:
+  display_name: spaCy
+  category: nlp
+  template_dir: spacy
+  epochs_based: true
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "spacy>=3.7"
+    - "thinc>=8.2"
+  docs:
+    - name: "spaCy Usage Guides"
+      url: "https://spacy.io/usage"
+    - name: "spaCy API"
+      url: "https://spacy.io/api"
+  notes:
+    - "Pipeline `spacy.blank(...)` entraîné from scratch : aucune dépendance à un modèle pré-entraîné téléchargeable."
+    - "Thinc (le moteur ML de spaCy) fournit les couches et l'optimisation ; `Example` alimente l'entraînement."
+  commands:
+    train: "python -m src.main mode=train"
+
+transformers:
+  display_name: Hugging Face Transformers
+  category: llm
+  template_dir: transformers
+  epochs_based: true
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "torch>=2.2"
+    - "transformers>=4.40"
+    - "datasets>=2.19"
+  docs:
+    - name: "Transformers Documentation"
+      url: "https://huggingface.co/docs/transformers"
+    - name: "Fine-tuning tutorial"
+      url: "https://huggingface.co/docs/transformers/training"
+  notes:
+    - "Le modèle est instancié depuis une **config** (`AutoConfig`) avec des poids aléatoires : aucun téléchargement réseau."
+    - "Architecture minuscule (quelques couches) pour rester exécutable sur un laptop/CPU en quelques minutes."
+  commands:
+    train: "python -m src.main mode=train"
+
+langchain:
+  display_name: LangChain
+  category: ai-engineering
+  template_dir: langchain
+  epochs_based: false
+  supports_proba: false
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "langchain-core>=0.2"
+  docs:
+    - name: "LangChain Core Concepts"
+      url: "https://python.langchain.com/docs/concepts/"
+    - name: "LCEL (LangChain Expression Language)"
+      url: "https://python.langchain.com/docs/concepts/lcel/"
+  notes:
+    - "Embeddings **déterministes et offline** (hashing features + SVD) pour rendre l'exemple rejouable sans clé API."
+    - "L'adaptateur LLM est une interface : un `LocalRuleBasedLLM` offline par défaut, un client OpenAI-compatible optionnel."
+  commands:
+    train: "python -m src.main mode=index"
+
+duckdb:
+  display_name: DuckDB
+  category: data-engineering
+  template_dir: duckdb
+  epochs_based: false
+  supports_proba: false
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "duckdb>=1.0"
+  docs:
+    - name: "DuckDB Documentation"
+      url: "https://duckdb.org/docs/"
+    - name: "DuckDB SQL Introduction"
+      url: "https://duckdb.org/docs/sql/introduction"
+  notes:
+    - "Moteur analytique embarqué : lit directement Parquet/CSV, aucune infrastructure à démarrer."
+    - "SQL déclaratif versionné dans `conf/` et exécuté par des classes Python typées."
+  commands:
+    train: "python -m src.main mode=build"
+
+pandas:
+  display_name: pandas + PyArrow
+  category: data-engineering
+  template_dir: pandas
+  epochs_based: false
+  supports_proba: false
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+  docs:
+    - name: "pandas User Guide"
+      url: "https://pandas.pydata.org/docs/user_guide/index.html"
+    - name: "Apache Arrow / Parquet"
+      url: "https://arrow.apache.org/docs/python/parquet.html"
+  notes:
+    - "ETL/ELT vectorisé, sans boucles Python : `groupby`, `merge`, `pipe`, accessors."
+    - "Parquet + Arrow dtypes pour la compression, les types stricts et la lecture partielle (predicate pushdown)."
+  commands:
+    train: "python -m src.main mode=run"
+
+prefect:
+  display_name: Prefect
+  category: orchestration
+  template_dir: prefect
+  epochs_based: false
+  supports_proba: false
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "prefect>=2.19"
+  docs:
+    - name: "Prefect Documentation"
+      url: "https://docs.prefect.io/"
+    - name: "Flows & Tasks"
+      url: "https://docs.prefect.io/latest/concepts/flows/"
+  notes:
+    - "`@flow` / `@task` avec retries et caching : orchestration testable sans serveur (mode éphémère)."
+    - "Les tâches restent de simples fonctions typées : testables unitairement hors Prefect."
+  commands:
+    train: "python -m src.main mode=run"
+
+mlflow:
+  display_name: MLflow
+  category: mlops
+  template_dir: mlflow
+  epochs_based: false
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "mlflow>=2.12"
+    - "joblib>=1.3"
+  docs:
+    - name: "MLflow Tracking"
+      url: "https://mlflow.org/docs/latest/tracking.html"
+    - name: "MLflow Models"
+      url: "https://mlflow.org/docs/latest/models.html"
+  notes:
+    - "Tracking local (`mlruns/`) : aucune infrastructure externe nécessaire pour lancer l'exemple."
+    - "Autolog + log explicite des params/metrics/artifacts pour une comparaison d'expériences reproductible."
+  commands:
+    train: "python -m src.main mode=train"
+
+fastapi:
+  display_name: FastAPI
+  category: serving
+  template_dir: fastapi
+  epochs_based: false
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "fastapi>=0.111"
+    - "uvicorn>=0.29"
+    - "httpx>=0.27"
+    - "joblib>=1.3"
+  docs:
+    - name: "FastAPI Documentation"
+      url: "https://fastapi.tiangolo.com/"
+    - name: "Testing FastAPI"
+      url: "https://fastapi.tiangolo.com/tutorial/testing/"
+  notes:
+    - "Schémas Pydantic en entrée/sortie : contrat d'API explicite, validation 422 automatique, OpenAPI gratuit."
+    - "Modèle chargé une seule fois au démarrage (lifespan) et servi en lecture seule."
+  commands:
+    train: "python -m src.main mode=train"
+
+jinja2:
+  display_name: Jinja2 + pandas
+  category: reporting
+  template_dir: jinja2
+  epochs_based: false
+  supports_proba: false
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "jinja2>=3.1"
+    - "matplotlib>=3.8"
+  docs:
+    - name: "Jinja2 Template Designer"
+      url: "https://jinja.palletsprojects.com/en/stable/templates/"
+  notes:
+    - "Séparation stricte données / présentation : les templates HTML vivent dans `templates/`, pas dans le code."
+    - "Rapport auto-portant (figures encodées en base64) : partageable par e-mail sans serveur."
+  commands:
+    train: "python -m src.main mode=report"
+
+scipy:
+  display_name: SciPy + scikit-learn (drift)
+  category: monitoring
+  template_dir: scipy
+  epochs_based: false
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "scipy>=1.11"
+    - "matplotlib>=3.8"
+    - "joblib>=1.3"
+  docs:
+    - name: "scipy.stats"
+      url: "https://docs.scipy.org/doc/scipy/reference/stats.html"
+    - name: "PSI / drift detection"
+      url: "https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence"
+  notes:
+    - "Détection de drift sans dépendance propriétaire : PSI, KS test, comparaison de distributions."
+    - "Alerting déterministe et testable : seuils pilotés par la configuration Hydra."
+  commands:
+    train: "python -m src.main mode=train"
+
+github-actions:
+  display_name: GitHub Actions + tox
+  category: cicd
+  template_dir: github-actions
+  epochs_based: false
+  supports_proba: true
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "joblib>=1.3"
+    - "tox>=4.15"
+  docs:
+    - name: "GitHub Actions"
+      url: "https://docs.github.com/en/actions"
+    - name: "tox"
+      url: "https://tox.wiki/"
+  notes:
+    - "Pipeline CI complet : lint -> type -> tests -> génération de données -> entraînement smoke -> publication d'artefacts."
+    - "Les workflows sont versionnés et rejouables ; la chaîne ML est testée dans la CI, pas seulement en local."
+  commands:
+    train: "python -m src.main mode=train"
+
+pandera:
+  display_name: Pandera (data quality)
+  category: data-quality
+  template_dir: pandera
+  epochs_based: false
+  supports_proba: false
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "pandera>=0.20"
+  docs:
+    - name: "Pandera Documentation"
+      url: "https://pandera.readthedocs.io/"
+    - name: "DataFrameModel"
+      url: "https://pandera.readthedocs.io/en/stable/schema_models.html"
+  notes:
+    - "Contrats de données exécutables : schémas typés, checks métier, rapports de qualité exploitables."
+    - "Les règles vivent dans le code (versionnées, testées) et non dans un tableur ou un wiki."
+  commands:
+    train: "python -m src.main mode=audit"

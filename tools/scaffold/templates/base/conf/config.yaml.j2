@@ -1,0 +1,81 @@
+# =================================================================================================
+# {{ spec.title }}
+# -------------------------------------------------------------------------------------------------
+# {{ spec.summary }}
+#
+# Toute la configuration du projet vit dans ce dossier. Aucune valeur métier n'est codée en dur
+# dans le code source : chaque paramètre est déclaré ici, typé par `src/schemas/config.py`
+# (Pydantic) et surchargeable en ligne de commande par Hydra.
+#
+#   python -m src.main mode=train ++train.epochs=10 model.params.max_depth=6
+#   python -m src.main --multirun data.n_samples=2000,8000
+#
+# Groupes de configuration (dossier `conf/`) :
+#   data/          jeu de données, cibles, split, contrats de validation
+#   model/         algorithme et hyperparamètres
+#   train/         boucle d'entraînement, callbacks, artefacts produits
+#   preprocessing/ nettoyage, encodage, scaling, feature engineering
+#   hydra/         répertoires de sortie Hydra (run / sweep)
+# =================================================================================================
+
+defaults:
+  - data: default
+  - model: default
+  - train: default
+  - preprocessing: default
+  - hydra: local
+  - _self_
+
+# Mode d'exécution du point d'entrée `src/main.py`.
+#   generate-data : génère le jeu de données synthétique dans data/raw
+#   train         : entraîne, valide, évalue et sauvegarde les artefacts
+#   evaluate      : ré-évalue un modèle existant et régénère les rapports
+#   predict       : exécute des prédictions (fichier ou échantillon)
+#   all           : generate-data -> train -> evaluate -> predict
+mode: train
+
+seed: {{ spec.data.seed }}
+log_level: INFO
+log_file: null            # ex. outputs/run.log ; null = console uniquement
+
+project:
+  key: {{ spec.key }}
+  name: {{ spec.project_slug }}
+  domain: {{ spec.domain }}
+  problem: {{ spec.problem }}
+  stack: {{ spec.stack_key }}
+  family: {{ spec.family }}
+  modality: {{ spec.modality }}
+  title: "{{ spec.title }}"
+  version: 1.0.0
+
+paths:
+  root: null              # null -> résolu depuis src/utils/paths.PROJECT_ROOT
+  data_dir: null
+  artifacts_dir: null
+  outputs_dir: null
+
+metrics:
+  task: {{ spec.metrics.task }}
+  primary: {{ spec.metrics.primary }}
+  secondary:
+{% for metric in spec.metrics.secondary %}
+    - {{ metric }}
+{% endfor %}
+  baseline: {{ spec.metrics.baseline }}
+  direction: {{ spec.metrics.direction }}
+{% if spec.metrics.min_primary is not none %}
+  min_primary: {{ spec.metrics.min_primary }}
+{% else %}
+  min_primary: null
+{% endif %}
+
+predict:
+  input: null             # chemin d'un fichier (parquet/csv) ou null pour un échantillon
+  n_samples: 5
+  output: artifacts/reports/predictions.csv
+{% if extras.get('root_conf') %}
+
+# --- configuration spécifique à la famille `{{ spec.family }}` ----------------------------------
+{{ yaml_dump(extras.get('root_conf')) }}
+{% endif %}

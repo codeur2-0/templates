@@ -1,0 +1,374 @@
+{#- Predictor classification : inférence validée, batch + unitaire, explication légère. -#}
+"""Inference: score new customers with the trained artefacts.
+
+The predictor is the *production facing* object of the project. It:
+
+1. loads the artefacts written by training (model, preprocessing, feature builder),
+2. validates the incoming payload with ``InferenceDataSchema`` (fail fast, explicit message),
+3. rebuilds the exact same features and transformations as during training,
+4. returns a business-readable frame: probability, decision, risk segment, main drivers.
+
+Nothing here knows how the model was trained: swapping scikit-learn for PyTorch only changes
+``src/models/model.py``.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+
+from src.data.generators import SyntheticDataGenerator
+from src.data.loaders import InferenceDataLoader
+from src.data.schemas import InferenceDataSchema
+from src.features.build_features import FeatureBuilder
+from src.models import load_model
+from src.models.base import BaseModel
+from src.preprocessing.pipelines import PreprocessingPipeline
+from src.utils.io import load_pickle, write_table
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+
+logger = get_logger(__name__)
+
+#: Colonne cible (absente des payloads d'inférence, présente en évaluation).
+TARGET_NAME = "{{ spec.data.target or 'target' }}"
+
+#: Identifiant métier, conservé dans les prédictions pour la traçabilité.
+ID_COLUMN = "{{ spec.data.id_column or 'id' }}"
+
+#: Segments de risque attribués selon la probabilité prédite.
+RISK_SEGMENTS: tuple[tuple[float, str], ...] = (
+    (0.20, "faible"),
+    (0.50, "modéré"),
+    (0.75, "élevé"),
+    (1.01, "critique"),
+)
+
+#: Colonnes de contexte conservées dans le fichier de prédictions.
+CONTEXT_COLUMNS: tuple[str, ...] = (
+    "{{ spec.data.id_column or 'id' }}",
+{% for column in spec.data.features[:6] %}
+    "{{ column.name }}",
+{% endfor %}
+)
+
+
+class Predictor:
+    """Batch and single-record prediction, with validation and light explainability."""
+
+    def __init__(
+        self,
+        *,
+        model: BaseModel,
+        preprocessing: PreprocessingPipeline,
+        feature_builder: FeatureBuilder | None = None,
+        config: Mapping[str, Any] | None = None,
+        paths: ProjectPaths | None = None,
+        threshold: float = 0.5,
+    ) -> None:
+        """Inject the trained artefacts.
+
+        Args:
+            model: Fitted model.
+            preprocessing: Fitted preprocessing pipeline.
+            feature_builder: Fitted feature builder (``None`` when no derived feature is used).
+            config: Root configuration mapping (used for paths, seed and options).
+            paths: Project layout.
+            threshold: Decision threshold applied to the positive-class probability.
+
+        Raises:
+            ValueError: When the threshold is outside ``[0, 1]``.
+        """
+        if not 0.0 <= threshold <= 1.0:
+            msg = f"threshold must be in [0, 1], got {threshold}"
+            raise ValueError(msg)
+        self.model = model
+        self.preprocessing = preprocessing
+        self.feature_builder = feature_builder or FeatureBuilder([])
+        self.config: dict[str, Any] = dict(config or {})
+        self.paths = paths or ProjectPaths.from_config(self.config)
+        self.threshold = float(threshold)
+
+    # ------------------------------------------------------------------ factories -------
+    @classmethod
+    def from_config(cls, config: Any, paths: ProjectPaths | None = None) -> Predictor:
+        """Build a predictor from a validated application configuration.
+
+        Args:
+            config: ``AppConfig`` instance (or mapping).
+            paths: Optional project layout.
+
+        Returns:
+            The predictor, with every artefact loaded from disk.
+
+        Raises:
+            FileNotFoundError: When an artefact is missing (training never ran).
+        """
+        payload: Mapping[str, Any] = config.model_dump() if hasattr(config, "model_dump") else dict(config or {})
+        layout = paths or ProjectPaths.from_config(payload)
+        artifacts = ((payload.get("train") or {}).get("artifacts") or {})
+
+        model_path = layout.models_dir / str(artifacts.get("model_file", "model.joblib"))
+        pipeline_path = layout.models_dir / str(artifacts.get("pipeline_file", "preprocessing.joblib"))
+        builder_path = layout.models_dir / str(artifacts.get("feature_builder_file", "feature_builder.joblib"))
+
+        for required in (model_path, pipeline_path):
+            if not required.exists():
+                msg = (
+                    f"Artefact manquant : {required}. Entraînez d'abord le modèle avec "
+                    "`python scripts/train.py` (ou `make train`)."
+                )
+                raise FileNotFoundError(msg)
+
+        model = load_model(model_path, config=config)
+        preprocessing = PreprocessingPipeline.load(pipeline_path)
+        feature_builder = load_pickle(builder_path) if builder_path.exists() else FeatureBuilder([])
+        threshold = float(((payload.get("predict") or {}).get("threshold")) or 0.5)
+
+        logger.info(
+            "Predictor ready | model={} features={} threshold={}",
+            model.summary(),
+            len(preprocessing.feature_names_out),
+            threshold,
+        )
+        return cls(
+            model=model,
+            preprocessing=preprocessing,
+            feature_builder=feature_builder,
+            config=payload,
+            paths=layout,
+            threshold=threshold,
+        )
+
+    # ------------------------------------------------------------------ inputs ----------
+    def load_inputs(self, path: str | Path) -> pd.DataFrame:
+        """Load and validate an inference file.
+
+        Args:
+            path: Parquet / CSV / JSON file.
+
+        Returns:
+            The validated frame.
+        """
+        loader = InferenceDataLoader(
+            self.paths,
+            dataset_name=str((self.config.get("data") or {}).get("dataset_name", "inference")),
+            validate=bool(((self.config.get("data") or {}).get("validation") or {}).get("inference", True)),
+        )
+        return loader.load_from(path)
+
+    def sample_inputs(self, n_samples: int = 5, *, seed: int | None = None) -> pd.DataFrame:
+        """Generate a synthetic inference payload (demo without preparing a file).
+
+        Args:
+            n_samples: Number of records.
+            seed: Optional seed override.
+
+        Returns:
+            A frame without the target column.
+        """
+        data_node = dict(self.config.get("data") or {})
+        generator = SyntheticDataGenerator(
+            n_samples=max(int(n_samples) * 4, 50),
+            # ``config.get`` renvoie ``Any | None`` : on explicite le repli pour satisfaire mypy.
+            seed=int(seed if seed is not None else (self.config.get("seed") or data_node.get("seed") or {{ spec.data.seed }})),
+            dataset_name=str(data_node.get("dataset_name", SyntheticDataGenerator.__name__)),
+        )
+        frame = generator.sample(max(int(n_samples), 1), with_target=False)
+        return InferenceDataSchema.validate(frame, lazy=False)
+
+    # ------------------------------------------------------------------ prediction ------
+    def prepare(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Apply feature engineering and preprocessing to a validated payload.
+
+        Args:
+            frame: Raw records (validated).
+
+        Returns:
+            The model-ready matrix.
+        """
+        enriched = self.feature_builder.transform(frame)
+        matrix = self.preprocessing.transform(enriched)
+        logger.debug("Prepared {} record(s) -> {} feature(s)", len(matrix), matrix.shape[1])
+        return matrix
+
+    def predict(self, frame: pd.DataFrame, *, validate: bool = True) -> pd.DataFrame:
+        """Score a batch of records.
+
+        Args:
+            frame: Raw records.
+            validate: Enforce ``InferenceDataSchema`` before predicting.
+
+        Returns:
+            A frame with the context columns, ``probability``, ``prediction``,
+            ``risk_segment`` and ``decision_reason``.
+
+        Raises:
+            RuntimeError: When the model is not fitted.
+        """
+        self.model.check_is_fitted()
+        payload = InferenceDataSchema.validate(frame, lazy=False) if validate else frame.copy()
+
+        matrix = self.prepare(payload)
+        probabilities = self._probabilities(matrix)
+        predictions = self.model.predict(matrix)
+
+        output = self._context_frame(payload).reset_index(drop=True)
+        if probabilities is not None:
+            output["probability"] = probabilities
+            output["prediction"] = (probabilities >= self.threshold).astype(int)
+        else:
+            output["probability"] = np.nan
+            output["prediction"] = np.asarray(predictions).astype(int)
+        output["risk_segment"] = output["probability"].map(_risk_segment) if probabilities is not None else "n/a"
+        output["decision_reason"] = output.apply(self._decision_reason, axis=1)
+
+        flagged = int(output["prediction"].sum())
+        logger.info(
+            "Predictions | rows={} flagged={} ({:.1%}) mean_probability={:.4f}",
+            len(output),
+            flagged,
+            flagged / max(len(output), 1),
+            float(output["probability"].mean()) if probabilities is not None else float("nan"),
+        )
+        return output
+
+    def predict_one(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Score a single record and return a JSON-serialisable payload.
+
+        Args:
+            record: Mapping of column name to value.
+
+        Returns:
+            The prediction payload (probability, decision, segment, drivers).
+        """
+        frame = pd.DataFrame([dict(record)])
+        predictions = self.predict(frame)
+        row = predictions.iloc[0]
+        drivers = self.top_drivers(frame, index=0, top_n=3)
+        payload = {
+            "input": {key: _jsonable(value) for key, value in record.items()},
+            "probability": _jsonable(row.get("probability")),
+            "prediction": int(row.get("prediction", 0)),
+            "risk_segment": str(row.get("risk_segment", "n/a")),
+            "decision_reason": str(row.get("decision_reason", "")),
+            "top_drivers": [{"feature": name, "contribution": round(float(value), 4)} for name, value in drivers],
+            "threshold": self.threshold,
+        }
+        return payload
+
+    def top_drivers(self, frame: pd.DataFrame, *, index: int = 0, top_n: int = 5) -> list[tuple[str, float]]:
+        """Return the features that push the prediction the most for one record.
+
+        The contribution is a *local* approximation: feature importance (global) multiplied by
+        the standardised value of the record. It is meant for operational explainability, not
+        for attribution exacte — use SHAP when a formal explanation is required.
+
+        Args:
+            frame: Raw records (already validated).
+            index: Row index to explain.
+            top_n: Number of drivers returned.
+
+        Returns:
+            List of ``(feature, contribution)`` sorted by descending absolute contribution.
+        """
+        matrix = self.prepare(frame)
+        if index >= len(matrix):
+            msg = f"Row index {index} is out of range ({len(matrix)} rows)"
+            raise IndexError(msg)
+
+        importances = self._feature_importances(matrix)
+        if importances is None:
+            return []
+        values = matrix.iloc[index].to_numpy(dtype="float64")
+        contributions = np.asarray(importances, dtype="float64") * values
+        ranking = np.argsort(-np.abs(contributions))[:top_n]
+        return [(str(matrix.columns[position]), float(contributions[position])) for position in ranking]
+
+    def save(self, predictions: pd.DataFrame, path: str | Path | None = None) -> Path:
+        """Persist predictions.
+
+        Args:
+            predictions: Frame produced by :meth:`predict`.
+            path: Destination file (defaults to ``artifacts/reports/predictions.csv``).
+
+        Returns:
+            The written path.
+        """
+        destination = Path(path) if path else self.paths.reports_dir / "predictions.csv"
+        return write_table(predictions, destination)
+
+    # ------------------------------------------------------------------ internals -------
+    def _probabilities(self, matrix: pd.DataFrame) -> np.ndarray | None:
+        """Return the positive-class probability when available."""
+        if not getattr(self.model, "supports_proba", False):
+            return None
+        try:
+            probabilities = np.asarray(self.model.predict_proba(matrix))
+        except (NotImplementedError, AttributeError) as exc:
+            logger.debug("Probabilities unavailable: {}", exc)
+            return None
+        if probabilities.ndim == 2 and probabilities.shape[1] >= 2:
+            return probabilities[:, 1]
+        return probabilities.ravel()
+
+    def _feature_importances(self, matrix: pd.DataFrame) -> np.ndarray | None:
+        """Extract per-feature importances aligned with the matrix columns."""
+        estimator = getattr(self.model, "estimator_", None) or getattr(self.model, "model_", None)
+        values = getattr(estimator, "feature_importances_", None)
+        if values is None:
+            coefficients = getattr(estimator, "coef_", None)
+            if coefficients is None:
+                return None
+            array = np.asarray(coefficients, dtype="float64")
+            values = np.abs(array).mean(axis=0) if array.ndim > 1 else np.abs(array).ravel()
+        values = np.asarray(values, dtype="float64").ravel()
+        return values if len(values) == matrix.shape[1] else None
+
+    def _context_frame(self, payload: pd.DataFrame) -> pd.DataFrame:
+        """Keep the useful context columns next to the predictions."""
+        columns = [column for column in CONTEXT_COLUMNS if column in payload.columns]
+        return payload.loc[:, columns] if columns else payload.iloc[:, :0]
+
+    def _decision_reason(self, row: pd.Series) -> str:
+        """Build a one-line, human readable justification of the decision."""
+        probability = row.get("probability")
+        if probability is None or (isinstance(probability, float) and np.isnan(probability)):
+            return "probabilité indisponible (le modèle n'expose pas de proba)"
+        decision = "à risque de départ" if float(probability) >= self.threshold else "fidèle"
+        return f"p={float(probability):.3f} (seuil {self.threshold:.2f}) → {decision}"
+
+
+def _risk_segment(probability: Any) -> str:
+    """Map a probability onto a business risk segment."""
+    try:
+        value = float(probability)
+    except (TypeError, ValueError):
+        return "n/a"
+    if np.isnan(value):
+        return "n/a"
+    for upper_bound, label in RISK_SEGMENTS:
+        if value < upper_bound:
+            return label
+    return RISK_SEGMENTS[-1][1]
+
+
+def _jsonable(value: Any) -> Any:
+    """Coerce numpy/pandas scalars into JSON-serialisable Python values."""
+    if value is None:
+        return None
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        return number if np.isfinite(number) else None
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, (pd.Timestamp,)):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        return value.item()
+    return str(value)

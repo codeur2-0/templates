@@ -1,0 +1,158 @@
+{#- Documentation métier du jeu de données d'exemple. -#}
+# Données — {{ spec.data.title }}
+
+> **Jeu de données synthétique** généré localement par `src/data/generators.py`.
+> Aucune donnée réelle, aucun téléchargement, aucune information confidentielle.
+> Objectif : disposer d'un dataset **crédible métier**, petit et reproductible, pour
+> démontrer tout le cycle de vie (EDA → validation → preprocessing → entraînement → évaluation).
+
+---
+
+## 1. Description métier
+
+{{ wrap(spec.data.description, 100) }}
+
+**Contexte** : {{ wrap(business.context, 92) }}
+
+**Problème adressé** : {{ wrap(business.problem, 92) }}
+
+**Consommateur principal** : {{ business.persona }}
+
+---
+
+## 2. Fiche d'identité
+
+| Propriété | Valeur |
+| --- | --- |
+| Nom du dataset | `{{ spec.data.dataset_name }}` |
+| Granularité | {{ ("une ligne = " ~ (spec.data.columns | selectattr('role', 'equalto', 'identifier') | first).description) if spec.data.columns | selectattr('role', 'equalto', 'identifier') | list else "une ligne = une observation" }} |
+| Nombre d'échantillons (par défaut) | {{ "{:,}".format(spec.data.n_samples) }} |
+| Nombre de colonnes | {{ spec.data.columns | length }} |
+{% if spec.data.target %}| Cible | `{{ spec.data.target }}` |{% endif %}
+{% if spec.data.positive_rate is not none %}| Taux de classe positive | ~{{ "%.1f" | format(spec.data.positive_rate * 100) }} % |{% endif %}
+{% if spec.data.id_column %}| Clé | `{{ spec.data.id_column }}` (unique) |{% endif %}
+{% if spec.data.time_column %}| Dimension temporelle | `{{ spec.data.time_column }}` |{% endif %}
+| Formats | {{ spec.data.formats | join(", ") }} |
+| Emplacement | `data/raw/{{ spec.data.dataset_name }}.parquet` |
+| Graine de génération | `{{ spec.data.seed }}` |
+| Valeurs manquantes | oui, en proportion maîtrisée (voir schéma) |
+| Outliers | oui, légitimes métier (bornés par le schéma Pandera) |
+| Source | **générée synthétiquement** (`SyntheticDataGenerator`) |
+
+---
+
+## 3. Schéma des colonnes
+
+| # | Colonne | Type | Rôle | Unité | Signification métier | Distribution attendue |
+| --- | --- | --- | --- | --- | --- | --- |
+{% for column in spec.data.columns %}| {{ loop.index }} | `{{ column.name }}` | `{{ column.dtype }}` | {{ column.role }} | {{ column.unit or "-" }} | {{ column.description }} | {{ column.distribution or "-" }} |
+{% endfor %}
+
+### Contraintes de validation (contrat exécutable)
+
+Les contraintes ci-dessous ne sont pas de la documentation : elles sont **exécutées** à chaque
+chargement par les schémas Pandera de `src/data/schemas.py` (`RawDataSchema`,
+`ProcessedDataSchema`, `InferenceDataSchema`).
+
+| Colonne | Contraintes |
+| --- | --- |
+{% for column in spec.data.columns %}| `{{ column.name }}` | type `{{ column.dtype }}`{% if column.unique %}, unique{% endif %}{% if column.nullable %}, nullable{% else %}, non nul{% endif %}{% if column.checks %}, {{ format_checks(column.checks) }}{% endif %} |
+{% endfor %}
+
+---
+
+## 4. Générer / régénérer les données
+
+```bash
+# depuis la racine du projet
+make data
+# équivalents :
+python scripts/generate_data.py
+python -m src.main mode=generate-data
+
+# variantes
+python scripts/generate_data.py data.n_samples=20000 seed=7
+python scripts/generate_data.py data.formats=[parquet]
+```
+
+Le générateur écrit :
+
+| Fichier | Contenu |
+| --- | --- |
+| `data/raw/{{ spec.data.dataset_name }}.parquet` | données brutes (format machine, typé, compressé) |
+| `data/raw/{{ spec.data.dataset_name }}.csv` | mêmes données, lisibles par un humain |
+| `data/raw/generation_metadata.json` | empreinte du tirage : seed, shape, dtypes, taux de manquants, distribution de la cible |
+
+**Déterminisme** : à `seed` et `n_samples` fixés, les fichiers sont identiques d'une exécution à
+l'autre — condition indispensable pour comparer deux stacks ou rejouer un incident.
+
+---
+
+## 5. Cycle de vie des données
+
+```text
+SyntheticDataGenerator  →  data/raw/*.parquet            (immuable, jamais modifié en place)
+        │
+        ▼  RawDataLoader + RawDataSchema (validation)
+FeatureBuilder          →  features dérivées
+        │
+        ▼  PreprocessingPipeline (fit sur train uniquement)
+data/processed/*.parquet                                 (splits + matrice modélisable)
+        │
+        ▼  ProcessedDataSchema (validation avant entraînement)
+Trainer / Evaluator / Predictor
+```
+
+Règles appliquées :
+
+1. **`data/raw/` est immuable** : on ne nettoie jamais une donnée brute en place.
+2. **`data/processed/` est jetable** : régénérable à tout moment depuis `raw/`.
+3. **Parquet par défaut** pour les étapes intermédiaires (types stricts, compression, pushdown).
+4. **Aucune donnée générée n'est committée** (`.gitignore`) : seuls le générateur et sa
+   documentation le sont.
+
+---
+
+## 6. Ce que les données contiennent volontairement
+
+Pour que l'exemple soit pédagogique, le générateur injecte des difficultés **réalistes** :
+
+{% if spec.data.notes %}
+{% for note in spec.data.notes %}
+- {{ note }}
+{% endfor %}
+{% else %}
+- des **valeurs manquantes** (MCAR/MAR) sur quelques colonnes, pour exercer l'imputation ;
+- des **outliers légitimes** (bornés), pour exercer le clipping/winsorisation ;
+- des **corrélations** entre features, pour rendre l'analyse multivariée intéressante ;
+- un **signal cible** non linéaire + interactions, pour qu'un modèle apprenne quelque chose ;
+- du **bruit irréductible**, pour que la performance reste réaliste (pas de 100 %).
+{% endif %}
+
+---
+
+## 7. Observations attendues (EDA)
+
+Points à retrouver dans `notebooks/01_exploratory_analysis.ipynb` :
+
+{% for insight in spec.data.insights %}
+{{ loop.index }}. {{ insight }}
+{% endfor %}
+{% if not spec.data.insights %}
+1. Distributions hétérogènes entre colonnes numériques → normalisation nécessaire.
+2. Classes modales peu cardinalisées → one-hot encoding suffisant.
+3. Corrélations modérées → pas de colinéarité pathologique.
+{% endif %}
+
+---
+
+## 8. Passage à l'échelle (données réelles)
+
+Pour brancher ce projet sur des données de production :
+
+1. Remplacer `SyntheticDataGenerator` par un `RawDataLoader` qui lit la source réelle
+   (entrepôt, objet storage, API) — l'interface ne change pas.
+2. **Conserver les schémas Pandera** : ils deviennent le contrat avec le fournisseur de données
+   (et un test de non-régression à chaque évolution du schéma amont).
+3. Versionner les datasets (DVC / Delta / snapshots horodatés) pour garantir la reproductibilité.
+4. Ajouter une surveillance de dérive (voir `mlops/model-monitoring/*`).

@@ -1,0 +1,115 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ===============================================================================================
+# {{ spec.title }}
+# {{ spec.summary }}
+# ===============================================================================================
+[project]
+name = "{{ spec.package_name }}"
+version = "1.0.0"
+description = "{{ spec.summary | replace('"', "'") }}"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Data & AI Platform Team" }]
+keywords = [
+    "{{ spec.domain }}",
+    "{{ spec.problem }}",
+    "{{ spec.stack_key }}",
+    "hydra",
+    "pandera",
+    "oop",
+    "mlops",
+]
+dependencies = [
+{% for dep in dependencies %}
+    "{{ dep }}",
+{% endfor %}
+]
+
+[project.optional-dependencies]
+dev = [
+{% for dep in dev_dependencies %}
+    "{{ dep }}",
+{% endfor %}
+]
+
+[project.scripts]
+{{ spec.package_name }} = "src.main:main"
+
+# Le package applicatif s'appelle `src` (arborescence imposée par le standard du dépôt).
+[tool.setuptools]
+package-dir = { "" = "." }
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+namespaces = false
+
+# ---------------------------------------------------------------------------------------------
+# Ruff — lint + format
+# ---------------------------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["outputs", "multirun", "artifacts", "data", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "D", "UP", "B", "C4", "SIM", "RUF"]
+# D203/D213 : conventions pydocstyle incompatibles entre elles (une seule des deux est possible).
+# B008      : appel de fonction dans un argument par défaut — pattern standard FastAPI/Typer.
+# N803/N806 : la convention scikit-learn impose `X` et `y` (majuscule pour la matrice) ; renommer
+#             ces variables dégraderait la lisibilité pour toute personne venant de sklearn.
+ignore = ["D203", "D213", "B008", "N803", "N806"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+"scripts/*" = ["D103"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+# ---------------------------------------------------------------------------------------------
+# mypy — typage
+# ---------------------------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+files = ["src", "scripts"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+check_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+ignore_missing_imports = true
+exclude = ["outputs/", "multirun/", "artifacts/", "\\.venv/"]
+
+# ---------------------------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: tests lents (entraînement complet)",
+    "integration: tests de bout en bout (pipeline complet)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+# ---------------------------------------------------------------------------------------------
+# coverage
+# ---------------------------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["src"]
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_covered = false

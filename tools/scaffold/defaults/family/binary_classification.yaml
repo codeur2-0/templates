@@ -1,0 +1,266 @@
+# ==============================================================================================
+# Famille « classification binaire » — cas d'usage : prédiction d'attrition client (churn)
+# d'un opérateur télécom. Toutes les stacks de cette famille (sklearn, xgboost, lightgbm,
+# pytorch, tensorflow, keras) partagent EXACTEMENT ce cas d'usage, ces données et ces
+# métriques : seule l'implémentation du modèle change. C'est ce qui rend la comparaison
+# pédagogique et honnête.
+# ==============================================================================================
+
+domain: data-science
+problem: classification
+modality: tabular
+family: binary_classification
+
+business:
+  persona: >-
+    Équipe Customer Success / Marketing d'un opérateur télécom (abonnement B2C), avec un
+    data scientist qui industrialise le modèle et un CRM qui consomme les scores.
+  context: >-
+    L'opérateur perd chaque mois une part significative de ses abonnés au profit de
+    concurrents. Acquérir un client coûte 5 à 7 fois plus cher que d'en conserver un, et les
+    campagnes de rétention actuelles sont déclenchées au feeling, trop tard et sur trop de
+    monde (coût inutile, fatigue commerciale).
+  problem: >-
+    Identifier, avant la résiliation, les abonnés les plus susceptibles de partir dans les
+    30 prochains jours, afin de cibler une action de rétention (offre, geste commercial,
+    appel sortant) sur une population réduite et pertinente.
+  inputs: >-
+    Fiche abonné : ancienneté, type de contrat, service internet, moyen de paiement, région,
+    charges mensuelles et cumulées, tickets support des 6 derniers mois, consommation data,
+    nombre de services souscrits, promotion active, score de satisfaction déclaré.
+  outputs: >-
+    Probabilité de churn par abonné, décision binaire selon un seuil piloté par le métier,
+    segment de risque (faible / modéré / élevé / critique) et principaux facteurs explicatifs.
+  value: >-
+    Réduction du taux d'attrition, baisse du coût des campagnes de rétention (ciblage),
+    meilleure allocation des appels sortants vers les clients à fort enjeu.
+  success_criteria:
+    - "ROC AUC ≥ 0.75 sur le split de test hors échantillon (le générateur injecte un bruit irréductible)."
+    - "Rappel de la classe « churn » ≥ 0.55 au seuil retenu : on préfère surveiller trop que rater un départ."
+    - "Précision ≥ 0.50 sur la population alertée pour que le coût de rétention reste rentable."
+    - "Probabilités exploitables : écart de calibration moyen < 0.10 (sinon recalibrage)."
+    - "Temps d'inférence < 50 ms pour un batch de 1 000 abonnés (contrainte CRM)."
+    - "Reproductibilité : deux exécutions avec la même seed produisent exactement les mêmes métriques."
+  cadence: "Score recalculé quotidiennement (batch nocturne) et exposé au CRM."
+  constraints:
+    - "Aucune donnée personnelle sensible : le dataset de ce dépôt est synthétique."
+    - "Le modèle doit tourner sur CPU, sans dépendance à un service externe."
+    - "Toute décision automatisée doit rester explicable (segments + facteurs clés)."
+
+data:
+  dataset_name: telecom_churn
+  title: "Abonnés télécom et attrition (churn)"
+  description: >-
+    Population d'abonnés d'un opérateur télécom, avec leurs caractéristiques contractuelles,
+    d'usage et de relation client, et l'étiquette d'attrition observée. Les données sont
+    générées par un modèle logistique latent avec interactions : le signal est réel mais
+    bruité, ce qui reproduit fidèlement la difficulté d'un cas churn industriel.
+  n_samples: 4000
+  seed: 42
+  formats: [parquet, csv]
+  target: churned
+  id_column: customer_id
+  time_column: null
+  group_column: null
+  positive_rate: 0.26
+  columns:
+    - name: customer_id
+      dtype: str
+      role: identifier
+      description: "Identifiant unique de l'abonné"
+      unique: true
+      checks: { regex: "^CUS-[0-9]{5}$" }
+      distribution: "identifiants séquentiels uniques"
+    - name: signup_date
+      dtype: datetime
+      role: timestamp
+      description: "Date de souscription de l'abonnement"
+      distribution: "étalement sur ~6 ans, cohérent avec l'ancienneté"
+    - name: tenure_months
+      dtype: int
+      role: feature
+      description: "Ancienneté de l'abonné"
+      unit: "mois"
+      checks: { ge: 0, le: 72 }
+      distribution: "gamma bimodale selon le segment (jeunes abonnés vs fidèles)"
+    - name: contract_type
+      dtype: category
+      role: feature
+      description: "Type de contrat souscrit"
+      checks: { isin: [month_to_month, one_year, two_year] }
+      distribution: "~35 % mensuel, ~29 % 1 an, ~36 % 2 ans"
+    - name: internet_service
+      dtype: category
+      role: feature
+      description: "Service internet associé à l'abonnement"
+      checks: { isin: [fiber, dsl, none] }
+      distribution: "~55 % fibre, ~30 % DSL, ~15 % sans internet"
+    - name: payment_method
+      dtype: category
+      role: feature
+      description: "Moyen de paiement utilisé"
+      checks: { isin: [electronic_check, mailed_check, bank_transfer, credit_card] }
+      distribution: "~34 % electronic_check, ~16 % mailed_check, ~28 % virement, ~22 % carte"
+    - name: region
+      dtype: category
+      role: feature
+      description: "Région commerciale de rattachement"
+      checks: { isin: [north, south, east, west] }
+      distribution: "quasi uniforme (22-28 %)"
+    - name: monthly_charges
+      dtype: float
+      role: feature
+      description: "Montant mensuel facturé"
+      unit: "EUR"
+      checks: { ge: 18.0, le: 480.0 }
+      distribution: "log-normale centrée ~65 EUR, dépend du service internet"
+    - name: total_charges
+      dtype: float
+      role: feature
+      description: "Cumul facturé depuis la souscription"
+      unit: "EUR"
+      checks: { ge: 18.0, le: 20000.0 }
+      distribution: "≈ monthly_charges × tenure (fortement corrélée, colinéarité volontaire)"
+    - name: support_tickets_6m
+      dtype: int
+      role: feature
+      description: "Nombre de tickets support ouverts sur 6 mois"
+      unit: "tickets"
+      checks: { ge: 0, le: 14 }
+      distribution: "Poisson(λ ≈ 0.6-1.2) selon le contrat et le service"
+    - name: avg_monthly_data_gb
+      dtype: float
+      role: feature
+      description: "Consommation data mensuelle moyenne"
+      unit: "Go"
+      nullable: true
+      checks: { ge: 0.0, le: 1000.0 }
+      distribution: "gamma, ~3 % de manquants (capteur absent)"
+    - name: num_products
+      dtype: int
+      role: feature
+      description: "Nombre de services/produits souscrits (bundle)"
+      unit: "produits"
+      checks: { ge: 1, le: 5 }
+      distribution: "1 à 5, mode sur 2-3"
+    - name: has_promotion
+      dtype: bool
+      role: feature
+      description: "Bénéficie d'une promotion active (1 = oui)"
+      checks: { isin: [0, 1] }
+      distribution: "~25 % de promotions actives"
+    - name: satisfaction_score
+      dtype: float
+      role: feature
+      description: "Score de satisfaction déclaré (enquête CSAT)"
+      unit: "/10"
+      nullable: true
+      checks: { ge: 1.0, le: 10.0 }
+      distribution: "normale tronquée ~6.5, ~5 % de manquants (non-réponse)"
+    - name: churned
+      dtype: int
+      role: target
+      description: "Attrition observée dans les 30 jours (1 = parti)"
+      checks: { isin: [0, 1] }
+      distribution: "~26 % de classe positive"
+  insights:
+    - "La classe cible est déséquilibrée (~26 % de churn) : l'accuracy seule est trompeuse, il faut piloter ROC/PR AUC, rappel et précision."
+    - "`contract_type = month_to_month` est de loin le premier facteur de risque : sans engagement, la résiliation est structurellement plus facile."
+    - "L'ancienneté (`tenure_months`) est fortement protectrice : le risque décroît régulièrement au-delà de 12 mois, d'où l'intérêt des features de cohorte."
+    - "`total_charges` et `monthly_charges × tenure` sont quasi redondants : colinéarité attendue, à surveiller pour les modèles linéaires (pas gênant pour les arbres)."
+    - "Le nombre de tickets support sur 6 mois est un signal d'alerte précoce : au-delà de 4 tickets, la probabilité de départ progresse nettement."
+    - "`satisfaction_score` est anti-corrélé au churn mais comporte ~5 % de manquants : l'imputation doit être explicite et documentée (médiane par contrat)."
+    - "Le paiement par `electronic_check` est associé à un churn supérieur : proxy d'un client peu engagé dans la relation, pas d'une cause directe."
+    - "La fibre (`internet_service = fiber`) présente des charges plus élevées et un churn plus fort : le prix perçu est un levier de rétention."
+    - "Quelques outliers légitimes existent (charges > 250 EUR, > 8 tickets) : les supprimer perdrait de l'information, le winsorising (1-99 %) est préférable."
+    - "Les distributions numériques sont hétérogènes (charges en EUR, consommation en Go, tickets en unités) : le scaling est indispensable pour les modèles sensibles à l'échelle (SVM, k-NN, réseaux)."
+    - "La variable `region` n'apporte presque aucun signal : candidate à l'élimination pour simplifier le modèle (test de permutation importance)."
+    - "Les interactions comptent : contrat mensuel + faible ancienneté + satisfaction basse concentre l'essentiel du risque, ce qu'un modèle linéaire sans terme d'interaction rate."
+    - "Le bruit injecté (probabilité de churn non déterministe) fixe un plafond de performance : un AUC de 1.0 signerait une fuite de données, pas un bon modèle."
+  recommendations:
+    - "Piloter le modèle sur le rappel de la classe churn et le coût par alerte, pas sur l'accuracy globale."
+    - "Choisir le seuil de décision avec la table d'arbitrage précision/rappel/volume (voir le rapport) plutôt qu'avec 0.5 par défaut."
+    - "Recalibrer les probabilités (isotonic ou Platt) avant tout usage en revenu attendu ou en scoring CRM."
+    - "Ajouter des features temporelles (évolution de la consommation, récence du dernier ticket) : c'est le levier de performance principal."
+    - "Mettre en place un suivi de dérive sur `contract_type`, `monthly_charges` et `satisfaction_score` (voir mlops/model-monitoring)."
+    - "Documenter les variables proxy (moyen de paiement) pour éviter un biais commercial involontaire."
+  notes:
+    - "Valeurs manquantes volontaires sur `satisfaction_score` (~5 %) et `avg_monthly_data_gb` (~3 %) pour exercer l'imputation."
+    - "Outliers légitimes (~1 % des lignes) : clients entreprise avec charges élevées et accumulation de tickets."
+    - "Colinéarité volontaire entre `total_charges`, `monthly_charges` et `tenure_months`."
+    - "Cible générée par un modèle logistique latent avec une interaction (contrat mensuel × jeune abonné × satisfaction basse)."
+    - "Bruit irréductible : la probabilité de churn est tirée, pas déterministe — un score parfait indiquerait une fuite."
+
+metrics:
+  task: binary
+  primary: roc_auc
+  secondary: [pr_auc, accuracy, balanced_accuracy, precision, recall, f1, log_loss]
+  baseline: dummy
+  direction: maximize
+  min_primary: 0.7
+
+preprocessing:
+  numeric:
+    imputer: median
+    clip_outliers: true
+    clip_quantiles: [0.01, 0.99]
+    scaler: standard
+    log1p_columns: [total_charges]
+  categorical:
+    imputer: most_frequent
+    encoder: onehot
+    handle_unknown: ignore
+    min_frequency: 0.02
+    max_categories: 10
+  features:
+    - type: ratio
+      name: charges_per_tenure
+      numerator: monthly_charges
+      denominator: tenure_months
+      epsilon: 1.0
+    - type: ratio
+      name: tickets_per_product
+      numerator: support_tickets_6m
+      denominator: num_products
+      epsilon: 1.0
+    - type: bin
+      name: tenure_bucket
+      column: tenure_months
+      method: quantile
+      bins: 4
+    - type: boolean_flag
+      name: heavy_data_user
+      column: avg_monthly_data_gb
+      operator: gt
+      value: 200.0
+    - type: boolean_flag
+      name: low_satisfaction
+      column: satisfaction_score
+      operator: lt
+      value: 5.0
+    - type: group_stat
+      name: charges_by_contract
+      group_by: contract_type
+      value_column: monthly_charges
+      agg: mean
+    - type: datetime_parts
+      name: signup_cohort
+      column: signup_date
+      prefix: signup
+      parts: [year, month, quarter]
+
+train:
+  split:
+    test_size: 0.2
+    val_size: 0.15
+    stratify: true
+    shuffle: true
+    time_based: false
+
+learning_objectives:
+  - "Construire un pipeline tabulaire complet sans fuite de données : split d'abord, apprentissage du preprocessing ensuite."
+  - "Formaliser un contrat de données avec Pandera et le faire respecter à l'entrée, en sortie de preprocessing et en inférence."
+  - "Comparer une baseline triviale à un modèle appris, et lire des métriques adaptées au déséquilibre de classes."
+  - "Passer d'un score brut à une décision métier : seuil, segments de risque, coût des faux positifs et des faux négatifs."
+  - "Réaliser une analyse d'erreurs exploitable : qui se trompe, pourquoi, et que faire ensuite."
+  - "Industrialiser l'ensemble : configuration Hydra, artefacts traçables, tests pytest, rapports générés."

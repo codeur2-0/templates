@@ -1,0 +1,32 @@
+# =================================================================================================
+# Modèle : {{ spec.model.display_name }}
+# -------------------------------------------------------------------------------------------------
+{{ wrap(spec.model.rationale, 98, prefix="# ") }}
+#
+# Alternatives considérées : {{ spec.model.alternatives | join(", ") if spec.model.alternatives else "voir le README, section « Architecture & design »" }}.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.{{ (spec.model.params.keys() | list)[0] if spec.model.params else "n_estimators" }}=...
+# =================================================================================================
+
+name: "{{ spec.model.display_name }}"
+algorithm: {{ spec.model.algorithm }}
+class: {{ camel(spec.stack_key) }}Model
+task: {{ spec.metrics.task }}
+supports_proba: {{ "true" if stack.supports_proba else "false" }}
+epochs_based: {{ "true" if stack.epochs_based else "false" }}
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `{{ camel(spec.stack_key) }}Model(params=...)` (voir src/models/model.py).
+params:
+{% if spec.model.params %}
+{{ yaml_dump(spec.model.params, 2) }}
+{% else %}
+  {}
+{% endif %}
+{% if extras.get('model_conf') %}
+
+# --- options spécifiques à la stack `{{ spec.stack_key }}` ---------------------------------------
+{{ yaml_dump(extras.get('model_conf')) }}
+{% endif %}
