@@ -2076,7 +2076,15 @@ from src.training.losses_metrics import MetricCalculator, MetricInputs
 scores = []
 for seed in (7, 21, 42):
     candidate = build_model(CONFIG, feature_names=PREPARED["feature_names"])
+    # `random_state` est souvent **figé dans `model.params`** (la configuration le déclare pour
+    # garantir la reproductibilité). Dans ce cas l'attribut du modèle ne suffit pas : les réglages
+    # explicites l'emportent sur la graine, et les trois « graines » produiraient trois fois le
+    # même modèle — donc un écart-type nul qui enseignerait une fausse stabilité. On écrit la
+    # graine aux deux endroits, sans jamais ajouter une clé que la stack ne connaîtrait pas.
     candidate.random_state = seed
+    for key in ("random_state", "seed"):
+        if key in candidate.params:
+            candidate.params[key] = seed
     _ = candidate.fit(PREPARED["X_train"], PREPARED["y_train"], X_val=PREPARED["X_val"], y_val=PREPARED["y_val"], callbacks=[])
     probabilities = candidate.predict_proba(PREPARED["X_val"]) if candidate.supports_proba else None
     predictions = candidate.predict(PREPARED["X_val"])
@@ -2149,7 +2157,21 @@ print(f"métrique          : val_{CONFIG.metrics.primary} ({sens})")
 print(f"valeur observée   : {formatage.format(observed)}")
 print(f"seuil configuré   : {formatage.format(seuil) if np.isfinite(seuil) else 'aucun'}")
 print(f"verdict           : {verdict}")
-print(f"callback satisfait: {getattr(threshold_callback, 'satisfied', 'n/a')}")
+satisfait = getattr(threshold_callback, "satisfied", "n/a")
+print(f"callback satisfait: {satisfait}")
+
+# Le callback lit les **logs d'époque** émis pendant `fit`, alors que le verdict ci-dessus est
+# calculé sur les métriques de validation du Trainer. Certaines stacks (boosting notamment)
+# publient leur métrique interne sous leur propre nom et n'émettent pas `val_<primaire>` : le
+# callback ne voit alors jamais la valeur qu'il surveille. Le dire explicitement évite de lire
+# `False` comme un échec de qualité.
+surveille = f"val_{CONFIG.metrics.primary}"
+if satisfait is False and surveille not in OUTCOME.history:
+    print()
+    print(f"note : '{surveille}' n'apparaît pas dans les logs d'époque — le callback n'a donc")
+    print("jamais pu le comparer à son seuil. Clés réellement émises pendant l'entraînement :")
+    print(f"       {sorted(OUTCOME.history)}")
+    print("Le verdict ci-dessus, calculé sur les métriques de validation du Trainer, fait foi.")
 """,
             context,
         ),

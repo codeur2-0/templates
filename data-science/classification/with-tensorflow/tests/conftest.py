@@ -172,12 +172,14 @@ def prepared(enriched_splits: dict[str, pd.DataFrame], app_config: AppConfig) ->
     # no group-aware metric can be computed on the validation split, and the trainer would publish
     # an empty metric set instead of saying why.
     group_column = str(getattr(app_config.data, "group_column", "") or "")
-    val_frame = enriched_splits["val"]
-    groups_val = (
-        val_frame[group_column].to_numpy()
-        if val_frame is not None and group_column and group_column in val_frame.columns
-        else None
-    )
+
+    def groups_of(frame: pd.DataFrame | None) -> Any:
+        if frame is None or not group_column or group_column not in frame.columns:
+            return None
+        return frame[group_column].to_numpy()
+
+    groups_train = groups_of(enriched_splits["train"])
+    groups_val = groups_of(enriched_splits["val"])
 
     return {
         "pipeline": pipeline,
@@ -188,6 +190,7 @@ def prepared(enriched_splits: dict[str, pd.DataFrame], app_config: AppConfig) ->
         "y_train": y_train,
         "X_val": X_val,
         "y_val": y_val,
+        "groups_train": groups_train,
         "groups_val": groups_val,
         "X_test": X_test,
         "y_test": y_test,

@@ -88,6 +88,7 @@ class TrainPipeline(BasePipeline):
                 y_train=matrices["y_train"],
                 X_val=matrices["X_val"],
                 y_val=matrices["y_val"],
+                groups_train=matrices.get("groups_train"),
                 groups_val=matrices.get("groups_val"),
                 feature_names=matrices["feature_names"],
                 task=self.config.metrics.task,
@@ -226,16 +227,18 @@ class TrainPipeline(BasePipeline):
         X_test = pipeline.transform(enriched["test"].loc[:, X_train_frame.columns])
 
         # The group column (the user, in a ranking task) is dropped from the features by the
-        # preprocessing, so it travels separately, aligned with ``X_val``, letting the validation
-        # metrics be computed per group. ``transform`` preserves the row order, which is what
-        # guarantees the alignment.
+        # preprocessing, so it travels separately, aligned row by row with the matrices, letting
+        # the per-group metrics be computed on both splits. ``transform`` preserves the row order,
+        # which is what guarantees the alignment.
         group_column = str(getattr(self.config.data, "group_column", "") or "")
-        val_frame = enriched["val"]
-        groups_val = (
-            val_frame[group_column].to_numpy()
-            if val_frame is not None and group_column and group_column in val_frame.columns
-            else None
-        )
+
+        def groups_of(frame: pd.DataFrame | None) -> Any:
+            if frame is None or not group_column or group_column not in frame.columns:
+                return None
+            return frame[group_column].to_numpy()
+
+        groups_train = groups_of(enriched["train"])
+        groups_val = groups_of(enriched["val"])
 
         if self.config.data.validation.processed:
             validated: list[str] = []
@@ -253,9 +256,10 @@ class TrainPipeline(BasePipeline):
             "y_train": y_train,
             "X_val": X_val,
             "y_val": y_val,
+            "groups_train": groups_train,
+            "groups_val": groups_val,
             "X_test": X_test,
             "y_test": feature_target_split(enriched["test"], target, drop_columns)[1],
-            "groups_val": groups_val,
             "feature_names": pipeline.feature_names_out,
         }
 

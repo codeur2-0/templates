@@ -52,10 +52,15 @@ class TrainingData:
         y_train: Training target (``None`` for unsupervised tasks).
         X_val: Validation features.
         y_val: Validation target.
+        groups_train: Group identifier per training row (the user, in a ranking task). The
+            model needs it to compute its own ``train_*`` per-group metrics inside ``fit``.
+            ``None`` for every task with no group structure.
         groups_val: Group identifier per validation row (the user, in a ranking task).
             Ranking metrics are computed per group then averaged, and the group column is
             dropped by the preprocessing, so it must travel next to the matrices rather than
-            be looked up inside them. ``None`` for every task with no group structure.
+            be looked up inside them. It also reaches the callbacks through ``fit``, which is
+            what lets the quality-threshold guard watch a per-group metric. ``None`` for every
+            task with no group structure.
         feature_names: Ordered feature names.
         task: Learning task identifier.
     """
@@ -64,6 +69,7 @@ class TrainingData:
     y_train: pd.Series | None
     X_val: pd.DataFrame | None = None
     y_val: pd.Series | None = None
+    groups_train: Any = None
     groups_val: Any = None
     feature_names: list[str] = field(default_factory=list)
     task: str = "binary"
@@ -248,6 +254,8 @@ class Trainer:
                 data.y_train,
                 X_val=data.X_val,
                 y_val=data.y_val,
+                groups=data.groups_train,
+                groups_val=data.groups_val,
                 callbacks=self.callbacks,
             )
         context.history = dict(fit_result.history)

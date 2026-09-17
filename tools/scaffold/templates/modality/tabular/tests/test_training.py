@@ -48,6 +48,7 @@ def training_data(prepared: dict[str, Any], app_config: Any) -> TrainingData:
         y_train=prepared["y_train"],
         X_val=prepared["X_val"],
         y_val=prepared["y_val"],
+        groups_train=prepared.get("groups_train"),
         groups_val=prepared.get("groups_val"),
         feature_names=list(prepared["feature_names"]),
         task=str(app_config.metrics.task),
