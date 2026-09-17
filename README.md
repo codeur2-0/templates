@@ -14,7 +14,7 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**13 projets**, tous verts dans `tools/verify.py` (lint, formatage, typage, tests, six notebooks
+**15 projets**, tous verts dans `tools/verify.py` (lint, formatage, typage, tests, six notebooks
 exécutés, pipeline complet `data → train → evaluate → predict`).
 
 ### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks
@@ -69,6 +69,61 @@ deux familles est précisément ce qui rend le choix de stack argumentable plut�
 Rapport de conformité **7/7** : qualité de structure, équilibre des tailles, stabilité par
 bootstrap, validité externe contre les segments latents du générateur, et profilage métier de
 chaque segment (le rapport nomme les segments et propose une action par segment).
+
+### 1.4 `data-science/anomaly-detection` — détection de fraude sur paiements, scikit-learn
+
+| Projet | Stack | Modèle | PR AUC | ROC AUC | Rappel au budget | Précision au budget | Lift |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-sklearn`](data-science/anomaly-detection/with-sklearn) | scikit-learn | `isolation_forest` (500 arbres, 2 variables par coupe) | **0,6661** | 0,9468 | 0,6071 | 0,7083 | **30,4x** |
+
+12 000 transactions, prévalence 2,3 % sur le split de test (56 fraudes), budget
+d'investigation fixé à 2 % des lignes — la capacité réelle d'une équipe d'analystes. Une PR AUC
+aléatoire vaudrait 0,0306 ici : le gain est donc de 0,636 en valeur absolue, et le classement
+concentre 30 fois mieux la fraude qu'un tirage au sort.
+
+Couverture par mode opératoire : identité synthétique 0,85 | carte absente 0,65 | prise de
+compte 0,60 | **fraude amicale 0,00**. Ce dernier zéro n'est pas un bug à masquer : la fraude
+amicale est légitime en apparence (bon appareil, bon historique, bon montant) et aucun détecteur
+transactionnel non supervisé ne peut la voir. C'est un plafond structurel, documenté comme tel
+dans le rapport et le notebook 06.
+
+Le registre sklearn de la tâche `anomaly` sert quatre détecteurs (`isolation_forest`,
+`one_class_svm`, `elliptic_envelope`, `local_outlier_factor` en mode `novelty=True`), ce qui permet
+au notebook 04 de comparer réellement trois hypothèses — densité à noyau RBF, écart de
+Mahalanobis robuste, rareté relative au voisinage. Le LOF y obtient la meilleure PR AUC (0,624
+contre 0,666 pour la forêt d'isolation selon la graine) mais reste écarté : il doit conserver
+l'intégralité du jeu d'entraînement en mémoire pour scorer une ligne nouvelle, ce qui est
+rédhibitoire sur un flux de millions de paiements.
+
+### 1.5 `data-science/time-series-forecasting` — prévision de consommation électrique, scikit-learn
+
+| Projet | Stack | Modèle | MAPE | MAE | MASE | R² | Biais | Gain sur naif | Couverture 90 % |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-sklearn`](data-science/time-series-forecasting/with-sklearn) | scikit-learn | `hist_gradient_boosting` (41 features) | **3,692 %** | 99,4 MW | 0,420 | 0,953 | +0,89 % | **+59,1 %** | **85,4 %** |
+
+4 800 lignes (1 200 origines x 4 horizons), du 2021-02-10 au 2024-05-24, avec 80 vagues de
+froid, 72 canicules et 36 arrêts industriels reproduits fidèlement (3,92 % des jours). Le split
+est chronologique : jamais de mélange aléatoire, jamais de validation croisée aléatoire.
+
+| Horizon | MAPE | MAE | Biais | Couverture |
+| --- | --- | --- | --- | --- |
+| J+1 | 3,555 % | 96,5 MW | +0,84 % | 87,5 % |
+| J+2 | 3,733 % | 99,9 MW | +0,86 % | 84,6 % |
+| J+3 | 3,596 % | 96,8 MW | +0,78 % | 81,7 % |
+| J+7 | 3,886 % | 104,5 MW | +1,07 % | 87,9 % |
+
+L'écart J+1 → J+7 n'est que de 0,33 point, ce qui justifie le choix livré : un modèle unique
+portant l'horizon en variable, plutôt que quatre modèles (la comparaison est chiffrée dans le
+notebook 04). Le plancher structurel du bruit multiplicatif injecté par le générateur est
+d'environ 2,8 % de MAPE — les 0,9 point restants sont l'erreur apprise.
+
+Quatre méthodes d'intervalle sont calibrées sur la validation puis comparées sur le test
+(niveau nominal 90 %) : quantiles de résidus 66,5 % | conformal 73,2 % | conformal adaptatif
+79,9 % | **conformal normalisé 85,4 %** (méthode livrée). Le bruit étant multiplicatif
+(écart-type des résidus 109 MW en validation, 154 MW en test), la normalisation par l'échelle
+locale est précisément ce qui redresse la couverture. La variante normalisée + adaptative monte
+à 86,7 % mais tombe à 0 % sur les vagues de froid : elle est documentée comme limite connue
+plutôt que livrée.
 
 Chaque projet expose aussi : les six notebooks exécutés par la CI locale, les artefacts
 (`artifacts/models`, `artifacts/metrics`, `artifacts/reports`, `artifacts/figures`), une fiche
@@ -239,8 +294,10 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **6/6 projets conformes** (ruff check, ruff format, mypy strict,
-163 tests par projet, 6 notebooks exécutés, `python -m src.main mode=all`).
+État au dernier passage : **15/15 projets conformes** (ruff check, ruff format, mypy strict,
+165 tests par projet soit 2 475 au total, 90 notebooks exécutés, `python -m src.main mode=all`
+de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
+six notebooks et pipeline complet — avant d'être considéré comme livré.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
 reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capture d'écran.
@@ -263,17 +320,19 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 ## 7. Feuille de route
 
 État du générateur : `registry/families.yaml` déclare **30 familles** et `registry/stacks.yaml`
-**18 stacks** ; les couches `base/`, `modality/tabular/`, `task/{classification,regression,clustering}/`,
-`family/{binary_classification,regression,clustering}/` et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/`
-sont écrites et vérifiées. Ce qui reste, par ordre de valeur pédagogique :
+**18 stacks** ; les couches `base/`, `modality/tabular/`, `task/{classification,regression,clustering,anomaly,forecasting}/`,
+`family/{binary_classification,regression,clustering,anomaly_detection,time_series_forecasting}/`
+et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/` sont écrites et vérifiées. Ce qui reste, par ordre de valeur pédagogique :
 
-1. **Familles tabulaires restantes** — `multiclass_classification`, `anomaly_detection`,
-   `time_series_forecasting`, `recommendation`. Les métriques existent déjà dans
-   `losses_metrics.py` (macro-F1, MCC, recall@top-k, precision@budget, MAPE/sMAPE/MASE,
-   Precision@K / NDCG@K / MAP@K) et les registres de stacks déclarent déjà `isolation_forest`
-   (sklearn) et `autoencoder` (pytorch/tensorflow). Manquent : la couche `task/<tâche>`
-   (évaluateur, rapport, prédicteur, figures), la couche `family/` (générateur + valeurs par
-   défaut) et les branches correspondantes du générateur de notebooks.
+1. **Familles tabulaires restantes** — `multiclass_classification` et `recommendation`.
+   `anomaly_detection` et `time_series_forecasting` sont livrées : leurs couches `task/`
+   (évaluateur, rapport, prédicteur, figures) et `family/` (générateur + valeurs par défaut)
+   servent de modèle pour les deux suivantes. Les métriques existent déjà dans
+   `losses_metrics.py` (macro-F1, MCC, recall@top-k, Precision@K / NDCG@K / MAP@K) et le
+   registre sklearn déclare quatre détecteurs pour la tâche `anomaly`. Pour `recommendation`
+   il reste la couche `task/` (évaluation par utilisateur et par catalogue, coupure temporelle
+   leave-one-out), la couche `family/` (générateur d'interactions creuses) et la branche du
+   générateur de notebooks.
 2. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
    GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
    `ai-eng/` (LangChain, Transformers, serving FastAPI), `computer-vision/` et `nlp/`

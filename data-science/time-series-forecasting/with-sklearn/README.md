@@ -97,20 +97,20 @@ intervalle et d'un indicateur de confiance.
 
 **Critères de réussite**
 
-- [ ] MAPE ≤ 4,0 % sur le split de test chronologique, tous horizons confondus. Mesuré : à renseigner après la première exécution de référence.
-- [ ] Le modèle doit battre le **naif saisonnier** (même jour de la semaine précédente) d'au moins 30 % en MAPE : c'est le seul seuil qui prouve une valeur ajoutée.
-- [ ] MAPE ≤ 6,0 % à l'horizon J+7 : la dégradation avec l'horizon doit rester maîtrisée (le J+7 pilote les achats hebdomadaires).
-- [ ] MASE ≤ 0,75 : l'erreur doit être inférieure à celle du naif saisonnier pris comme référence d'échelle.
-- [ ] Biais moyen < 1,5 % et aucun mois dont le biais dépasse 4 % : une prévision systématiquement basse fait acheter trop cher en urgence.
-- [ ] Couverture de l'intervalle de prévision ≥ 85 % pour un niveau nominal de 90 %.
-- [ ] Reproductibilité : deux exécutions avec la même graine produisent exactement les mêmes métriques.
+- [x] MAPE ≤ 4,0 % sur le split de test chronologique, tous horizons confondus. Mesuré : 3,692 % (J+1 3,555 | J+2 3,733 | J+3 3,596 | J+7 3,886), pour un plancher structurel de bruit à ~2,8 %.
+- [x] Le modèle doit battre le **naif saisonnier** (même jour de la semaine précédente) d'au moins 30 % en MAPE : c'est le seul seuil qui prouve une valeur ajoutée. Mesuré : +59,1 % (9,029 % -> 3,692 %).
+- [x] MAPE ≤ 6,0 % à l'horizon J+7 : la dégradation avec l'horizon doit rester maîtrisée (le J+7 pilote les achats hebdomadaires). Mesuré : 3,886 %, soit 0,33 point au-dessus du J+1.
+- [x] MASE ≤ 0,75 : l'erreur doit être inférieure à celle du naif saisonnier pris comme référence d'échelle. Mesuré : 0,420.
+- [x] Biais moyen < 1,5 % et aucun mois dont le biais dépasse 4 % : une prévision systématiquement basse fait acheter trop cher en urgence. Mesuré : +0,887 % en moyenne, pire mois décembre à 3,261 %.
+- [x] Couverture de l'intervalle de prévision ≥ 85 % pour un niveau nominal de 90 %. Mesuré : 85,42 % avec le conformal normalisé (quantiles de résidus 66,5 %, conformal 73,2 %, adaptatif 79,9 %).
+- [x] Reproductibilité : deux exécutions avec la même graine produisent exactement les mêmes métriques. Mesuré : métriques identiques au bit près ; dispersion inter-replis du backtest 0,491.
 
 **Contraintes**
 
 - Aucune donnée réelle de consommation : le dataset de ce dépôt est synthétique et hors ligne.
 - Interdiction absolue de fuite temporelle : une feature ne peut utiliser que l'information disponible au matin de l'origine (historique) ou connue par avance (calendrier, prévision météo).
 - Le split d'évaluation est chronologique : jamais de mélange aléatoire, jamais de validation croisée aléatoire sur des séries temporelles.
-- Le modèle doit s'exécuter sur CPU en moins de 5 secondes pour les 7 horizons d'une journée (contrainte d'astreinte).
+- Le modèle doit s'exécuter sur CPU en moins de 5 secondes pour les 7 horizons d'une journée (contrainte d'astreinte). Mesuré : 49 ms en moyenne sur 20 appels, soit une marge d'un facteur 100.
 - Les épisodes extrêmes (vague de froid, canicule, arrêt industriel) ne doivent pas être rognés : ce sont précisément les jours où la prévision vaut de l'argent.
 
 ---
@@ -125,7 +125,7 @@ métier** (corrélations réalistes, bruit, valeurs manquantes, outliers légiti
 | Propriété | Valeur |
 | --- | --- |
 | Jeu de données | `regional_electricity_load` |
-| Volume par défaut | 4,800 lignes |
+| Volume par défaut | 4 800 lignes |
 | Formats écrits | parquet, csv |
 | Emplacement | `data/raw/regional_electricity_load.parquet` (et `.csv`) |
 | Cible | `load_mw` |
@@ -449,6 +449,7 @@ Toute la configuration vit dans `conf/` et est composée par Hydra :
 | `conf/train/default.yaml` | split, epochs, callbacks, noms d'artefacts | `++train.epochs=20`, `train.split.test_size=0.25` |
 | `conf/preprocessing/default.yaml` | imputation, scaling, encodage, features dérivées | `preprocessing.numeric.scaler=robust`, `preprocessing.categorical.encoder=ordinal` |
 | `conf/hydra/local.yaml` | répertoires de sortie Hydra (`outputs/`, `multirun/`) | `hydra.run.dir=outputs/debug` |
+| `conf/config.yaml` -> bloc `load_forecasting` | Réglages métier de la famille, au même niveau que `mode` et `seed` : 9 clés (horizon_column, horizons, long_horizon, interval_level, interval_method, interval_scale_column, backtest_folds, …), chacune commentée dans le fichier — c'est là qu'on change le métier sans toucher au code. | `load_forecasting.horizon_column=horizon_days`, `load_forecasting.long_horizon=7` |
 
 Règles appliquées :
 
@@ -466,19 +467,49 @@ Après `make all`, le dépôt local contient :
 
 | Chemin | Contenu |
 | --- | --- |
-| `data/raw/regional_electricity_load.parquet` | jeu de données synthétique (4,800 lignes) |
-| `data/processed/*.parquet` | splits et données transformées |
+| `data/raw/regional_electricity_load.parquet` (+ `csv`) | jeu de données synthétique, 4 800 lignes |
+| `data/raw/generation_metadata.json` | recette de génération : graine, options, empreinte du jeu, fichiers écrits |
+| `data/processed/split_{train,val,test}.parquet` | splits avant transformation (l'évaluation et l'inférence rejouent exactement le même découpage) |
+| `data/processed/features_{X_train,X_val,X_test}.parquet` | matrices prêtes pour le modèle |
 | `artifacts/models/model.joblib` | modèle entraîné |
 | `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
+| `artifacts/models/feature_builder.joblib` | construction des features dérivées, ajustée sur le train uniquement |
 | `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
-| `artifacts/metrics/training_metrics.json` | métriques d'entraînement et d'évaluation |
+| `artifacts/models/resolved_config.json` | configuration Hydra résolue : l'artefact entraîné porte sa recette exacte |
+| `artifacts/metrics/training_metrics.json` | métriques d'entraînement et de validation |
+| `artifacts/metrics/evaluation_metrics.json` | métriques sur le split de test + verdict des seuils |
 | `artifacts/reports/evaluation_report.md` | rapport lisible (métriques, analyse d'erreurs, recommandations) |
+| `artifacts/reports/per_horizon.csv` | MAPE / MAE / biais / couverture ventilés par horizon |
+| `artifacts/reports/segments.csv` | ventilation par régime extrême, week-end, jour férié, vacances |
+| `artifacts/reports/baselines.csv` | références triviales (persistance, naif saisonnier, moyennes glissantes) |
+| `artifacts/reports/intervals.csv` | bornes, largeur relative et méthode de calibration par prévision |
+| `artifacts/reports/backtest.csv` | replis chronologiques et dispersion de la performance |
+| `artifacts/reports/errors.csv` | pires erreurs, avec leurs références naïves |
 | `artifacts/reports/predictions.csv` | prédictions sur l'échantillon de démonstration |
-| `artifacts/figures/*.png` | figures spécifiques à la tâche |
+| `artifacts/figures/*.png` | prévision vs réel, erreur par horizon et par régime, couverture d'intervalle, diagnostics de résidus, biais mensuel, stabilité du backtest |
 | `outputs/<date>/<heure>/` | configuration composée + logs Hydra |
 
-Métrique principale : **`mape`** (cible de smoke test : ≥ 4.0).
+Métrique principale : **`mape`** (sens `minimize`, seuil de smoke test : ≤ 4.0).
 Métriques secondaires : smape, mase, mae, rmse, r2.
+
+Résultats de l'exécution de référence (`make all`, graine 42) :
+
+| Indicateur | Valeur mesurée |
+| --- | --- |
+| MAPE global (test, 960 lignes) | **3,692 %** |
+| MAE | **99,4 MW** |
+| sMAPE / MASE / R² | **3,67 % / 0,420 / 0,953** |
+| Biais moyen (pire mois : décembre) | **+0,887 % (3,261 %)** |
+| MAPE du naif saisonnier -> gain du modèle | **9,029 % -> +59,1 %** |
+| Couverture d'intervalle (nominal 90 %) | **85,42 %** |
+| MAPE J+1 / J+2 / J+3 / J+7 | **3,555 / 3,733 / 3,596 / 3,886 %** |
+| MAPE sur les 20 jours d'épisode extrême | **9,42 % (biais -9,22 %, limite documentée)** |
+| Dispersion inter-replis du backtest | **0,491** |
+| Latence d'inférence pour une journée (7 horizons) | **49 ms** |
+| Features en entrée du modèle | **41 (32 colonnes brutes + encodage)** |
+
+Ces valeurs sont reproductibles à l'identique ; elles proviennent du split de test, jamais
+du split d'entraînement, et le détail complet est dans `artifacts/reports/evaluation_report.md`.
 
 ---
 
@@ -487,14 +518,15 @@ Métriques secondaires : smape, mase, mae, rmse, r2.
 Tous les notebooks sont **exécutables de bout en bout** (`make notebooks`) et documentés
 cellule par cellule, comme un support de formation pour juniors.
 
+
 | Notebook | Ce qu'on y apprend |
 | --- | --- |
-| `01_exploratory_analysis.ipynb` | EDA structurée : types, manquants, distributions univariées et bivariées, corrélations, outliers, puis **10-15 insights** actionnables. |
-| `02_data_validation_and_schemas.ipynb` | Pourquoi des contrats de données : définition d'un `DataFrameModel` Pandera, validation réussie, puis **corruption volontaire** pour observer l'échec et le message d'erreur. |
-| `03_preprocessing_and_features.ipynb` | Construction du pipeline : imputation, clipping, scaling, encodage, features dérivées, et démonstration de l'absence de fuite (fit sur train uniquement). |
-| `04_model_exploration.ipynb` | Comparaison baseline + modèles candidats en validation croisée, table de métriques, choix argumenté du modèle. |
-| `05_training_and_tracking.ipynb` | Entraînement instrumenté : callbacks, courbes d'apprentissage, métriques suivies, sauvegarde des artefacts. |
-| `06_evaluation_and_error_analysis.ipynb` | **Analyse d'erreurs** : matrice de confusion, rapport par classe, exemples mal prédits, hypothèses sur les causes et recommandations concrètes. |
+| `01_eda.ipynb` | EDA structurée : types, manquants, distributions univariées et bivariées, corrélations, outliers, puis **10-15 insights** actionnables. |
+| `02_validation.ipynb` | Pourquoi des contrats de données : définition d'un `DataFrameModel` Pandera, validation réussie, puis **corruption volontaire** pour observer l'échec et le message d'erreur. |
+| `03_preprocessing.ipynb` | Construction du pipeline : imputation, clipping, scaling, encodage, features dérivées, et démonstration de l'absence de fuite (fit sur train uniquement). |
+| `04_model_exploration.ipynb` | *Exploration des modèles de prévision* — Plancher naïf mesuré **sur le test** avant tout modèle, comparaison des familles d'algorithmes à protocole identique, thermo-sensibilité apprise lue en MW par °C comme contrôle de cohérence métier, arbitrage modèle unique contre modèle par horizon, grille de réglage et sonde de fuite temporelle. |
+| `05_training.ipynb` | *Entraînement et validation temporelle* — Entraînement avec l'objet de production dans un bac à sable — les artefacts du pipeline ne sont pas touchés —, mesure de l'**optimisme** d'une validation croisée aléatoire face à des replis chronologiques, arbitrage de la perte d'entraînement sur quatre critères plutôt qu'un, et pilotage de l'écart train/validation par la complexité des arbres. |
+| `06_error_analysis.ipynb` | *Analyse d'erreurs et recommandations* — Évaluation complète avec l'objet de production (intervalles et backtest compris), ventilation de l'erreur **par horizon, par régime et par mois** — trois lectures qui appellent trois correctifs différents —, lecture des pires journées une par une, autocorrélation des résidus, recalibrage des intervalles et recommandations opérationnelles. |
 
 ---
 
@@ -516,6 +548,7 @@ Ce qui est testé :
 | `tests/test_preprocessing.py` | Transformers (fit/transform), absence de fuite, cohérence des colonnes en sortie, persistance. |
 | `tests/test_models.py` | Contrat `BaseModel` : fit → predict → predict_proba, shape, déterminisme, sauvegarde/rechargement, garde-fous (modèle non entraîné, colonnes manquantes). |
 | `tests/test_training.py` | Le `Trainer` produit des métriques, des callbacks fonctionnent (early stopping), les artefacts sont écrits. |
+| `tests/test_pipeline.py` | Bout en bout : chaque pipeline (`data`, `train`, `evaluation`, `inference`) s'exécute sur une configuration réduite, écrit ses artefacts et refuse une entrée invalide. |
 
 Les tests utilisent des **fixtures légères** (`tests/conftest.py`) : petit dataset synthétique
 et configuration réduite, donc exécution en quelques secondes.

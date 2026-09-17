@@ -33,7 +33,7 @@ sortant) sur une population réduite et pertinente.
 | --- | --- |
 | Nom du dataset | `telecom_churn` |
 | Granularité | une ligne = Identifiant unique de l'abonné |
-| Nombre d'échantillons (par défaut) | 4,000 |
+| Nombre d'échantillons (par défaut) | 4 000 |
 | Nombre de colonnes | 15 |
 | Cible | `churned` || Taux de classe positive | ~26.0 % || Clé | `customer_id` (unique) || Formats | parquet, csv |
 | Emplacement | `data/raw/telecom_churn.parquet` |

@@ -38,7 +38,7 @@ présenté comme exact.
 | --- | --- |
 | Nom du dataset | `real_estate_prices` |
 | Granularité | une ligne = Identifiant unique du bien |
-| Nombre d'échantillons (par défaut) | 8,000 |
+| Nombre d'échantillons (par défaut) | 8 000 |
 | Nombre de colonnes | 16 |
 | Cible | `price_eur` || Clé | `property_id` (unique) || Formats | parquet, csv |
 | Emplacement | `data/raw/real_estate_prices.parquet` |

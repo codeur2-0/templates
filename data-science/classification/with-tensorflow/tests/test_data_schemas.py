@@ -55,16 +55,20 @@ def _failure_count(error: BaseException) -> int:
     return max(len(sub_errors), 1)
 
 
-def _column_with_check(check_name: str) -> tuple[str, Any] | None:
-    """Find the first raw column declaring a given check.
+def _column_with_check(check_name: str, schema: Any = None) -> tuple[str, Any] | None:
+    """Find the first column declaring a given check.
 
     Args:
         check_name: Name of the pandera check (``ge``, ``isin``, ``str_matches``, ...).
+        schema: Schema to inspect. Defaults to ``RawDataSchema``; pass ``InferenceDataSchema`` when
+            the corruption is applied to an inference payload, whose columns are not the same (the
+            target is absent), so that the test never corrupts a column the schema does not declare.
 
     Returns:
         The ``(column_name, check)`` pair, or ``None`` when no column declares it.
     """
-    for name, column in RawDataSchema.to_schema().columns.items():
+    declared = (schema or RawDataSchema).to_schema().columns
+    for name, column in declared.items():
         for check in column.checks or []:
             if getattr(check, "name", "") == check_name:
                 return name, check
@@ -92,10 +96,17 @@ def _categorical_column() -> str | None:
     return None
 
 
-def _bounded_numeric_column() -> str | None:
-    """Find the first column constrained by a ``ge``/``greater_than_or_equal_to`` check."""
+def _bounded_numeric_column(schema: Any = None) -> str | None:
+    """Find the first column constrained by a ``ge``/``greater_than_or_equal_to`` check.
+
+    Args:
+        schema: Schema to inspect (see :func:`_column_with_check`).
+
+    Returns:
+        The column name, or ``None`` when no column declares such a bound.
+    """
     for check_name in ("ge", "greater_than_or_equal_to", "in_range"):
-        found = _column_with_check(check_name)
+        found = _column_with_check(check_name, schema)
         if found is not None:
             return found[0]
     return None
@@ -278,7 +289,7 @@ class TestInferenceSchema:
 
     def test_rejects_invalid_type(self, raw_dataset: pd.DataFrame, app_config: Any) -> None:
         """Un type incohérent reste refusé : la tolérance ne signifie pas l'absence de contrat."""
-        column = _bounded_numeric_column()
+        column = _bounded_numeric_column(InferenceDataSchema)
         if column is None:
             pytest.skip("aucune colonne numérique bornée dans ce schéma")
         payload = _without_target(raw_dataset, app_config.data.target).head(5).copy()

@@ -42,7 +42,7 @@ affecter tout nouveau client au groupe le plus proche avec un niveau de confianc
 | --- | --- |
 | Nom du dataset | `retail_customer_base` |
 | Granularité | une ligne = Identifiant unique du client |
-| Nombre d'échantillons (par défaut) | 6,000 |
+| Nombre d'échantillons (par défaut) | 6 000 |
 | Nombre de colonnes | 22 |
 | Clé | `customer_id` (unique) || Dimension temporelle | `signup_date` || Formats | parquet, csv |
 | Emplacement | `data/raw/retail_customer_base.parquet` |

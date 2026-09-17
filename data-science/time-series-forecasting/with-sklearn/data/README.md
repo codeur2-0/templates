@@ -45,7 +45,7 @@ intervalle et d'un indicateur de confiance.
 | --- | --- |
 | Nom du dataset | `regional_electricity_load` |
 | Granularité | une ligne = Identifiant unique du couple (origine, horizon) |
-| Nombre d'échantillons (par défaut) | 4,800 |
+| Nombre d'échantillons (par défaut) | 4 800 |
 | Nombre de colonnes | 32 |
 | Cible | `load_mw` || Clé | `sample_id` (unique) || Dimension temporelle | `origin_date` || Formats | parquet, csv |
 | Emplacement | `data/raw/regional_electricity_load.parquet` |

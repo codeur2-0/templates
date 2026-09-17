@@ -78,7 +78,7 @@ Dépendances exactes : [`requirements.txt`](requirements.txt) et [`pyproject.tom
 **Critères de réussite**
 
 {% for criterion in business.success_criteria %}
-- [ ] {{ criterion }}
+- [{{ "x" if ("Mesuré :" in criterion or "Mesurée :" in criterion) else " " }}] {{ criterion }}
 {% endfor %}
 {% if business.constraints %}
 
@@ -101,7 +101,7 @@ métier** (corrélations réalistes, bruit, valeurs manquantes, outliers légiti
 | Propriété | Valeur |
 | --- | --- |
 | Jeu de données | `{{ spec.data.dataset_name }}` |
-| Volume par défaut | {{ "{:,}".format(spec.data.n_samples) }} lignes |
+| Volume par défaut | {{ "{:,}".format(spec.data.n_samples) | replace(",", " ") }} lignes |
 | Formats écrits | {{ spec.data.formats | join(", ") }} |
 | Emplacement | `data/raw/{{ spec.data.dataset_name }}.parquet` (et `.csv`) |
 | Cible | {{ ("`" ~ spec.data.target ~ "`") if spec.data.target else "*aucune* (apprentissage non supervisé)" }} |
@@ -396,6 +396,8 @@ Toute la configuration vit dans `conf/` et est composée par Hydra :
 | `conf/train/default.yaml` | split, epochs, callbacks, noms d'artefacts | `++train.epochs=20`, `train.split.test_size=0.25` |
 | `conf/preprocessing/default.yaml` | imputation, scaling, encodage, features dérivées | `preprocessing.numeric.scaler=robust`, `preprocessing.categorical.encoder=ordinal` |
 | `conf/hydra/local.yaml` | répertoires de sortie Hydra (`outputs/`, `multirun/`) | `hydra.run.dir=outputs/debug` |
+{% if extras.get('root_conf') %}{% for block_name, block in extras['root_conf'].items() %}{% set keys = block | list %}{% set ns = namespace(scalars=[]) %}{% for key in keys %}{% if block[key] is string or block[key] is number %}{% set ns.scalars = ns.scalars + [key] %}{% endif %}{% endfor %}{% set shown = ns.scalars[:2] if ns.scalars else keys[:1] %}| `conf/config.yaml` -> bloc `{{ block_name }}` | Réglages métier de la famille, au même niveau que `mode` et `seed` : {{ keys | length }} clés ({{ keys[:7] | join(', ') }}{% if keys | length > 7 %}, …{% endif %}), chacune commentée dans le fichier — c'est là qu'on change le métier sans toucher au code. | {% for key in shown %}`{{ block_name }}.{{ key }}={{ block[key] }}`{% if not loop.last %}, {% endif %}{% endfor %} |
+{% endfor %}{% endif %}
 
 Règles appliquées :
 
@@ -413,19 +415,51 @@ Après `make all`, le dépôt local contient :
 
 | Chemin | Contenu |
 | --- | --- |
-| `data/raw/{{ spec.data.dataset_name }}.parquet` | jeu de données synthétique ({{ "{:,}".format(spec.data.n_samples) }} lignes) |
-| `data/processed/*.parquet` | splits et données transformées |
+| `data/raw/{{ spec.data.dataset_name }}.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | jeu de données synthétique, {{ "{:,}".format(spec.data.n_samples) | replace(",", " ") }} lignes |
+| `data/raw/generation_metadata.json` | recette de génération : graine, options, empreinte du jeu, fichiers écrits |
+| `data/processed/split_{train,val,test}.parquet` | splits avant transformation (l'évaluation et l'inférence rejouent exactement le même découpage) |
+| `data/processed/features_{X_train,X_val,X_test}.parquet` | matrices prêtes pour le modèle |
 | `artifacts/models/{{ train.artifacts.model_file if train and train.artifacts and train.artifacts.model_file else 'model.joblib' }}` | modèle entraîné |
 | `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
+| `artifacts/models/feature_builder.joblib` | construction des features dérivées, ajustée sur le train uniquement |
 | `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
-| `artifacts/metrics/training_metrics.json` | métriques d'entraînement et d'évaluation |
+| `artifacts/models/resolved_config.json` | configuration Hydra résolue : l'artefact entraîné porte sa recette exacte |
+| `artifacts/metrics/training_metrics.json` | métriques d'entraînement et de validation |
+| `artifacts/metrics/evaluation_metrics.json` | métriques sur le split de test + verdict des seuils |
 | `artifacts/reports/evaluation_report.md` | rapport lisible (métriques, analyse d'erreurs, recommandations) |
-| `artifacts/reports/predictions.csv` | prédictions sur l'échantillon de démonstration |
-| `artifacts/figures/*.png` | {{ "matrice de confusion, courbes ROC/PR, calibration" if spec.metrics.task in ["binary", "multiclass"] else ("résidus, prédit vs réel, importance des features" if spec.metrics.task == "regression" else "figures spécifiques à la tâche") }} |
+{% if spec.metrics.task == "forecasting" %}| `artifacts/reports/per_horizon.csv` | MAPE / MAE / biais / couverture ventilés par horizon |
+| `artifacts/reports/segments.csv` | ventilation par régime extrême, week-end, jour férié, vacances |
+| `artifacts/reports/baselines.csv` | références triviales (persistance, naif saisonnier, moyennes glissantes) |
+| `artifacts/reports/intervals.csv` | bornes, largeur relative et méthode de calibration par prévision |
+| `artifacts/reports/backtest.csv` | replis chronologiques et dispersion de la performance |
+| `artifacts/reports/errors.csv` | pires erreurs, avec leurs références naïves |
+{% elif spec.metrics.task in ["binary", "multiclass"] %}| `artifacts/reports/top_errors.csv` | exemples les plus mal classés, avec leurs probabilités et les features en cause |
+{% elif spec.metrics.task == "anomaly" %}| `artifacts/reports/anomaly_errors.csv` | anomalies les mieux et les moins bien détectées |
+| `artifacts/reports/budget_tradeoff.csv` | précision / rappel en fonction du quota d'alertes |
+| `artifacts/reports/scheme_coverage.csv` | couverture par schéma de fraude |
+{% elif spec.metrics.task == "clustering" %}| `artifacts/reports/k_selection.csv` | critères de choix du nombre de clusters (silhouette, Calinski-Harabasz, Davies-Bouldin, inertie, stabilité) |
+| `artifacts/reports/segment_profiles.csv` | profil métier de chaque cluster |
+| `artifacts/reports/borderline_customers.csv` | individus les moins nettement rattachés à leur cluster |
+{% elif spec.metrics.task == "regression" %}| `artifacts/reports/top_errors.csv` | résidus les plus élevés, avec leurs features |
+| `artifacts/reports/error_by_segment.csv` | erreur ventilée par segment |
+{% endif %}| `artifacts/reports/predictions.csv` | prédictions sur l'échantillon de démonstration |
+| `artifacts/figures/*.png` | {{ "matrice de confusion, courbes ROC/PR, calibration" if spec.metrics.task in ["binary", "multiclass"] else ("résidus, prédit vs réel, importance des features" if spec.metrics.task == "regression" else ("prévision vs réel, erreur par horizon et par régime, couverture d'intervalle, diagnostics de résidus, biais mensuel, stabilité du backtest" if spec.metrics.task == "forecasting" else ("score par transaction, trade-off budget, couverture par schéma" if spec.metrics.task == "anomaly" else ("silhouette, projection ACP, profils de clusters" if spec.metrics.task == "clustering" else "figures spécifiques à la tâche")))) }} |
 | `outputs/<date>/<heure>/` | configuration composée + logs Hydra |
 
-Métrique principale : **`{{ spec.metrics.primary }}`**{% if spec.metrics.min_primary is not none %} (cible de smoke test : ≥ {{ spec.metrics.min_primary }}){% endif %}.
+Métrique principale : **`{{ spec.metrics.primary }}`**{% if spec.metrics.min_primary is not none %} (sens `{{ spec.metrics.direction }}`, seuil de smoke test : {{ "≤" if spec.metrics.direction == "minimize" else "≥" }} {{ spec.metrics.min_primary }}){% endif %}.
 Métriques secondaires : {{ spec.metrics.secondary | join(", ") }}.
+{% if business.measured_results %}
+
+Résultats de l'exécution de référence (`make all`, graine {{ spec.data.seed }}) :
+
+| Indicateur | Valeur mesurée |
+| --- | --- |
+{% for result in business.measured_results %}| {{ result.label }} | **{{ result.value }}** |
+{% endfor %}
+
+Ces valeurs sont reproductibles à l'identique ; elles proviennent du split de test, jamais
+du split d'entraînement, et le détail complet est dans `artifacts/reports/evaluation_report.md`.
+{% endif %}
 
 ---
 
@@ -434,14 +468,43 @@ Métriques secondaires : {{ spec.metrics.secondary | join(", ") }}.
 Tous les notebooks sont **exécutables de bout en bout** (`make notebooks`) et documentés
 cellule par cellule, comme un support de formation pour juniors.
 
+{% set lesson_04 = {
+    "supervised": "Comparaison baseline + modèles candidats en validation croisée, table de métriques, choix argumenté du modèle.",
+    "regression": "Baseline d'abord — sans elle aucune performance n'est interprétable — puis comparaison des algorithmes de la stack, distinction sous-apprentissage / sur-apprentissage par la courbe d'apprentissage, et lecture de l'importance des features.",
+    "clustering": "Choix du nombre de groupes par triangulation (silhouette, Davies-Bouldin, coude d'inertie, taille minimale), comparaison des algorithmes **à k fixé** — la comparaison n'a de sens qu'à structure égale — et stabilité des affectations entre graines.",
+    "anomaly": "Plancher aléatoire (une PR AUC égale à la prévalence) et règles métier existantes comme références à battre, comparaison des détecteurs **à données et budget égaux**, et effet de la contamination : elle déplace le seuil sans changer le classement, d'où le pilotage au budget.",
+    "forecasting": "Plancher naïf mesuré **sur le test** avant tout modèle, comparaison des familles d'algorithmes à protocole identique, thermo-sensibilité apprise lue en MW par °C comme contrôle de cohérence métier, arbitrage modèle unique contre modèle par horizon, grille de réglage et sonde de fuite temporelle.",
+} %}
+{% set lesson_05 = {
+    "supervised": "Entraînement piloté par **objets** (`Trainer`, callbacks) plutôt que par un script monolithique, lecture d'un `TrainingOutcome` (métriques, durée, historique, artefacts), stabilité mesurée sur plusieurs graines avant de conclure, et garde-fou de qualité déclaré en configuration.",
+    "forecasting": "Entraînement avec l'objet de production dans un bac à sable — les artefacts du pipeline ne sont pas touchés —, mesure de l'**optimisme** d'une validation croisée aléatoire face à des replis chronologiques, arbitrage de la perte d'entraînement sur quatre critères plutôt qu'un, et pilotage de l'écart train/validation par la complexité des arbres.",
+} %}
+{% set lesson_06 = {
+    "supervised": "Matrice de confusion, rapport par classe, exemples mal prédits, hypothèses sur les causes et recommandations concrètes.",
+    "regression": "Métriques globales, résidus et couverture de fourchette, détection d'un **biais segmenté** (le modèle se trompe-t-il toujours dans le même sens ?), pires erreurs et leur cause probable, puis recommandations appuyées sur les chiffres observés.",
+    "clustering": "Critères internes, tailles de groupes et confiance des affectations, profilage de chaque segment **en unités brutes** (euros, jours, commandes), validité externe contre un comportement observé après coup, affectations fragiles et groupes dégénérés.",
+    "anomaly": "Évaluation hors échantillon contre le plancher aléatoire, traduction du score en décision de capacité (volume d'alertes -> rappel / précision / lift), couverture **par mode opératoire** — un bon score global peut masquer un schéma non détecté —, puis dissection des fraudes manquées et des fausses alertes.",
+    "forecasting": "Évaluation complète avec l'objet de production (intervalles et backtest compris), ventilation de l'erreur **par horizon, par régime et par mois** — trois lectures qui appellent trois correctifs différents —, lecture des pires journées une par une, autocorrélation des résidus, recalibrage des intervalles et recommandations opérationnelles.",
+} %}
+{% set task_key = spec.metrics.task %}
+{% set l04 = lesson_04[task_key] if task_key in lesson_04 else lesson_04["supervised"] %}
+{% set l05 = lesson_05[task_key] if task_key in lesson_05 else lesson_05["supervised"] %}
+{% set l06 = lesson_06[task_key] if task_key in lesson_06 else lesson_06["supervised"] %}
+{% set title_04 = {"anomaly": "Exploration et comparaison de détecteurs d'anomalies", "forecasting": "Exploration des modèles de prévision"} %}
+{% set title_05 = {"forecasting": "Entraînement et validation temporelle"} %}
+{% set title_06 = {"clustering": "Analyse de la segmentation et recommandations", "anomaly": "Analyse des erreurs et recommandations"} %}
+{% set t04 = title_04[task_key] if task_key in title_04 else "Exploration et comparaison de modèles" %}
+{% set t05 = title_05[task_key] if task_key in title_05 else "Entraînement dans les conditions de production" %}
+{% set t06 = title_06[task_key] if task_key in title_06 else "Analyse d'erreurs et recommandations" %}
+
 | Notebook | Ce qu'on y apprend |
 | --- | --- |
-| `01_exploratory_analysis.ipynb` | EDA structurée : types, manquants, distributions univariées et bivariées, corrélations, outliers, puis **10-15 insights** actionnables. |
-| `02_data_validation_and_schemas.ipynb` | Pourquoi des contrats de données : définition d'un `DataFrameModel` Pandera, validation réussie, puis **corruption volontaire** pour observer l'échec et le message d'erreur. |
-| `03_preprocessing_and_features.ipynb` | Construction du pipeline : imputation, clipping, scaling, encodage, features dérivées, et démonstration de l'absence de fuite (fit sur train uniquement). |
-| `04_model_exploration.ipynb` | Comparaison baseline + modèles candidats en validation croisée, table de métriques, choix argumenté du modèle. |
-| `05_training_and_tracking.ipynb` | Entraînement instrumenté : callbacks, courbes d'apprentissage, métriques suivies, sauvegarde des artefacts. |
-| `06_evaluation_and_error_analysis.ipynb` | **Analyse d'erreurs** : matrice de confusion, rapport par classe, exemples mal prédits, hypothèses sur les causes et recommandations concrètes. |
+| `01_eda.ipynb` | EDA structurée : types, manquants, distributions univariées et bivariées, corrélations, outliers, puis **10-15 insights** actionnables. |
+| `02_validation.ipynb` | Pourquoi des contrats de données : définition d'un `DataFrameModel` Pandera, validation réussie, puis **corruption volontaire** pour observer l'échec et le message d'erreur. |
+| `03_preprocessing.ipynb` | Construction du pipeline : imputation, clipping, scaling, encodage, features dérivées, et démonstration de l'absence de fuite (fit sur train uniquement). |
+| `04_model_exploration.ipynb` | *{{ t04 }}* — {{ l04 }} |
+| `05_training.ipynb` | *{{ t05 }}* — {{ l05 }} |
+| `06_error_analysis.ipynb` | *{{ t06 }}* — {{ l06 }} |
 
 ---
 
@@ -463,6 +526,7 @@ Ce qui est testé :
 | `tests/test_preprocessing.py` | Transformers (fit/transform), absence de fuite, cohérence des colonnes en sortie, persistance. |
 | `tests/test_models.py` | Contrat `BaseModel` : fit → predict{% if stack.supports_proba %} → predict_proba{% endif %}, shape, déterminisme, sauvegarde/rechargement, garde-fous (modèle non entraîné, colonnes manquantes). |
 | `tests/test_training.py` | Le `Trainer` produit des métriques, des callbacks fonctionnent (early stopping), les artefacts sont écrits. |
+| `tests/test_pipeline.py` | Bout en bout : chaque pipeline (`data`, `train`, `evaluation`, `inference`) s'exécute sur une configuration réduite, écrit ses artefacts et refuse une entrée invalide. |
 
 Les tests utilisent des **fixtures légères** (`tests/conftest.py`) : petit dataset synthétique
 et configuration réduite, donc exécution en quelques secondes.

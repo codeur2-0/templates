@@ -44,6 +44,44 @@ def sample_frame(rng: np.random.Generator) -> pd.DataFrame:
     )
 
 
+#: Clés de paramètres d'une recette qui désignent des colonnes d'entrée.
+_SOURCE_KEYS: tuple[str, ...] = (
+    "column",
+    "left",
+    "right",
+    "on",
+    "by",
+    "values",
+    "columns",
+    "numerator",
+    "denominator",
+)
+
+
+def _recipe_sources(builder: FeatureBuilder, output: str) -> list[str]:
+    """Return the input columns a recipe reads, so a missing value can be traced to its origin.
+
+    Args:
+        builder: Fitted feature builder.
+        output: Name of the derived column.
+
+    Returns:
+        The declared input columns, empty when the recipe is unknown or reads no column.
+    """
+    for recipe in builder.recipes:
+        if recipe.name != output:
+            continue
+        sources: list[str] = []
+        for key in _SOURCE_KEYS:
+            value = recipe.params.get(key)
+            if isinstance(value, str):
+                sources.append(value)
+            elif isinstance(value, (list, tuple)):
+                sources.extend(str(item) for item in value)
+        return [source for source in sources if source]
+    return []
+
+
 class TestFeatureBuilder:
     """Construction déclarative des features dérivées."""
 
@@ -56,7 +94,21 @@ class TestFeatureBuilder:
         enriched = feature_builder.transform(split_frames.train)
         for name in feature_builder.output_names:
             assert name in enriched.columns
-            assert enriched[name].notna().all(), f"la feature '{name}' contient des NaN"
+            missing = enriched[name].isna()
+            if not missing.any():
+                continue
+            # Une feature dérivée hérite légitimement des manquants de ses entrées (une panne de
+            # capteur se propage à tout ce qui est calculé à partir de la colonne concernée). Ce
+            # qu'elle ne doit jamais faire, c'est en **inventer** : chaque NaN est donc tracé
+            # jusqu'aux colonnes sources de la recette.
+            sources = _recipe_sources(feature_builder, name)
+            assert sources, f"la feature '{name}' contient des NaN sans entrée manquante"
+            inherited = enriched[sources].isna().any(axis="columns")
+            unexpected = missing & ~inherited
+            assert not unexpected.any(), (
+                f"la feature '{name}' invente {int(unexpected.sum())} NaN absents de ses "
+                f"entrées {sources}"
+            )
 
     def test_transform_preserves_original_columns(
         self, feature_builder: FeatureBuilder, split_frames: Any

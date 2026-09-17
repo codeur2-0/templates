@@ -96,11 +96,11 @@ compatible avec leur capacité, en maximisant la fraude capturée.
 
 **Critères de réussite**
 
-- [ ] PR AUC ≥ 0.42 sur le split de test hors échantillon (prévalence ~1,8 % : une PR AUC de 0,018 serait un score aléatoire). Mesuré : 0,67 avec la stack scikit-learn.
-- [ ] Rappel ≥ 0.45 au budget d'investigation retenu (2 % des transactions, soit la capacité réelle des analystes). Mesuré : 0,61.
-- [ ] Précision au budget ≥ 0.50 : plus d'une transaction alertée sur deux est une fraude confirmée. Mesuré : 0,71.
-- [ ] Lift au budget ≥ 20x par rapport à la prévalence (le classement concentre réellement la fraude). Mesuré : 30x.
-- [ ] Rappel par mode opératoire ≥ 0.30 pour au moins 3 schémas sur 4. Mesuré : identité synthétique 0,85, carte absente 0,65, prise de compte 0,60.
+- [x] PR AUC ≥ 0.42 sur le split de test hors échantillon (prévalence ~1,8 % : une PR AUC de 0,018 serait un score aléatoire). Mesuré : 0,67 avec la stack scikit-learn.
+- [x] Rappel ≥ 0.45 au budget d'investigation retenu (2 % des transactions, soit la capacité réelle des analystes). Mesuré : 0,61.
+- [x] Précision au budget ≥ 0.50 : plus d'une transaction alertée sur deux est une fraude confirmée. Mesuré : 0,71.
+- [x] Lift au budget ≥ 20x par rapport à la prévalence (le classement concentre réellement la fraude). Mesuré : 30x.
+- [x] Rappel par mode opératoire ≥ 0.30 pour au moins 3 schémas sur 4. Mesuré : identité synthétique 0,85, carte absente 0,65, prise de compte 0,60.
 - [ ] Au moins un schéma de fraude sur quatre reste partiellement non couvert (fraude amicale) : c'est le plafond structurel d'un détecteur transactionnel, documenté comme tel et non comme un échec.
 - [ ] Aucune fuite : les colonnes de diagnostic (is_fraud, fraud_scheme) sont des métadonnées, jamais des features.
 - [ ] ROC AUC ≥ 0.90 : le score ordonne correctement les fraudes et les transactions légitimes.
@@ -125,7 +125,7 @@ métier** (corrélations réalistes, bruit, valeurs manquantes, outliers légiti
 | Propriété | Valeur |
 | --- | --- |
 | Jeu de données | `payment_transactions` |
-| Volume par défaut | 12,000 lignes |
+| Volume par défaut | 12 000 lignes |
 | Formats écrits | parquet, csv |
 | Emplacement | `data/raw/payment_transactions.parquet` (et `.csv`) |
 | Cible | *aucune* (apprentissage non supervisé) |
@@ -438,6 +438,7 @@ Toute la configuration vit dans `conf/` et est composée par Hydra :
 | `conf/train/default.yaml` | split, epochs, callbacks, noms d'artefacts | `++train.epochs=20`, `train.split.test_size=0.25` |
 | `conf/preprocessing/default.yaml` | imputation, scaling, encodage, features dérivées | `preprocessing.numeric.scaler=robust`, `preprocessing.categorical.encoder=ordinal` |
 | `conf/hydra/local.yaml` | répertoires de sortie Hydra (`outputs/`, `multirun/`) | `hydra.run.dir=outputs/debug` |
+| `conf/config.yaml` -> bloc `fraud_detection` | Réglages métier de la famille, au même niveau que `mode` et `seed` : 3 clés (threshold, budget_rate, review_risk_level), chacune commentée dans le fichier — c'est là qu'on change le métier sans toucher au code. | `fraud_detection.budget_rate=0.02`, `fraud_detection.review_risk_level=modéré` |
 
 Règles appliquées :
 
@@ -455,18 +456,26 @@ Après `make all`, le dépôt local contient :
 
 | Chemin | Contenu |
 | --- | --- |
-| `data/raw/payment_transactions.parquet` | jeu de données synthétique (12,000 lignes) |
-| `data/processed/*.parquet` | splits et données transformées |
+| `data/raw/payment_transactions.parquet` (+ `csv`) | jeu de données synthétique, 12 000 lignes |
+| `data/raw/generation_metadata.json` | recette de génération : graine, options, empreinte du jeu, fichiers écrits |
+| `data/processed/split_{train,val,test}.parquet` | splits avant transformation (l'évaluation et l'inférence rejouent exactement le même découpage) |
+| `data/processed/features_{X_train,X_val,X_test}.parquet` | matrices prêtes pour le modèle |
 | `artifacts/models/model.joblib` | modèle entraîné |
 | `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
+| `artifacts/models/feature_builder.joblib` | construction des features dérivées, ajustée sur le train uniquement |
 | `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
-| `artifacts/metrics/training_metrics.json` | métriques d'entraînement et d'évaluation |
+| `artifacts/models/resolved_config.json` | configuration Hydra résolue : l'artefact entraîné porte sa recette exacte |
+| `artifacts/metrics/training_metrics.json` | métriques d'entraînement et de validation |
+| `artifacts/metrics/evaluation_metrics.json` | métriques sur le split de test + verdict des seuils |
 | `artifacts/reports/evaluation_report.md` | rapport lisible (métriques, analyse d'erreurs, recommandations) |
+| `artifacts/reports/anomaly_errors.csv` | anomalies les mieux et les moins bien détectées |
+| `artifacts/reports/budget_tradeoff.csv` | précision / rappel en fonction du quota d'alertes |
+| `artifacts/reports/scheme_coverage.csv` | couverture par schéma de fraude |
 | `artifacts/reports/predictions.csv` | prédictions sur l'échantillon de démonstration |
-| `artifacts/figures/*.png` | figures spécifiques à la tâche |
+| `artifacts/figures/*.png` | score par transaction, trade-off budget, couverture par schéma |
 | `outputs/<date>/<heure>/` | configuration composée + logs Hydra |
 
-Métrique principale : **`pr_auc`** (cible de smoke test : ≥ 0.42).
+Métrique principale : **`pr_auc`** (sens `maximize`, seuil de smoke test : ≥ 0.42).
 Métriques secondaires : roc_auc, recall_at_budget, precision_at_budget, f1, precision, recall.
 
 ---
@@ -476,14 +485,15 @@ Métriques secondaires : roc_auc, recall_at_budget, precision_at_budget, f1, pre
 Tous les notebooks sont **exécutables de bout en bout** (`make notebooks`) et documentés
 cellule par cellule, comme un support de formation pour juniors.
 
+
 | Notebook | Ce qu'on y apprend |
 | --- | --- |
-| `01_exploratory_analysis.ipynb` | EDA structurée : types, manquants, distributions univariées et bivariées, corrélations, outliers, puis **10-15 insights** actionnables. |
-| `02_data_validation_and_schemas.ipynb` | Pourquoi des contrats de données : définition d'un `DataFrameModel` Pandera, validation réussie, puis **corruption volontaire** pour observer l'échec et le message d'erreur. |
-| `03_preprocessing_and_features.ipynb` | Construction du pipeline : imputation, clipping, scaling, encodage, features dérivées, et démonstration de l'absence de fuite (fit sur train uniquement). |
-| `04_model_exploration.ipynb` | Comparaison baseline + modèles candidats en validation croisée, table de métriques, choix argumenté du modèle. |
-| `05_training_and_tracking.ipynb` | Entraînement instrumenté : callbacks, courbes d'apprentissage, métriques suivies, sauvegarde des artefacts. |
-| `06_evaluation_and_error_analysis.ipynb` | **Analyse d'erreurs** : matrice de confusion, rapport par classe, exemples mal prédits, hypothèses sur les causes et recommandations concrètes. |
+| `01_eda.ipynb` | EDA structurée : types, manquants, distributions univariées et bivariées, corrélations, outliers, puis **10-15 insights** actionnables. |
+| `02_validation.ipynb` | Pourquoi des contrats de données : définition d'un `DataFrameModel` Pandera, validation réussie, puis **corruption volontaire** pour observer l'échec et le message d'erreur. |
+| `03_preprocessing.ipynb` | Construction du pipeline : imputation, clipping, scaling, encodage, features dérivées, et démonstration de l'absence de fuite (fit sur train uniquement). |
+| `04_model_exploration.ipynb` | *Exploration et comparaison de détecteurs d'anomalies* — Plancher aléatoire (une PR AUC égale à la prévalence) et règles métier existantes comme références à battre, comparaison des détecteurs **à données et budget égaux**, et effet de la contamination : elle déplace le seuil sans changer le classement, d'où le pilotage au budget. |
+| `05_training.ipynb` | *Entraînement dans les conditions de production* — Entraînement piloté par **objets** (`Trainer`, callbacks) plutôt que par un script monolithique, lecture d'un `TrainingOutcome` (métriques, durée, historique, artefacts), stabilité mesurée sur plusieurs graines avant de conclure, et garde-fou de qualité déclaré en configuration. |
+| `06_error_analysis.ipynb` | *Analyse des erreurs et recommandations* — Évaluation hors échantillon contre le plancher aléatoire, traduction du score en décision de capacité (volume d'alertes -> rappel / précision / lift), couverture **par mode opératoire** — un bon score global peut masquer un schéma non détecté —, puis dissection des fraudes manquées et des fausses alertes. |
 
 ---
 
@@ -505,6 +515,7 @@ Ce qui est testé :
 | `tests/test_preprocessing.py` | Transformers (fit/transform), absence de fuite, cohérence des colonnes en sortie, persistance. |
 | `tests/test_models.py` | Contrat `BaseModel` : fit → predict → predict_proba, shape, déterminisme, sauvegarde/rechargement, garde-fous (modèle non entraîné, colonnes manquantes). |
 | `tests/test_training.py` | Le `Trainer` produit des métriques, des callbacks fonctionnent (early stopping), les artefacts sont écrits. |
+| `tests/test_pipeline.py` | Bout en bout : chaque pipeline (`data`, `train`, `evaluation`, `inference`) s'exécute sur une configuration réduite, écrit ses artefacts et refuse une entrée invalide. |
 
 Les tests utilisent des **fixtures légères** (`tests/conftest.py`) : petit dataset synthétique
 et configuration réduite, donc exécution en quelques secondes.

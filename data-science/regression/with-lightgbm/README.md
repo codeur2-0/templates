@@ -113,7 +113,7 @@ métier** (corrélations réalistes, bruit, valeurs manquantes, outliers légiti
 | Propriété | Valeur |
 | --- | --- |
 | Jeu de données | `real_estate_prices` |
-| Volume par défaut | 8,000 lignes |
+| Volume par défaut | 8 000 lignes |
 | Formats écrits | parquet, csv |
 | Emplacement | `data/raw/real_estate_prices.parquet` (et `.csv`) |
 | Cible | `price_eur` |
@@ -421,6 +421,7 @@ Toute la configuration vit dans `conf/` et est composée par Hydra :
 | `conf/train/default.yaml` | split, epochs, callbacks, noms d'artefacts | `++train.epochs=20`, `train.split.test_size=0.25` |
 | `conf/preprocessing/default.yaml` | imputation, scaling, encodage, features dérivées | `preprocessing.numeric.scaler=robust`, `preprocessing.categorical.encoder=ordinal` |
 | `conf/hydra/local.yaml` | répertoires de sortie Hydra (`outputs/`, `multirun/`) | `hydra.run.dir=outputs/debug` |
+| `conf/config.yaml` -> bloc `estimation` | Réglages métier de la famille, au même niveau que `mode` et `seed` : 4 clés (tolerance_pct, depth_column, unit_column, min_market_depth), chacune commentée dans le fichier — c'est là qu'on change le métier sans toucher au code. | `estimation.tolerance_pct=10.0`, `estimation.depth_column=recent_sales_1km` |
 
 Règles appliquées :
 
@@ -438,18 +439,25 @@ Après `make all`, le dépôt local contient :
 
 | Chemin | Contenu |
 | --- | --- |
-| `data/raw/real_estate_prices.parquet` | jeu de données synthétique (8,000 lignes) |
-| `data/processed/*.parquet` | splits et données transformées |
+| `data/raw/real_estate_prices.parquet` (+ `csv`) | jeu de données synthétique, 8 000 lignes |
+| `data/raw/generation_metadata.json` | recette de génération : graine, options, empreinte du jeu, fichiers écrits |
+| `data/processed/split_{train,val,test}.parquet` | splits avant transformation (l'évaluation et l'inférence rejouent exactement le même découpage) |
+| `data/processed/features_{X_train,X_val,X_test}.parquet` | matrices prêtes pour le modèle |
 | `artifacts/models/model.joblib` | modèle entraîné |
 | `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
+| `artifacts/models/feature_builder.joblib` | construction des features dérivées, ajustée sur le train uniquement |
 | `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
-| `artifacts/metrics/training_metrics.json` | métriques d'entraînement et d'évaluation |
+| `artifacts/models/resolved_config.json` | configuration Hydra résolue : l'artefact entraîné porte sa recette exacte |
+| `artifacts/metrics/training_metrics.json` | métriques d'entraînement et de validation |
+| `artifacts/metrics/evaluation_metrics.json` | métriques sur le split de test + verdict des seuils |
 | `artifacts/reports/evaluation_report.md` | rapport lisible (métriques, analyse d'erreurs, recommandations) |
+| `artifacts/reports/top_errors.csv` | résidus les plus élevés, avec leurs features |
+| `artifacts/reports/error_by_segment.csv` | erreur ventilée par segment |
 | `artifacts/reports/predictions.csv` | prédictions sur l'échantillon de démonstration |
 | `artifacts/figures/*.png` | résidus, prédit vs réel, importance des features |
 | `outputs/<date>/<heure>/` | configuration composée + logs Hydra |
 
-Métrique principale : **`rmse`** (cible de smoke test : ≥ 90000.0).
+Métrique principale : **`rmse`** (sens `minimize`, seuil de smoke test : ≤ 90000.0).
 Métriques secondaires : mae, r2, mape, smape, max_error.
 
 ---
@@ -459,14 +467,15 @@ Métriques secondaires : mae, r2, mape, smape, max_error.
 Tous les notebooks sont **exécutables de bout en bout** (`make notebooks`) et documentés
 cellule par cellule, comme un support de formation pour juniors.
 
+
 | Notebook | Ce qu'on y apprend |
 | --- | --- |
-| `01_exploratory_analysis.ipynb` | EDA structurée : types, manquants, distributions univariées et bivariées, corrélations, outliers, puis **10-15 insights** actionnables. |
-| `02_data_validation_and_schemas.ipynb` | Pourquoi des contrats de données : définition d'un `DataFrameModel` Pandera, validation réussie, puis **corruption volontaire** pour observer l'échec et le message d'erreur. |
-| `03_preprocessing_and_features.ipynb` | Construction du pipeline : imputation, clipping, scaling, encodage, features dérivées, et démonstration de l'absence de fuite (fit sur train uniquement). |
-| `04_model_exploration.ipynb` | Comparaison baseline + modèles candidats en validation croisée, table de métriques, choix argumenté du modèle. |
-| `05_training_and_tracking.ipynb` | Entraînement instrumenté : callbacks, courbes d'apprentissage, métriques suivies, sauvegarde des artefacts. |
-| `06_evaluation_and_error_analysis.ipynb` | **Analyse d'erreurs** : matrice de confusion, rapport par classe, exemples mal prédits, hypothèses sur les causes et recommandations concrètes. |
+| `01_eda.ipynb` | EDA structurée : types, manquants, distributions univariées et bivariées, corrélations, outliers, puis **10-15 insights** actionnables. |
+| `02_validation.ipynb` | Pourquoi des contrats de données : définition d'un `DataFrameModel` Pandera, validation réussie, puis **corruption volontaire** pour observer l'échec et le message d'erreur. |
+| `03_preprocessing.ipynb` | Construction du pipeline : imputation, clipping, scaling, encodage, features dérivées, et démonstration de l'absence de fuite (fit sur train uniquement). |
+| `04_model_exploration.ipynb` | *Exploration et comparaison de modèles* — Baseline d'abord — sans elle aucune performance n'est interprétable — puis comparaison des algorithmes de la stack, distinction sous-apprentissage / sur-apprentissage par la courbe d'apprentissage, et lecture de l'importance des features. |
+| `05_training.ipynb` | *Entraînement dans les conditions de production* — Entraînement piloté par **objets** (`Trainer`, callbacks) plutôt que par un script monolithique, lecture d'un `TrainingOutcome` (métriques, durée, historique, artefacts), stabilité mesurée sur plusieurs graines avant de conclure, et garde-fou de qualité déclaré en configuration. |
+| `06_error_analysis.ipynb` | *Analyse d'erreurs et recommandations* — Métriques globales, résidus et couverture de fourchette, détection d'un **biais segmenté** (le modèle se trompe-t-il toujours dans le même sens ?), pires erreurs et leur cause probable, puis recommandations appuyées sur les chiffres observés. |
 
 ---
 
@@ -488,6 +497,7 @@ Ce qui est testé :
 | `tests/test_preprocessing.py` | Transformers (fit/transform), absence de fuite, cohérence des colonnes en sortie, persistance. |
 | `tests/test_models.py` | Contrat `BaseModel` : fit → predict → predict_proba, shape, déterminisme, sauvegarde/rechargement, garde-fous (modèle non entraîné, colonnes manquantes). |
 | `tests/test_training.py` | Le `Trainer` produit des métriques, des callbacks fonctionnent (early stopping), les artefacts sont écrits. |
+| `tests/test_pipeline.py` | Bout en bout : chaque pipeline (`data`, `train`, `evaluation`, `inference`) s'exécute sur une configuration réduite, écrit ses artefacts et refuse une entrée invalide. |
 
 Les tests utilisent des **fixtures légères** (`tests/conftest.py`) : petit dataset synthétique
 et configuration réduite, donc exécution en quelques secondes.

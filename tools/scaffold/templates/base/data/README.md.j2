@@ -26,7 +26,7 @@
 | --- | --- |
 | Nom du dataset | `{{ spec.data.dataset_name }}` |
 | Granularité | {{ ("une ligne = " ~ (spec.data.columns | selectattr('role', 'equalto', 'identifier') | first).description) if spec.data.columns | selectattr('role', 'equalto', 'identifier') | list else "une ligne = une observation" }} |
-| Nombre d'échantillons (par défaut) | {{ "{:,}".format(spec.data.n_samples) }} |
+| Nombre d'échantillons (par défaut) | {{ "{:,}".format(spec.data.n_samples) | replace(",", " ") }} |
 | Nombre de colonnes | {{ spec.data.columns | length }} |
 {% if spec.data.target %}| Cible | `{{ spec.data.target }}` |{% endif %}
 {% if spec.data.positive_rate is not none %}| Taux de classe positive | ~{{ "%.1f" | format(spec.data.positive_rate * 100) }} % |{% endif %}

@@ -210,23 +210,56 @@ def _max_error(inputs: MetricInputs) -> float:
 
 
 def _mase(inputs: MetricInputs) -> float:
-    """Mean absolute scaled error, using the naive forecast as the denominator.
+    """Mean absolute scaled error: model error divided by a naive reference error.
 
-    The naive forecast is provided through ``inputs.extra['naive_pred']``; when it is absent a
-    seasonal-naive proxy (shift of the ground truth) is used.
+    The scale is the mean absolute error of a **naive reference** on the same rows, which makes the
+    metric dimensionless and comparable across series, periods and horizons: MASE < 1 means the
+    model beats that reference, MASE > 1 means the reference was better. This is the only forecast
+    metric that answers the question the business actually asks — "is this worth more than copying
+    last week?".
+
+    The reference is supplied through ``inputs.extra['naive_pred']`` (recommended: the seasonal
+    naive, i.e. the same weekday one week earlier, which is what an operator would do by hand).
+    When it is absent a lagged-truth proxy is built from ``inputs.extra['seasonality']`` (default
+    1), which is only sensible on a chronologically ordered, single-series frame.
+
+    Note on the variant: the textbook MASE scales by the *in-sample* naive error. Scaling by the
+    naive error *on the evaluated rows* is used here on purpose — it keeps the comparison honest on
+    a period the model never saw, where the naive reference is also stronger or weaker than usual.
+
+    Args:
+        inputs: Metric payload (``y_true``, ``y_pred`` and optional ``extra``).
+
+    Returns:
+        The scaled error, or NaN when the reference is missing, misaligned or exact.
     """
     truth = np.asarray(inputs.y_true, dtype="float64")
     predicted = np.asarray(inputs.y_pred, dtype="float64")
-    naive = (inputs.extra or {}).get("naive_pred")
+    extra = inputs.extra or {}
+    naive = extra.get("naive_pred")
     if naive is None:
-        season = int((inputs.extra or {}).get("seasonality", 1))
-        naive = np.concatenate([truth[:season], truth[:-season]]) if len(truth) > season else truth
+        season = int(extra.get("seasonality", 1))
+        if len(truth) <= season:
+            logger.warning(
+                "mase undefined: {} rows are not enough for a lagged reference (seasonality={})",
+                len(truth),
+                season,
+            )
+            return float("nan")
+        naive = np.concatenate([truth[:season], truth[:-season]])
         predicted = predicted[-len(naive) :]
         truth = truth[-len(naive) :]
     naive = np.asarray(naive, dtype="float64")
-    scale = np.mean(np.abs(np.diff(naive))) if len(naive) > 1 else 0.0
+    if naive.shape != truth.shape:
+        logger.warning(
+            "mase undefined: naive reference shape {} does not match ground truth shape {}",
+            naive.shape,
+            truth.shape,
+        )
+        return float("nan")
+    scale = float(np.mean(np.abs(truth - naive)))
     if scale <= 1e-8:
-        logger.warning("mase undefined: naive forecast has no variation")
+        logger.warning("mase undefined: the naive reference is exact, so the scale is zero")
         return float("nan")
     return float(np.mean(np.abs(truth - predicted)) / scale)
 

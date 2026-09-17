@@ -310,13 +310,29 @@ class TestDatasetSplitter:
         )
         pd.testing.assert_frame_equal(first.train, second.train)
 
-    def test_different_seed_changes_the_split(
+    def test_seed_effects_match_the_split_strategy(
         self, raw_dataset: pd.DataFrame, app_config: Any
     ) -> None:
-        """Une graine différente produit un split différent (le seed est bien utilisé)."""
-        first = DatasetSplitter.from_config(app_config.model_dump(), seed=1).split(raw_dataset)
+        """La graine pilote le tirage aléatoire — et ne doit rien changer à un split chronologique.
+
+        Les deux comportements sont des contrats, pas des détails d'implémentation :
+
+        * un split **aléatoire** doit dépendre de la graine, sinon le paramètre est décoratif et
+          deux exécutions d'un notebook ne sont pas reproductibles de la façon annoncée ;
+        * un split **temporel** doit en être indépendant, parce que la frontière suit l'ordre des
+          horodatages : la déplacer au hasard mélangerait le passé et le futur et casserait
+          l'antériorité de l'information, ce qui est la fuite la plus coûteuse en prévision.
+
+        Le test lit la stratégie réellement configurée au lieu de supposer l'une des deux.
+        """
+        splitter = DatasetSplitter.from_config(app_config.model_dump(), seed=1)
+        first = splitter.split(raw_dataset)
         second = DatasetSplitter.from_config(app_config.model_dump(), seed=2).split(raw_dataset)
-        assert not first.train.equals(second.train)
+        if splitter.time_based and splitter.time_column:
+            pd.testing.assert_frame_equal(first.train, second.train)
+            pd.testing.assert_frame_equal(first.test, second.test)
+        else:
+            assert not first.train.equals(second.train)
 
     def test_incoherent_sizes_are_rejected(self) -> None:
         """Des tailles incohérentes doivent être refusées à la construction."""

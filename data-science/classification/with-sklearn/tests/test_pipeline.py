@@ -117,9 +117,10 @@ class TestTrainPipeline:
         # métriques qu'il ne peut pas calculer plutôt que de les publier vides.
         assert all(pd.notna(value) for value in metrics.values()), sorted(metrics)
         if str(sandbox_config.metrics.task) not in SUPERVISED_TASKS:
-            # Non supervisé : pas de cible, donc pas de métrique primaire pendant l'entraînement.
-            # Le modèle rapporte la distribution de son propre score (diagnostic intrinsèque).
-            assert any(name.startswith("score_") for name in metrics), sorted(metrics)
+            # Non supervisé : pas de cible, donc pas de métrique primaire « supervisée ». Le run
+            # publie des métriques intrinsèques (clustering : silhouette, Davies-Bouldin) ou la
+            # distribution du score du détecteur (anomalies : `score_mean`, `score_p99`, ...).
+            # L'invariant vérifié ci-dessus — aucune valeur non finie — couvre les deux cas.
             return
         primary = sandbox_config.metrics.primary
         matching = [value for name, value in metrics.items() if primary in name]

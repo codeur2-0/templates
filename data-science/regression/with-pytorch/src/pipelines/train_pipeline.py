@@ -9,7 +9,9 @@ Sequence executed by ``mode=train`` (and by ``make train``):
 5. validate the model-ready matrices (``ProcessedDataSchema``),
 6. persist the splits (Parquet) so that evaluation and inference reuse exactly the same rows,
 7. build the model, train it with callbacks, compute validation metrics,
-8. persist the model, the preprocessing pipeline, the model card and the metrics.
+8. persist the model, the preprocessing pipeline, the model card, the metrics and the **resolved
+   configuration** (``artifacts/models/resolved_config.json``), so that a trained artefact carries
+   the exact Hydra overrides, seed and family-specific blocks that produced it.
 
 The test split is deliberately **never** seen by the trainer: it is only used by
 :class:`src.pipelines.evaluation_pipeline.EvaluationPipeline`.
@@ -17,6 +19,7 @@ The test split is deliberately **never** seen by the trainer: it is only used by
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -39,6 +42,7 @@ from src.models import build_model
 from src.pipelines.base import BasePipeline, PipelineResult
 from src.preprocessing.pipelines import PreprocessingPipeline
 from src.training.trainer import Trainer, TrainingData
+from src.utils.io import write_json
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -88,6 +92,7 @@ class TrainPipeline(BasePipeline):
 
         preprocessing_artifact = self._save_preprocessing(matrices["pipeline"])
         builder_artifact = self._save_feature_builder(feature_builder)
+        config_artifact = self._save_config(config_dict)
         result = PipelineResult(name=self.name)
         result.metrics = {
             key: float(value)
@@ -99,6 +104,7 @@ class TrainPipeline(BasePipeline):
             *outcome.artifacts.values(),
             str(preprocessing_artifact),
             str(builder_artifact),
+            str(config_artifact),
         ]:
             result.add_artifact(path)
         result.messages.append(
@@ -234,6 +240,26 @@ class TrainPipeline(BasePipeline):
         """Persist the fitted preprocessing pipeline."""
         artifact_name = str(self.config.train.artifacts.pipeline_file)
         return pipeline.save(self.paths.models_dir / artifact_name)
+
+    def _save_config(self, config_dict: dict[str, Any]) -> Path:
+        """Persist the resolved configuration next to the model artefacts.
+
+        A trained model is reproducible only if the configuration that produced it is stored with
+        it: Hydra overrides, seeds and family-specific blocks are otherwise lost between two runs,
+        and nobody can tell whether an artefact matches the code reading it. Downstream components
+        (evaluator, predictor, reports) read this snapshot instead of re-composing Hydra, which
+        keeps them usable outside ``src.main`` — in a notebook, a test or a batch job.
+
+        Args:
+            config_dict: Resolved configuration mapping (``AppConfig.model_dump``).
+
+        Returns:
+            The written path.
+        """
+        path = Path(self.paths.models_dir) / "resolved_config.json"
+        write_json(path, config_dict)
+        logger.info("Resolved configuration saved to {}", path)
+        return path
 
     def _save_feature_builder(self, feature_builder: FeatureBuilder) -> Any:
         """Persist the fitted feature builder (inference must rebuild the same features)."""

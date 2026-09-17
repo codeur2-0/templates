@@ -42,7 +42,7 @@ compatible avec leur capacité, en maximisant la fraude capturée.
 | --- | --- |
 | Nom du dataset | `payment_transactions` |
 | Granularité | une ligne = Identifiant unique de la transaction |
-| Nombre d'échantillons (par défaut) | 12,000 |
+| Nombre d'échantillons (par défaut) | 12 000 |
 | Nombre de colonnes | 22 |
 | Taux de classe positive | ~1.8 % || Clé | `transaction_id` (unique) || Dimension temporelle | `occurred_at` || Formats | parquet, csv |
 | Emplacement | `data/raw/payment_transactions.parquet` |

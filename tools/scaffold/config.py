@@ -152,6 +152,20 @@ class DataSpec(BaseModel):
         return [c.name for c in self.columns]
 
 
+class MeasuredResult(BaseModel):
+    """One outcome measured by the reference run, reported in the README.
+
+    Attributes:
+        label: What was measured, in the reader's vocabulary.
+        value: The measured value, already formatted for display (unit included).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    value: str
+
+
 class BusinessSpec(BaseModel):
     """The concrete business use case demonstrated by the project."""
 
@@ -166,6 +180,10 @@ class BusinessSpec(BaseModel):
     success_criteria: list[str] = Field(min_length=1)
     cadence: str = Field(default="Batch quotidien", description="Serving / refresh cadence.")
     constraints: list[str] = Field(default_factory=list)
+    measured_results: list[MeasuredResult] = Field(
+        default_factory=list,
+        description="Reference-run outcomes rendered as a table in README section 12.",
+    )
 
 
 class ModelSpec(BaseModel):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +55,25 @@ def _clean(source: str) -> str:
     return dedented.rstrip()
 
 
+def _stable_cell_id(stem: str, index: int, source: str) -> str:
+    """Return a deterministic cell identifier.
+
+    ``nbformat`` generates a random id per cell, so rebuilding an unchanged notebook produced a
+    diff on every single cell. Deriving the id from the notebook name, the cell position and the
+    cell source keeps rebuilds byte-identical: a diff then shows a real content change only.
+
+    Args:
+        stem: Notebook file name without extension.
+        index: Position of the cell inside the notebook.
+        source: Cell source.
+
+    Returns:
+        An 8-character hexadecimal identifier, unique within the notebook.
+    """
+    digest = hashlib.sha1(f"{stem}|{index}|{source}".encode()).hexdigest()
+    return digest[:8]
+
+
 def write_notebook(path: Path, cells: Sequence[NotebookNode], *, kernel: str = "python3") -> Path:
     """Write a notebook file.
 
@@ -62,11 +82,17 @@ def write_notebook(path: Path, cells: Sequence[NotebookNode], *, kernel: str = "
         cells: Ordered cells.
         kernel: Kernel name declared in the metadata.
 
+    Cell ids are derived from the content, not randomised, so that a rebuild of an unchanged
+    notebook is byte-identical.
+
     Returns:
         The written path.
     """
     notebook = nbformat.v4.new_notebook()
     notebook["cells"] = list(cells)
+    stem = Path(path).stem
+    for index, cell in enumerate(notebook["cells"]):
+        cell["id"] = _stable_cell_id(stem, index, str(cell.get("source", "")))
     notebook["metadata"] = {
         "kernelspec": {"display_name": "Python 3", "language": "python", "name": kernel},
         "language_info": {"name": "python", "version": "3.11"},

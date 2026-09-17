@@ -125,6 +125,39 @@ def _isolation_forest(**params: Any) -> Any:
     return IsolationForest(**params)
 
 
+def _one_class_svm(**params: Any) -> Any:
+    """Build a one-class SVM (explicit density boundary, RBF kernel)."""
+    from sklearn.svm import OneClassSVM
+
+    return OneClassSVM(**params)
+
+
+def _elliptic_envelope(**params: Any) -> Any:
+    """Build an elliptic envelope (robust covariance, Mahalanobis-style score)."""
+    from sklearn.covariance import EllipticEnvelope
+
+    return EllipticEnvelope(**params)
+
+
+def _local_outlier_factor(**params: Any) -> Any:
+    """Build a Local Outlier Factor detector usable on unseen rows.
+
+    ``novelty=True`` is required to score transactions that were not part of the training set:
+    in the default transductive mode, ``predict``/``score_samples`` are simply unavailable.
+
+    Args:
+        **params: Estimator parameters.
+
+    Returns:
+        A ``LocalOutlierFactor`` in novelty mode.
+    """
+    from sklearn.neighbors import LocalOutlierFactor
+
+    resolved = dict(params)
+    resolved.setdefault("novelty", True)
+    return LocalOutlierFactor(**resolved)
+
+
 def _random_forest(**params: Any) -> Any:
     """Build a random forest (classifier or regressor, chosen by task)."""
     return _ensemble("random_forest", **params)
@@ -275,6 +308,42 @@ ESTIMATORS: dict[str, AlgorithmSpec] = {
                 "Détection d'anomalies par isolation aléatoire : score continu, aucune hypothèse "
                 "de distribution. Réservé aux tâches `anomaly`, pas à une segmentation."
             ),
+        ),
+        AlgorithmSpec(
+            name="one_class_svm",
+            display_name="One-Class SVM",
+            tasks=_ANOMALY,
+            builder=_one_class_svm,
+            rationale=(
+                "Frontière de densité explicite (noyau RBF) : très expressif sur des anomalies non "
+                "linéaires, mais coût quadratique à l'entraînement — à réserver aux flux "
+                "échantillonnés ou aux petits volumes. Tâches `anomaly` uniquement."
+            ),
+            defaults={"kernel": "rbf", "nu": 0.02, "gamma": "scale"},
+        ),
+        AlgorithmSpec(
+            name="elliptic_envelope",
+            display_name="Elliptic Envelope",
+            tasks=_ANOMALY,
+            builder=_elliptic_envelope,
+            rationale=(
+                "Enveloppe gaussienne robuste (covariance MCD) : score de type Mahalanobis, rapide "
+                "et lisible, mais suppose une forme elliptique — des montants log-normaux et des "
+                "vélocités de Poisson la violent souvent. Tâches `anomaly` uniquement."
+            ),
+            defaults={"contamination": 0.02, "support_fraction": 0.9},
+        ),
+        AlgorithmSpec(
+            name="local_outlier_factor",
+            display_name="Local Outlier Factor (novelty)",
+            tasks=_ANOMALY,
+            builder=_local_outlier_factor,
+            rationale=(
+                "Anomalie **relative** au voisinage : repère un point rare dans sa propre région, "
+                "ce qui compte quand la fraude se cache au milieu d'un groupe dense. En mode "
+                "`novelty`, il score aussi de nouvelles transactions. Tâches `anomaly`."
+            ),
+            defaults={"n_neighbors": 40, "contamination": 0.02},
         ),
     )
 }
