@@ -33,6 +33,11 @@ class CallbackContext:
         best_score: Best value observed so far for the monitored metric.
         best_epoch: Epoch at which ``best_score`` was observed.
         stopped_early: Set by :class:`EarlyStoppingCallback` to request a stop.
+        groups: Group identifier per **training** row, when the task is evaluated per group
+            (a ranking metric averages per-user scores). ``None`` for every task without a group
+            structure. Carried here rather than inside the matrices because the preprocessing
+            drops the identifier column.
+        groups_val: Same, for the validation split.
     """
 
     model_name: str
@@ -44,6 +49,8 @@ class CallbackContext:
     best_score: float | None = None
     best_epoch: int = -1
     stopped_early: bool = False
+    groups: Any = None
+    groups_val: Any = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 

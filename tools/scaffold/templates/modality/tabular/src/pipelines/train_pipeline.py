@@ -41,6 +41,7 @@ from src.features.build_features import (
 from src.models import build_model
 from src.pipelines.base import BasePipeline, PipelineResult
 from src.preprocessing.pipelines import PreprocessingPipeline
+from src.training.losses_metrics import metric_extra_from_config
 from src.training.trainer import Trainer, TrainingData, TrainingOutcome
 from src.utils.io import write_json
 from src.utils.logging import get_logger
@@ -186,12 +187,7 @@ class TrainPipeline(BasePipeline):
         Returns:
             The metric context (empty when the task declares none).
         """
-        extra: dict[str, Any] = {}
-        for node_name in ("recommendation", "load_forecasting"):
-            node = config_dict.get(node_name)
-            if isinstance(node, dict) and node.get("top_k") is not None:
-                extra["top_k"] = int(node["top_k"])
-        return extra
+        return metric_extra_from_config(config_dict)
 
     def _preprocess(self, enriched: dict[str, Any]) -> dict[str, Any]:
         """Fit the preprocessing on train and transform every split."""

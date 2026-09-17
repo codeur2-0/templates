@@ -13,5 +13,3 @@ mypy>=1.10
 nbformat>=5.9
 nbclient>=0.10
 ipykernel>=6.29
-matplotlib>=3.8
-seaborn>=0.13

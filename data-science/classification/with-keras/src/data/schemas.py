@@ -55,6 +55,7 @@ TARGET_COLUMN: str = "churned"
 #: Clé métier (unique).
 ID_COLUMN: str = "customer_id"
 
+
 #: Colonnes non modélisables (identifiants, horodatage, métadonnées).
 NON_FEATURE_COLUMNS: list[str] = ['customer_id', 'signup_date', 'churned']
 

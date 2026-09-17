@@ -55,11 +55,14 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = ["build_04_model_exploration", "build_06_error_analysis", "structure_cells"]
 
-#: Nombre de lignes générées dans les notebooks de classement. Il faut assez d'utilisateurs pour
-#: que le NDCG moyen ait un sens : à 30 candidats par utilisateur, 6 000 lignes donnent 200
-#: utilisateurs, soit une erreur-type d'environ 0,02 sur le NDCG — assez pour distinguer deux
-#: algorithmes, pas assez pour publier un écart de 0,005.
-NB_ROWS_RANKING = 6000
+#: Nombre de lignes générées dans les notebooks de classement. L'unité d'évaluation étant
+#: l'utilisateur, c'est le nombre de **listes** qui fixe la précision d'une métrique : à 30
+#: candidats par utilisateur, 12 000 lignes donnent 400 utilisateurs, dont une soixantaine dans le
+#: split de validation sur lequel les algorithmes sont comparés. Avec l'écart-type par utilisateur
+#: observé (~0,28), cela place l'erreur-type du NDCG de validation vers 0,036 : assez pour
+#: séparer un moteur d'une référence gratuite, pas assez pour publier un écart de 0,005 — ce que
+#: la section « stabilité entre graines » du notebook 04 rappelle explicitement.
+NB_ROWS_RANKING = 12000
 
 
 # ---------------------------------------------------------------------------------------
@@ -474,6 +477,8 @@ FIT_RESULT = MODEL.fit(
     PREPARED["y_train"],
     X_val=PREPARED["X_val"],
     y_val=PREPARED["y_val"],
+    groups=PREPARED.get("groups_train"),
+    groups_val=PREPARED.get("groups_val"),
     callbacks=[],
 )
 print(MODEL.summary())
@@ -694,6 +699,8 @@ for algorithm in ALGORITHMS:
                 PREPARED["y_train"],
                 X_val=PREPARED["X_val"],
                 y_val=PREPARED["y_val"],
+                groups=PREPARED.get("groups_train"),
+                groups_val=PREPARED.get("groups_val"),
                 callbacks=[],
             )
             scores = rank_scores(candidate, PREPARED["X_val"])
@@ -766,6 +773,8 @@ for graine in (CONFIG.seed, CONFIG.seed + 1, CONFIG.seed + 2):
         PREPARED["y_train"],
         X_val=PREPARED["X_val"],
         y_val=PREPARED["y_val"],
+        groups=PREPARED.get("groups_train"),
+        groups_val=PREPARED.get("groups_val"),
         callbacks=[],
     )
     scores = rank_scores(candidate, PREPARED["X_val"])
@@ -853,6 +862,8 @@ else:
             PREPARED["y_train"],
             X_val=PREPARED["X_val"],
             y_val=PREPARED["y_val"],
+            groups=PREPARED.get("groups_train"),
+            groups_val=PREPARED.get("groups_val"),
             callbacks=[],
         )
         scores = rank_scores(candidate, PREPARED["X_val"])
@@ -1559,12 +1570,11 @@ qui le prouve."""
         _md(
             """## 0. Mise en place
 
-La journalisation est descendue au niveau `ERROR` dans ce projet. Ce n'est pas un réglage de
-confort : `fit` émet un avertissement par métrique `*_at_k` (`missing input(s) ['groups']`), parce
-que la matrice pré-traitée ne porte plus l'identité de l'utilisateur et que le registre refuse, à
-juste titre, de calculer une métrique **par utilisateur** sans groupe. Ces métriques sont
-recalculées ici sur le cadre enrichi, et en production par le `Trainer` qui reçoit `groups_val`.
-Les avertissements n'apporteraient donc rien — et noieraient les tableaux."""
+Une métrique de classement se calcule **par utilisateur**, et le pré-traitement supprime la
+colonne d'identité (elle n'est pas modélisable). Les groupes voyagent donc à côté des matrices :
+`fit` reçoit `groups` et `groups_val`, le `Trainer` reçoit `groups_val` dans son `TrainingData`.
+Sans cela, le registre refuse à juste titre de calculer les `*_at_k` et l'entraînement ne publierait
+que des diagnostics de score."""
         ),
         _code(SETUP, context),
         _code(LOAD_RAW, context),

@@ -63,7 +63,10 @@ SUPERVISED_TASKS: frozenset[str] = frozenset(
 )
 
 #: Tasks whose predictions are normalised probabilities.
-PROBABILITY_TASKS: frozenset[str] = frozenset({"binary", "multiclass"})
+#: ``ranking`` en fait partie : un modèle de classement pointwise score chaque couple
+#: (utilisateur, candidat) par sa probabilité de pertinence, et c'est ce score — jamais la
+#: classe prédite — qui détermine l'ordre publié.
+PROBABILITY_TASKS: frozenset[str] = frozenset({"binary", "multiclass", "ranking"})
 
 
 def _utc_now() -> str:
@@ -489,6 +492,8 @@ class BaseModel(ABC):
         *,
         X_val: pd.DataFrame | None = None,
         y_val: pd.Series | np.ndarray | None = None,
+        groups: Sequence[Any] | np.ndarray | None = None,
+        groups_val: Sequence[Any] | np.ndarray | None = None,
         callbacks: Sequence[Any] | None = None,
     ) -> FitResult:
         """Train the model, fire the callbacks and return the run result.
@@ -501,6 +506,10 @@ class BaseModel(ABC):
             y: Training target; ``None`` for unsupervised tasks.
             X_val: Validation features, used for early stopping and ``val_*`` metrics.
             y_val: Validation target.
+            groups: Group identifier per training row. A metric computed per group (a ranking
+                metric averages per-user scores) is **skipped** by the registry without it, since
+                the preprocessed matrices no longer carry the identifier column.
+            groups_val: Same, for the validation split.
             callbacks: Objects implementing ``on_train_begin`` / ``on_epoch_end`` /
                 ``on_train_end`` (see :mod:`src.training.callbacks`).
 
@@ -526,6 +535,10 @@ class BaseModel(ABC):
             else self.feature_names
         )
         context = self._callback_context(epochs=self._planned_epochs(), callbacks=callbacks)
+        # Les groupes voyagent avec le contexte : les stacks les lisent pour calculer leurs
+        # métriques d'époque, et ils ne sont jamais sérialisés (contrairement à ``extra``).
+        context.groups = groups
+        context.groups_val = groups_val
         for callback in callbacks:
             callback.on_train_begin(context)
 
@@ -542,7 +555,7 @@ class BaseModel(ABC):
         result = FitResult(
             model_name=type(self).__name__,
             algorithm=self.algorithm,
-            metrics=self.training_metrics(features, y),
+            metrics=self.training_metrics(features, y, groups=groups),
             history=dict(context.history),
             n_samples=len(features),
             n_features=int(np.shape(features)[1]),
@@ -564,13 +577,18 @@ class BaseModel(ABC):
         return result
 
     def training_metrics(
-        self, X: pd.DataFrame | np.ndarray, y: pd.Series | np.ndarray | None
+        self,
+        X: pd.DataFrame | np.ndarray,
+        y: pd.Series | np.ndarray | None,
+        *,
+        groups: Sequence[Any] | np.ndarray | None = None,
     ) -> dict[str, float]:
         """Score the fitted model on its training data (diagnostic, never a decision metric).
 
         Args:
             X: Training features.
             y: Training target (``None`` for unsupervised tasks).
+            groups: Group identifier per row, required by the per-group metrics.
 
         Returns:
             Mapping of metric name to **finite** value. Metrics the registry cannot compute
@@ -589,7 +607,13 @@ class BaseModel(ABC):
             except (NotImplementedError, ValueError) as error:
                 logger.debug("Training probabilities unavailable: {}", error)
         values = calculator.evaluate(
-            self._metric_inputs(y_true=y, y_pred=predictions, y_proba=probabilities, X=X)
+            self._metric_inputs(
+                y_true=y,
+                y_pred=self._ordered_scores(predictions, probabilities),
+                y_proba=probabilities,
+                X=X,
+                groups=groups,
+            )
         )
         finite = {
             str(name): float(value) for name, value in dict(values).items() if _is_finite(value)
@@ -615,12 +639,41 @@ class BaseModel(ABC):
             logger.warning("Metric selection rejected ({}): training metrics skipped", error)
             return None
 
-    @staticmethod
-    def _metric_inputs(*, y_true: Any, y_pred: Any, y_proba: Any, X: Any) -> Any:
-        """Build the :class:`MetricInputs` payload expected by the metric registry."""
-        from src.training.losses_metrics import MetricInputs
+    def _ordered_scores(self, predictions: Any, probabilities: Any) -> Any:
+        """Return the prediction the metric registry must read as an **ordering**.
 
-        return MetricInputs(y_true=y_true, y_pred=y_pred, y_proba=y_proba, X=X)
+        In a ranking task ``y_pred`` is consumed as a continuous score by the group-aware metrics:
+        the hard classes of a classifier carry no ordering information, and scoring a list with
+        them produces ties everywhere and a meaningless NDCG. The positive-class probability
+        therefore becomes the score. Every other task keeps its hard predictions, so accuracy and
+        F1 stay computed on classes.
+
+        Args:
+            predictions: Hard predictions (labels or values).
+            probabilities: Probability matrix, when the model exposes one.
+
+        Returns:
+            The array the registry should read as ``y_pred``.
+        """
+        if str(self.task) != "ranking" or probabilities is None:
+            return predictions
+        matrix = np.asarray(probabilities, dtype="float64")
+        return matrix[:, -1].ravel() if matrix.ndim == 2 else matrix.ravel()
+
+    def _metric_inputs(
+        self, *, y_true: Any, y_pred: Any, y_proba: Any, X: Any, groups: Any = None
+    ) -> Any:
+        """Build the :class:`MetricInputs` payload expected by the metric registry."""
+        from src.training.losses_metrics import MetricInputs, metric_extra_from_config
+
+        return MetricInputs(
+            y_true=y_true,
+            y_pred=y_pred,
+            y_proba=y_proba,
+            X=X,
+            groups=groups,
+            extra=metric_extra_from_config(self.config),
+        )
 
     def _planned_epochs(self) -> int:
         """Number of epochs announced to the callbacks (``1`` for single-shot estimators)."""

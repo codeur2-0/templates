@@ -25,8 +25,9 @@ from src.models.base import BaseModel, FitResult
 
 #: Tâches qui nécessitent une cible (les tâches non supervisées sautent les tests concernés).
 SUPERVISED_TASKS = {"binary", "multiclass", "regression", "forecasting", "ranking"}
-#: Tâches dont les prédictions sont des probabilités normalisées.
-PROBA_TASKS = {"binary", "multiclass"}
+#: Tâches dont les prédictions sont des probabilités normalisées. Le classement en fait partie :
+#: un moteur pointwise publie la probabilité de pertinence comme score d'ordre.
+PROBA_TASKS = {"binary", "multiclass", "ranking"}
 
 
 def _task(app_config: Any) -> str:
@@ -134,8 +135,10 @@ class TestPrediction:
         self, fitted_model: BaseModel, matrices: dict[str, Any], app_config: Any
     ) -> None:
         """Les classes prédites sont un sous-ensemble des classes d'entraînement."""
-        if _task(app_config) not in {"binary", "multiclass"}:
-            pytest.skip("espace de labels propre à la classification")
+        # Un classement est pointwise : la cible est binaire (pertinent ou non) et les classes
+        # prédites doivent donc rester dans l'espace observé, exactement comme en classification.
+        if _task(app_config) not in {"binary", "multiclass", "ranking"}:
+            pytest.skip("espace de labels propre à une cible catégorielle")
         predicted = set(np.unique(fitted_model.predict(matrices["X_test"])).tolist())
         observed = set(np.unique(matrices["y_train"]).tolist())
         assert predicted <= observed

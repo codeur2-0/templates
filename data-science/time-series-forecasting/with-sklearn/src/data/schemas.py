@@ -55,6 +55,7 @@ TARGET_COLUMN: str = "load_mw"
 #: Clé métier (unique).
 ID_COLUMN: str = "sample_id"
 
+
 #: Colonnes non modélisables (identifiants, horodatage, métadonnées).
 NON_FEATURE_COLUMNS: list[str] = ['sample_id', 'origin_date', 'target_date', 'target_month', 'event_type', 'is_extreme_event', 'load_mw']
 

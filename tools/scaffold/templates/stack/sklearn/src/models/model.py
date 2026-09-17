@@ -550,7 +550,14 @@ class SklearnModel(BaseModel):
         if self._supports_proba is None:
             self._supports_proba = hasattr(estimator, "predict_proba")
 
-        logs = self._epoch_logs(matrix, labels, X_val, y_val)
+        logs = self._epoch_logs(
+            matrix,
+            labels,
+            X_val,
+            y_val,
+            groups=None if context is None else context.groups,
+            groups_val=None if context is None else context.groups_val,
+        )
         if context is not None:
             context.extra["estimator"] = type(estimator).__name__
             context.extra["n_params"] = len(self.params)
@@ -594,30 +601,50 @@ class SklearnModel(BaseModel):
         labels: np.ndarray | None,
         X_val: pd.DataFrame | np.ndarray | None,
         y_val: pd.Series | np.ndarray | None,
+        groups: Any = None,
+        groups_val: Any = None,
     ) -> dict[str, float]:
-        """Compute the ``train_*`` / ``val_*`` metrics emitted to the callbacks."""
+        """Compute the ``train_*`` / ``val_*`` metrics emitted to the callbacks.
+
+        Args:
+            matrix: Training features as a numeric matrix.
+            labels: Training target (``None`` for unsupervised tasks).
+            X_val: Validation features.
+            y_val: Validation target.
+            groups: Group identifier per training row (per-group metrics).
+            groups_val: Group identifier per validation row.
+
+        Returns:
+            The ``train_*`` / ``val_*`` / ``loss`` / ``val_loss`` logs.
+        """
         calculator = self._metric_calculator()
         if calculator is None:
             return {}
         logs: dict[str, float] = {}
+        train_probabilities = self._safe_proba(matrix)
         train_values = calculator.evaluate(
             self._metric_inputs(
                 y_true=labels,
-                y_pred=self.estimator_.predict(matrix),
-                y_proba=self._safe_proba(matrix),
+                y_pred=self._ordered_scores(self.estimator_.predict(matrix), train_probabilities),
+                y_proba=train_probabilities,
                 X=matrix,
+                groups=groups,
             )
         )
         logs.update({f"train_{name}": float(value) for name, value in train_values.items()})
         if X_val is not None:
             validation = self._matrix(X_val)
             validation_labels = None if y_val is None else np.asarray(y_val).ravel()
+            validation_probabilities = self._safe_proba(validation)
             val_values = calculator.evaluate(
                 self._metric_inputs(
                     y_true=validation_labels,
-                    y_pred=self.estimator_.predict(validation),
-                    y_proba=self._safe_proba(validation),
+                    y_pred=self._ordered_scores(
+                        self.estimator_.predict(validation), validation_probabilities
+                    ),
+                    y_proba=validation_probabilities,
                     X=validation,
+                    groups=groups_val,
                 )
             )
             logs.update({f"val_{name}": float(value) for name, value in val_values.items()})

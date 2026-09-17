@@ -167,6 +167,18 @@ def prepared(enriched_splits: dict[str, pd.DataFrame], app_config: AppConfig) ->
     X_val, y_val = project(enriched_splits["val"])
     X_test, y_test = project(enriched_splits["test"])
 
+    # The group column (the user, in a ranking task) is dropped from the features, so it travels
+    # separately, aligned with ``X_val`` — exactly as in ``TrainPipeline._preprocess``. Without it
+    # no group-aware metric can be computed on the validation split, and the trainer would publish
+    # an empty metric set instead of saying why.
+    group_column = str(getattr(app_config.data, "group_column", "") or "")
+    val_frame = enriched_splits["val"]
+    groups_val = (
+        val_frame[group_column].to_numpy()
+        if val_frame is not None and group_column and group_column in val_frame.columns
+        else None
+    )
+
     return {
         "pipeline": pipeline,
         "numeric_features": numeric_columns,
@@ -176,6 +188,7 @@ def prepared(enriched_splits: dict[str, pd.DataFrame], app_config: AppConfig) ->
         "y_train": y_train,
         "X_val": X_val,
         "y_val": y_val,
+        "groups_val": groups_val,
         "X_test": X_test,
         "y_test": y_test,
         "feature_names": list(pipeline.feature_names_out),

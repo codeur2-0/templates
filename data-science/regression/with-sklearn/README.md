@@ -581,4 +581,4 @@ Pour rejouer une configuration exacte : Hydra sauvegarde la config composée dan
 Code fourni à des fins pédagogiques, licence MIT. Pour proposer une amélioration : conserver la
 structure imposée, ajouter des tests, mettre à jour ce README et vérifier `make verify`.
 
-*Dernière génération : 2026-09-13 · projet `ds-regression-sklearn`*
+*Dernière génération : 2026-09-17 · projet `ds-regression-sklearn`*

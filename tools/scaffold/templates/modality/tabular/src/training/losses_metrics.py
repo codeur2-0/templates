@@ -726,6 +726,30 @@ def validate_metric_names(names: Iterable[str], task: str | None = None) -> list
     return resolved
 
 
+def metric_extra_from_config(config: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return the metric context declared by the task node of the root configuration.
+
+    A ranking metric is meaningless without its cutoff: ``ndcg_at_k`` must know how many slots are
+    published. That number lives in the business node (``recommendation``), not in ``metrics``,
+    because it is a product decision rather than a measurement setting. Every component that
+    builds a calculator — the training pipeline, the trainer, a model scoring its own validation
+    split — resolves it here, so a single configuration change reaches all of them.
+
+    Args:
+        config: Root configuration mapping (``None`` is tolerated and yields no context).
+
+    Returns:
+        The metric context, empty when the task declares none.
+    """
+    extra: dict[str, Any] = {}
+    node_config = dict(config or {})
+    for node_name in ("recommendation", "load_forecasting"):
+        node = node_config.get(node_name)
+        if isinstance(node, dict) and node.get("top_k") is not None:
+            extra["top_k"] = int(node["top_k"])
+    return extra
+
+
 class MetricCalculator:
     """Compute a set of metrics for a task, tolerating missing inputs.
 

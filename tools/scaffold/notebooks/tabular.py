@@ -94,14 +94,10 @@ def _tokens(context: NotebookContext) -> dict[str, str]:
         # Le libellé de la référence triviale dépend de la tâche : classe majoritaire, médiane,
         # ou tri par popularité en classement.
         "__BASELINE_LABEL__": _baseline_label(context),
-        # Niveau de journalisation des notebooks. En classement, `fit` journalise un
-        # avertissement par métrique `*_at_k` (« missing input(s) ['groups'] ») : la matrice
-        # pré-traitée ne porte plus l'identité de l'utilisateur, et le registre refuse à juste
-        # titre de calculer une métrique par utilisateur sans groupe. Ces métriques sont
-        # recalculées dans le notebook sur le cadre enrichi (et en production par le `Trainer`,
-        # qui reçoit `groups_val`). On descend donc au niveau ERROR pour ne pas noyer les
-        # tableaux — le choix est expliqué dans le notebook, pas silencieux.
-        "__NB_LOG_LEVEL__": "ERROR" if _is_ranking(context) else "WARNING",
+        # Niveau de journalisation des notebooks. Les métriques par groupe reçoivent leurs
+        # groupes (voir `FIT_MODEL`), donc le registre n'émet plus d'avertissement de calcul
+        # impossible : WARNING suffit et conserve les diagnostics utiles.
+        "__NB_LOG_LEVEL__": "WARNING",
         "__MODEL_CLASS__": context.model_class,
         "__FRAMEWORK__": spec.stack_key,
         "__DROP__": context.py_list(
@@ -457,6 +453,18 @@ def prepare_matrices(frame: pd.DataFrame, config: Any) -> dict[str, Any]:
     X_val, y_val = project(enriched["val"])
     X_test, y_test = project(enriched["test"])
 
+    # Le pré-traitement supprime la colonne de groupe (identifiant, non modélisable), or une
+    # métrique de classement se calcule **par groupe** puis se moyenne. Elle doit donc voyager à
+    # côté des matrices, exactement comme dans `TrainPipeline` et dans les fixtures de tests.
+    # `None` pour toute tâche sans structure de groupe : le comportement des autres projets est
+    # inchangé.
+    group_column = getattr(config.data, "group_column", None)
+
+    def groups_of(split: pd.DataFrame | None) -> Any:
+        if split is None or not group_column or group_column not in split.columns:
+            return None
+        return split[group_column].to_numpy()
+
     return {
         "splits": splits,
         "enriched": enriched,
@@ -470,6 +478,9 @@ def prepare_matrices(frame: pd.DataFrame, config: Any) -> dict[str, Any]:
         "y_val": y_val,
         "X_test": X_test,
         "y_test": y_test,
+        "groups_train": groups_of(enriched["train"]),
+        "groups_val": groups_of(enriched["val"]),
+        "groups_test": groups_of(enriched["test"]),
         "feature_names": list(pipeline.feature_names_out),
         # Colonnes de la matrice **avant** pré-traitement (donc avant one-hot). Indispensables dès
         # qu'un notebook ré-applique le pipeline à un nouveau cadre : sélectionner les colonnes de
@@ -490,11 +501,15 @@ FIT_MODEL = """
 from src.models import build_model
 
 MODEL = build_model(CONFIG, feature_names=PREPARED["feature_names"])
+# Les groupes (l'identité de l'utilisateur en classement) voyagent à côté des matrices : le
+# pré-traitement supprime cette colonne, or une métrique par groupe ne peut pas s'en passer.
 FIT_RESULT = MODEL.fit(
     PREPARED["X_train"],
     PREPARED["y_train"],
     X_val=PREPARED["X_val"],
     y_val=PREPARED["y_val"],
+    groups=PREPARED.get("groups_train"),
+    groups_val=PREPARED.get("groups_val"),
     callbacks=[],
 )
 print(MODEL.summary())
@@ -1959,11 +1974,24 @@ from src.training.callbacks import (
 )
 from src.training.trainer import Trainer, TrainingData
 
+# Contexte de métrique lu dans la configuration racine : une métrique de classement n'a aucun
+# sens sans sa coupure, et ce réglage vit dans le noeud métier (`recommendation`), pas dans
+# `metrics`. Vide pour toute tâche qui n'en déclare pas.
+CONFIG_DICT = CONFIG.model_dump()
+METRIC_EXTRA: dict[str, Any] = {}
+for _node_name in ("recommendation", "load_forecasting"):
+    _node = CONFIG_DICT.get(_node_name)
+    if isinstance(_node, dict) and _node.get("top_k") is not None:
+        METRIC_EXTRA["top_k"] = int(_node["top_k"])
+
 TRAINING_DATA = TrainingData(
     X_train=PREPARED["X_train"],
     y_train=PREPARED["y_train"],
     X_val=PREPARED["X_val"],
     y_val=PREPARED["y_val"],
+    # Sans groupes, le registre refuse à juste titre de calculer les métriques `*_at_k` : la
+    # matrice pré-traitée ne porte plus l'identité de l'utilisateur.
+    groups_val=PREPARED.get("groups_val"),
     feature_names=PREPARED["feature_names"],
     task=CONFIG.metrics.task,
 )
@@ -1990,10 +2018,11 @@ CALLBACKS = [
             """
 TRAINER = Trainer(
     MODEL,
-    config=CONFIG.model_dump(),
+    config=CONFIG_DICT,
     paths=NB_PATHS,
     metric_names=CONFIG.metrics.all_metrics,
     task=CONFIG.metrics.task,
+    metric_extra=METRIC_EXTRA,
     callbacks=CALLBACKS,
 )
 OUTCOME = TRAINER.train(TRAINING_DATA)
@@ -2049,14 +2078,27 @@ for seed in (7, 21, 42):
     candidate = build_model(CONFIG, feature_names=PREPARED["feature_names"])
     candidate.random_state = seed
     _ = candidate.fit(PREPARED["X_train"], PREPARED["y_train"], X_val=PREPARED["X_val"], y_val=PREPARED["y_val"], callbacks=[])
+    probabilities = candidate.predict_proba(PREPARED["X_val"]) if candidate.supports_proba else None
+    predictions = candidate.predict(PREPARED["X_val"])
+    # Une métrique de classement lit `y_pred` comme un **score continu** : les classes dures d'un
+    # classifieur ne portent aucun ordre et produiraient des ex-aequo partout (c'est exactement ce
+    # que fait `Trainer.compute_validation_metrics`). Les autres tâches gardent leurs classes,
+    # sinon accuracy et F1 seraient calculés sur des probabilités.
+    if str(CONFIG.metrics.task) == "ranking" and probabilities is not None:
+        matrix = np.asarray(probabilities, dtype="float64")
+        predictions = matrix[:, -1].ravel() if matrix.ndim == 2 else matrix.ravel()
     values = MetricCalculator(task=CONFIG.metrics.task, metrics=[CONFIG.metrics.primary]).evaluate(
         MetricInputs(
             y_true=PREPARED["y_val"],
-            y_pred=candidate.predict(PREPARED["X_val"]),
-            y_proba=candidate.predict_proba(PREPARED["X_val"]) if candidate.supports_proba else None,
+            y_pred=predictions,
+            y_proba=probabilities,
             # Les métriques internes d'un clustering (silhouette, Davies-Bouldin) ont besoin de la
             # matrice de features : sans `X`, elles sont simplement ignorées par le registre.
             X=PREPARED["X_val"],
+            # Une métrique de classement se calcule par utilisateur : sans groupes ni coupure, le
+            # registre l'ignore et la stabilité mesurée serait vide.
+            groups=PREPARED.get("groups_val"),
+            extra=METRIC_EXTRA,
         )
     )
     scores.append(values.get(CONFIG.metrics.primary, float("nan")))

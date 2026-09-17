@@ -46,7 +46,10 @@ logger = get_logger(__name__)
 CHECKPOINT_KIND = "tabular-project.pytorch-checkpoint/v1"
 
 #: Tâches apprises par les têtes de classification.
-_CLASSIFICATION = frozenset({"binary", "multiclass"})
+#: ``ranking`` est un classement **pointwise** : le réseau score chaque couple (utilisateur,
+#: candidat) comme un classifieur binaire, la publication du top-K étant portée par les couches
+#: d'évaluation et d'inférence. Les étiquettes sont donc binaires et la sortie est un sigmoid.
+_CLASSIFICATION = frozenset({"binary", "multiclass", "ranking"})
 #: Tâches apprises par les têtes de régression.
 _REGRESSION = frozenset({"regression", "forecasting"})
 #: Tâches non supervisées (auto-encodeur : l'erreur de reconstruction sert de score d'anomalie).

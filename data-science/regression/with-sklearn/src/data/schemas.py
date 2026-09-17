@@ -55,6 +55,7 @@ TARGET_COLUMN: str = "price_eur"
 #: Clé métier (unique).
 ID_COLUMN: str = "property_id"
 
+
 #: Colonnes non modélisables (identifiants, horodatage, métadonnées).
 NON_FEATURE_COLUMNS: list[str] = ['property_id', 'listing_date', 'price_eur']
 

@@ -53,6 +53,10 @@ class TrainingData:
         y_train: Training target (``None`` for unsupervised tasks).
         X_val: Validation features.
         y_val: Validation target.
+        groups_val: Group identifier per validation row (the user, in a ranking task).
+            Ranking metrics are computed per group then averaged, and the group column is
+            dropped by the preprocessing, so it must travel next to the matrices rather than
+            be looked up inside them. ``None`` for every task with no group structure.
         feature_names: Ordered feature names.
         task: Learning task identifier.
     """
@@ -61,6 +65,7 @@ class TrainingData:
     y_train: pd.Series | None
     X_val: pd.DataFrame | None = None
     y_val: pd.Series | None = None
+    groups_val: Any = None
     feature_names: list[str] = field(default_factory=list)
     task: str = "binary"
 
@@ -147,6 +152,7 @@ class Trainer:
         min_primary_metric: float | None = None,
         primary_metric: str | None = None,
         primary_direction: str = "maximize",
+        metric_extra: Mapping[str, Any] | None = None,
     ) -> None:
         """Inject the model and the training policy.
 
@@ -161,12 +167,16 @@ class Trainer:
             primary_metric: Metric watched by the quality gate.
             primary_direction: ``maximize`` (AUC, R2) or ``minimize`` (RMSE, MAE) — fixe le sens
                 dans lequel le seuil de qualité est évalué.
+            metric_extra: Context passed to the metric registry (``top_k`` for a ranking task,
+                for instance). It comes from the root configuration, which the trainer does not
+                receive, so no metric parameter is hard-coded here.
         """
         self.model = model
         self.config: dict[str, Any] = _normalise_train_config(config)
         self.paths = paths or ProjectPaths.from_root()
         self.task = task or model.task
         self.metric_names = list(metric_names or [])
+        self.metric_extra: dict[str, Any] = dict(metric_extra or {})
         self.min_primary_metric = min_primary_metric
         self.primary_metric = primary_metric
         self.primary_direction = str(primary_direction)
@@ -284,7 +294,7 @@ class Trainer:
             msg = f"Training features contain {missing_cells} missing value(s): preprocess first"
             raise ValueError(msg)
         if (
-            self.model.task in {"binary", "multiclass", "regression", "forecasting"}
+            self.model.task in {"binary", "multiclass", "regression", "forecasting", "ranking"}
             and data.y_train is None
         ):
             msg = f"Task '{self.model.task}' is supervised but no target was provided"
@@ -312,14 +322,24 @@ class Trainer:
                 probabilities = self.model.predict_proba(data.X_val)
             except NotImplementedError:
                 probabilities = None
-        calculator = MetricCalculator(task=self.task, metrics=self.metric_names)
+        # In a ranking task `y_pred` is read as a **continuous score** by the group-aware
+        # metrics: the hard classes of a classifier carry no ordering information and would
+        # produce a meaningless NDCG. The positive-class probability therefore becomes the score.
+        ordered = predictions
+        if self.task == "ranking" and probabilities is not None:
+            matrix = np.asarray(probabilities, dtype="float64")
+            ordered = matrix[:, -1].ravel() if matrix.ndim == 2 else matrix.ravel()
+        calculator = MetricCalculator(
+            task=self.task, metrics=self.metric_names, extra=dict(self.metric_extra)
+        )
         values = calculator.evaluate(
             MetricInputs(
                 y_true=data.y_val,
-                y_pred=predictions,
+                y_pred=ordered,
                 y_proba=probabilities,
                 X=data.X_val,
-                extra={"groups": data.X_val.get("group") if hasattr(data.X_val, "get") else None},
+                groups=data.groups_val,
+                extra=dict(self.metric_extra),
             )
         )
         # Une métrique non mesurable (tâche non supervisée sans cible, split dégénéré) est omise

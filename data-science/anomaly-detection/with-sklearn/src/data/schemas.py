@@ -55,6 +55,7 @@ TARGET_COLUMN: str | None = None
 #: Clé métier (unique).
 ID_COLUMN: str = "transaction_id"
 
+
 #: Colonnes non modélisables (identifiants, horodatage, métadonnées).
 NON_FEATURE_COLUMNS: list[str] = ['transaction_id', 'occurred_at', 'is_fraud', 'fraud_scheme']
 
