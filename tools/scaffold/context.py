@@ -18,7 +18,12 @@ from tools.scaffold.pandera_helpers import (
 )
 from tools.scaffold.registry import FamilySpec, StackSpec
 
-#: Common dependencies of every generated project (config, validation, quality).
+#: Common dependencies of every generated project (config, validation, quality, figures).
+#:
+#: ``matplotlib`` et ``seaborn`` sont des dépendances **runtime** et non de développement :
+#: ``src/visualization/plots.py`` les importe au chargement du module, donc un environnement
+#: installé avec le seul ``requirements.txt`` échouerait sur ``make evaluate`` (le rapport écrit
+#: les figures). Elles restent listées côté dev pour que ``requirements-dev.txt`` soit autonome.
 CORE_DEPENDENCIES: list[str] = [
     "hydra-core>=1.3",
     "omegaconf>=2.3",
@@ -27,6 +32,8 @@ CORE_DEPENDENCIES: list[str] = [
     "pyyaml>=6.0",
     "loguru>=0.7",
     "tqdm>=4.66",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
 ]
 
 #: Common development dependencies of every generated project.

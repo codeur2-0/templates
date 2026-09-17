@@ -65,6 +65,16 @@ ID_COLUMN: str = "{{ spec.data.id_column }}"
 ID_COLUMN: str | None = None
 {% endif %}
 
+{% if metrics.task == "ranking" %}
+{% set reco = (extras.get("root_conf", {}).get("recommendation", {}) or {}) %}
+#: Colonne portant l'unité de publication d'une liste de candidats (l'utilisateur, la session).
+GROUP_COLUMN: str | None = {{ py(spec.data.group_column) }}
+
+#: Colonne identifiant l'article recommandé, déclarée dans le bloc `recommendation` de la
+#: configuration racine : aucun nom n'est codé en dur dans le contrat.
+ITEM_COLUMN: str = "{{ reco.get("item_column", "item_id") }}"
+{% endif %}
+
 #: Colonnes non modélisables (identifiants, horodatage, métadonnées).
 NON_FEATURE_COLUMNS: list[str] = {{ py(names_without_role(spec.data.columns, "feature")) }}
 
@@ -92,6 +102,40 @@ class RawDataSchema(pa.DataFrameModel):
 {% endif %}
 
 {% if metrics.task in ["binary", "multiclass"] %}
+    @pa.dataframe_check
+    @classmethod
+    def target_has_multiple_classes(cls, frame: DataFrame) -> bool:
+        """Une donnée d'entraînement doit contenir au moins deux classes.
+
+        Un dataset mono-classe produirait un modèle trivialement parfait et des métriques
+        indéfinies (ROC AUC, log-loss). Mieux vaut échouer ici que découvrir le problème
+        après un entraînement.
+        """
+        if TARGET_COLUMN is None or TARGET_COLUMN not in frame.columns or frame.empty:
+            return True
+        return int(frame[TARGET_COLUMN].nunique()) >= 2
+{% elif metrics.task == "ranking" %}
+    @pa.dataframe_check
+    @classmethod
+    def candidate_list_has_no_duplicate_item(cls, frame: DataFrame) -> bool:
+        """Un article ne peut pas occuper deux emplacements de la même liste de candidats.
+
+        Une liste qui répète la même référence ferait publier deux fois le même article, et
+        rendrait surtout la cible **contradictoire** : deux lignes aux entrées strictement
+        identiques, dont les étiquettes ont été tirées séparément, peuvent porter l'une 1 et
+        l'autre 0. Le modèle devrait alors prédire la moyenne de deux réponses incompatibles,
+        ce qui abaisse le plafond atteignable sans qu'aucune feature ne puisse l'expliquer —
+        un bruit qu'aucune évaluation ne sait diagnostiquer.
+
+        Le contrôle porte sur le couple (unité de publication, article) : le même article peut
+        légitimement revenir dans deux sessions différentes, jamais deux fois dans la même liste.
+        """
+        if GROUP_COLUMN is None or GROUP_COLUMN not in frame.columns or frame.empty:
+            return True
+        if ITEM_COLUMN not in frame.columns:
+            return True
+        return not bool(frame.duplicated(subset=[GROUP_COLUMN, ITEM_COLUMN]).any())
+
     @pa.dataframe_check
     @classmethod
     def target_has_multiple_classes(cls, frame: DataFrame) -> bool:

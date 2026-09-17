@@ -91,10 +91,17 @@ def _tokens(context: NotebookContext) -> dict[str, str]:
         "__TASK__": str(spec.metrics.task),
         "__PRIMARY__": str(spec.metrics.primary),
         "__ALGO__": str(spec.model.algorithm),
-        # Le libellé de la baseline dépend de la tâche : classe majoritaire vs médiane.
-        "__BASELINE_LABEL__": (
-            "baseline (médiane)" if _is_regression(context) else "baseline (classe majoritaire)"
-        ),
+        # Le libellé de la référence triviale dépend de la tâche : classe majoritaire, médiane,
+        # ou tri par popularité en classement.
+        "__BASELINE_LABEL__": _baseline_label(context),
+        # Niveau de journalisation des notebooks. En classement, `fit` journalise un
+        # avertissement par métrique `*_at_k` (« missing input(s) ['groups'] ») : la matrice
+        # pré-traitée ne porte plus l'identité de l'utilisateur, et le registre refuse à juste
+        # titre de calculer une métrique par utilisateur sans groupe. Ces métriques sont
+        # recalculées dans le notebook sur le cadre enrichi (et en production par le `Trainer`,
+        # qui reçoit `groups_val`). On descend donc au niveau ERROR pour ne pas noyer les
+        # tableaux — le choix est expliqué dans le notebook, pas silencieux.
+        "__NB_LOG_LEVEL__": "ERROR" if _is_ranking(context) else "WARNING",
         "__MODEL_CLASS__": context.model_class,
         "__FRAMEWORK__": spec.stack_key,
         "__DROP__": context.py_list(
@@ -164,6 +171,44 @@ def _is_anomaly(context: NotebookContext) -> bool:
     return str(getattr(context.spec.metrics, "task", "")) == "anomaly"
 
 
+def _is_ranking(context: NotebookContext) -> bool:
+    """Return ``True`` when the project ranks candidates per user (recommendation).
+
+    Un classement a une cible binaire, donc :func:`_is_regression` renvoie ``False`` et le projet
+    tomberait dans les cellules de classification (distribution de classes, ROC, seuil). Or la
+    question n'est pas la même : l'unité d'évaluation est l'utilisateur, jamais la ligne, et la
+    métrique est une qualité de liste (NDCG, précision@K) plutôt qu'un pouvoir discriminant global.
+    Ce test doit donc être évalué **avant** l'aiguillage générique.
+
+    Args:
+        context: Notebook context.
+
+    Returns:
+        ``True`` for a ranking task, ``False`` otherwise.
+    """
+    return str(getattr(context.spec.metrics, "task", "")) == "ranking"
+
+
+def _baseline_label(context: NotebookContext) -> str:
+    """Return the human label of the trivial reference, per task family.
+
+    La référence triviale change de nature avec la tâche : la médiane en régression, la classe
+    majoritaire en classification, et le tri par popularité en classement — cette dernière étant
+    celle que le métier sait déjà produire sans modèle.
+
+    Args:
+        context: Notebook context.
+
+    Returns:
+        The French label used in the notebook prose and tables.
+    """
+    if _is_ranking(context):
+        return "référence (tri par popularité)"
+    if _is_regression(context):
+        return "baseline (médiane)"
+    return "baseline (classe majoritaire)"
+
+
 def _notebook_rows(context: NotebookContext) -> int:
     """Return the number of rows generated inside the notebooks.
 
@@ -174,7 +219,10 @@ def _notebook_rows(context: NotebookContext) -> int:
       échantillon de 1 500 lignes ne laisserait que quelques fraudes par split et les métriques
       affichées seraient du bruit ;
     * la prévision (:data:`NB_ROWS_FORECAST`), parce qu'une série saisonnière a besoin de plusieurs
-      cycles annuels pour qu'un split chronologique et un backtest soient lisibles.
+      cycles annuels pour qu'un split chronologique et un backtest soient lisibles ;
+    * le classement (:data:`NB_ROWS_RANKING`), parce que l'unité d'évaluation est l'utilisateur :
+      un échantillon réduit laisserait trop peu de listes pour que le NDCG moyen ne soit pas du
+      bruit, et les écarts entre algorithmes deviendraient illisibles.
 
     Dans les deux cas on génère le volume nominal du pipeline : les chiffres du notebook restent
     comparables à ceux de ``make train``, au prix d'une exécution un peu plus longue (largement sous
@@ -190,6 +238,11 @@ def _notebook_rows(context: NotebookContext) -> int:
         return NB_ROWS_ANOMALY
     if _is_forecasting(context):
         return NB_ROWS_FORECAST
+    if _is_ranking(context):
+        # Import différé : `notebooks.ranking` importe ce module au chargement.
+        from tools.scaffold.notebooks.ranking import NB_ROWS_RANKING
+
+        return NB_ROWS_RANKING
     return NB_ROWS
 
 
@@ -287,9 +340,9 @@ plt.rcParams.update({"figure.dpi": 110, "axes.grid": True, "grid.alpha": 0.25})
 pd.set_option("display.max_columns", 40)
 pd.set_option("display.width", 170)
 # Le projet configure loguru au premier `get_logger()` appelé par `src`. On prend la main ici,
-# au niveau WARNING : sans cela, chaque cellule d'entraînement noierait ses tableaux sous les
-# lignes INFO de production. Les avertissements réels restent visibles — c'est l'essentiel.
-setup_logging(level="WARNING")
+# au niveau __NB_LOG_LEVEL__ : sans cela, chaque cellule d'entraînement noierait ses tableaux sous
+# les lignes INFO de production. Les erreurs réelles restent visibles — c'est l'essentiel.
+setup_logging(level="__NB_LOG_LEVEL__")
 
 # --- Configuration : exactement celle de `python -m src.main` ------------------------------------
 # Les notebooks travaillent sur un échantillon réduit (__ROWS__ lignes) : l'exécution complète
@@ -305,7 +358,7 @@ with initialize_config_dir(config_dir=str(PROJECT_ROOT / "conf"), version_base=N
                 "mode=train",
                 f"data.n_samples={NB_ROWS}",
                 "seed=__SEED__",
-                "log_level=WARNING",
+                "log_level=__NB_LOG_LEVEL__",
                 "++train.epochs=__NB_EPOCHS__",
                 "train.callbacks.progress_bar=false",
             ],
@@ -664,6 +717,14 @@ for column in categorical_columns:
             )
 
             cells += forecasting_structure_cells(context)
+        elif _is_ranking(context):
+            # La cible d'un classement est binaire, mais sa **structure** est l'objet d'étude :
+            # combien d'intentions par utilisateur, quel lien entre popularité et pertinence,
+            # quelles contraintes de publication pèsent sur le top-K. Décrire des proportions de
+            # classes n'aurait aucun pouvoir explicatif ici.
+            from tools.scaffold.notebooks.ranking import structure_cells as ranking_structure_cells
+
+            cells += ranking_structure_cells(context)
         elif _is_regression(context):
             from tools.scaffold.notebooks.regression import target_cells
 
@@ -2442,6 +2503,21 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
         model_exploration = build_04_forecasting
         training = build_05_forecasting
         error_analysis = build_06_forecasting
+    elif _is_ranking(context):
+        # En classement, l'exploration part du plancher aléatoire, de la référence de popularité et
+        # du plafond oracle, puis compare les algorithmes à protocole identique et borne ce que la
+        # dispersion entre graines autorise à conclure ; l'analyse d'erreurs descend du verdict par
+        # objectif vers les segments, le démarrage froid, la couverture, le backtest contre son
+        # plancher de bruit, et se termine par des recommandations vérifiables.
+        from tools.scaffold.notebooks.ranking import (
+            build_04_model_exploration as build_04_ranking,
+        )
+        from tools.scaffold.notebooks.ranking import (
+            build_06_error_analysis as build_06_ranking,
+        )
+
+        model_exploration = build_04_ranking
+        error_analysis = build_06_ranking
     elif _is_regression(context):
         # L'analyse d'erreurs d'une cible continue n'a ni matrice de confusion ni seuil à arbitrer.
         from tools.scaffold.notebooks.regression import (
@@ -2492,6 +2568,7 @@ __all__ = [
     "_is_anomaly",
     "_is_clustering",
     "_is_forecasting",
+    "_is_ranking",
     "_is_regression",
     "build_01_eda",
     "build_04_model_exploration",

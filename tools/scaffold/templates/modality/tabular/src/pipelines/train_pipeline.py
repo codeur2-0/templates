@@ -20,7 +20,7 @@ The test split is deliberately **never** seen by the trainer: it is only used by
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -75,6 +75,7 @@ class TrainPipeline(BasePipeline):
             paths=self.paths,
             metric_names=self.config.metrics.all_metrics,
             task=self.config.metrics.task,
+            metric_extra=self._metric_extra(config_dict),
             min_primary_metric=self.config.metrics.min_primary,
             primary_metric=f"val_{self.config.metrics.primary}",
             primary_direction=str(self.config.metrics.direction),
@@ -85,6 +86,7 @@ class TrainPipeline(BasePipeline):
                 y_train=matrices["y_train"],
                 X_val=matrices["X_val"],
                 y_val=matrices["y_val"],
+                groups_val=matrices.get("groups_val"),
                 feature_names=matrices["feature_names"],
                 task=self.config.metrics.task,
             )
@@ -169,6 +171,28 @@ class TrainPipeline(BasePipeline):
         )
         return enriched, builder
 
+    @staticmethod
+    def _metric_extra(config_dict: Mapping[str, Any]) -> dict[str, Any]:
+        """Return the metric context read from the root configuration.
+
+        A ranking metric is meaningless without its cutoff: ``ndcg_at_k`` must know how many slots
+        are published. That number lives in the task node of the root configuration, which the
+        trainer does not receive, so the pipeline extracts it here rather than letting the metric
+        fall back on a default.
+
+        Args:
+            config_dict: Root configuration, as a plain mapping.
+
+        Returns:
+            The metric context (empty when the task declares none).
+        """
+        extra: dict[str, Any] = {}
+        for node_name in ("recommendation", "load_forecasting"):
+            node = config_dict.get(node_name)
+            if isinstance(node, dict) and node.get("top_k") is not None:
+                extra["top_k"] = int(node["top_k"])
+        return extra
+
     def _preprocess(self, enriched: dict[str, Any]) -> dict[str, Any]:
         """Fit the preprocessing on train and transform every split."""
         target = self.config.data.target
@@ -204,6 +228,18 @@ class TrainPipeline(BasePipeline):
         )
         X_test = pipeline.transform(enriched["test"].loc[:, X_train_frame.columns])
 
+        # The group column (the user, in a ranking task) is dropped from the features by the
+        # preprocessing, so it travels separately, aligned with ``X_val``, letting the validation
+        # metrics be computed per group. ``transform`` preserves the row order, which is what
+        # guarantees the alignment.
+        group_column = str(getattr(self.config.data, "group_column", "") or "")
+        val_frame = enriched["val"]
+        groups_val = (
+            val_frame[group_column].to_numpy()
+            if val_frame is not None and group_column and group_column in val_frame.columns
+            else None
+        )
+
         if self.config.data.validation.processed:
             validated: list[str] = []
             for name, matrix in (("train", X_train), ("val", X_val), ("test", X_test)):
@@ -222,6 +258,7 @@ class TrainPipeline(BasePipeline):
             "y_val": y_val,
             "X_test": X_test,
             "y_test": feature_target_split(enriched["test"], target, drop_columns)[1],
+            "groups_val": groups_val,
             "feature_names": pipeline.feature_names_out,
         }
 

@@ -1,0 +1,430 @@
+# Valeurs par défaut de la famille `recommendation` (tâche `ranking`, modalité tabulaire).
+#
+# Le jeu de données n'est pas une table d'interactions brutes : c'est un **journal de candidats
+# scorés**, c'est-à-dire exactement ce sur quoi un modèle de classement est entraîné en production.
+# Chaque ligne est un couple (utilisateur, article candidat) décrit par ses features, avec la
+# pertinence observée ensuite comme cible. Ce choix est assumé et documenté : il permet de réutiliser
+# la modalité tabulaire (splits, preprocessing sans fuite, contrats Pandera) tout en évaluant avec
+# les vraies métriques de recommandation, calculées **par utilisateur** puis moyennées.
+
+domain: data-science
+problem: recommendation
+modality: tabular
+family: recommendation
+
+business:
+  persona: >-
+    Équipe Personnalisation d'un e-commerçant : data scientist qui industrialise le modèle de
+    classement, responsable CRM qui pilote le taux de conversion et le panier moyen, et équipe
+    catalogue qui surveille l'exposition de la longue traîne et la disponibilité des références.
+  context: >-
+    Le site expose chaque visiteur à un catalogue de plusieurs milliers de références. Le classement
+    historique est un tri par popularité : il écrase la longue traîne, ignore l'affinité individuelle
+    et recommande des articles indisponibles. Une refonte du moteur de recommandation doit prouver
+    son apport **hors échantillon et par utilisateur**, pas seulement sur une moyenne globale.
+  problem: >-
+    Classer les articles candidats d'un utilisateur — les scorer puis publier un top-K — à partir
+    des interactions passées, de la fiche article et du profil utilisateur, sans jamais utiliser
+    d'information postérieure à la session scorée.
+  inputs: >-
+    Journal de candidats scorés : identifiants utilisateur et article, profil utilisateur (ancienneté,
+    commandes, dépenses, amplitude d'exploration, canal, région, statut membre), fiche article
+    (catégorie, prix, note, avis, stock, ancienneté, marge, audience, taux de conversion, promotion),
+    signaux croisés utilisateur-article (affinité catégorie et marque, écart au prix habituel,
+    consultations récentes, taux d'achat des utilisateurs similaires) et date de session.
+  outputs: >-
+    Score de pertinence par couple (utilisateur, article), top-K ordonné par utilisateur, indicateur
+    de confiance (utilisateur froid, article jamais vu, candidat peu peuplé), couverture catalogue du
+    top-K et marge attendue — car classer par pertinence et classer par marge ne donnent pas le même
+    top-K, et l'arbitrage doit être explicite.
+  value: >-
+    Hausse du taux de conversion et du panier moyen, baisse du taux de retour (un article pertinent
+    est un article gardé), exposition de la longue traîne au lieu du seul best-seller, et suppression
+    des recommandations d'articles indisponibles qui dégradent la confiance.
+  success_criteria:
+    - "NDCG@10 ≥ 0,45 sur le split de test chronologique, pertinence binaire. Références du jeu : un scoreur aléatoire vaut 0,230, le tri par popularité 0,334, et le plafond atteignable (score latent parfait, bruit compris) 0,722 — l'ordre publié compte autant que le fait de recommander les bons articles."
+    - "Precision@10 ≥ 0,22 : au moins un article sur cinq publié dans le top-10 est réellement pertinent (popularité : 0,163)."
+    - "Recall@10 ≥ 0,55 : le top-10 capture plus de la moitié de la pertinence disponible pour un utilisateur (popularité : 0,434)."
+    - "Le modèle doit battre la baseline **popularité** (classement par audience 7 jours) d'au moins 25 % en NDCG@10 : sans cet écart, un simple tri par best-seller suffit et le modèle n'a pas de raison d'exister."
+    - "Couverture catalogue ≥ 25 % des références présentes dans au moins un top-10 du test. Ce critère distingue deux moteurs de même pertinence : le tri par popularité n'expose que 8,4 % du catalogue et échoue à ce critère, ce qui est précisément le mécanisme par lequel la longue traîne meurt."
+    - "Le rappel@10 sur les utilisateurs froids (au plus 1 commande sur 12 mois, ~29 % des utilisateurs) doit valoir au moins 60 % du rappel global : un moteur qui abandonne les nouveaux venus perd exactement les clients qu'il faut convertir. Ce critère est la sanction directe de l'interdiction d'utiliser les identifiants comme features."
+    - "Reproductibilité : deux exécutions avec la même graine produisent exactement les mêmes métriques, et la génération est déterministe à la graine près."
+  cadence: >-
+    Scores recalculés à chaque ouverture de session (le classement doit refléter la dernière
+    interaction), popularité rafraîchie plusieurs fois par jour, ré-entraînement quotidien sur
+    fenêtre glissante et ré-indexation complète après un changement de catalogue.
+  constraints:
+    - "Aucune donnée réelle : le catalogue, les utilisateurs et les interactions de ce dépôt sont synthétiques et hors ligne."
+    - "`user_id` et `item_id` sont des **identifiants**, jamais des features : un modèle qui mémorise un identifiant ne sait rien dire d'un utilisateur ou d'un article jamais vu. La généralisation passe par les signaux croisés."
+    - "Le split est chronologique : jamais de mélange aléatoire. Évaluer sur des sessions passées avec un modèle entraîné sur des sessions futures, c'est mesurer un moteur qui triche."
+    - "Aucune statistique postérieure à la session scorée : l'audience et le taux de conversion d'un article sont des fenêtres glissantes **antérieures**, jamais la période cible."
+    - "Un article indisponible ne doit pas être publié : le filtre stock est appliqué après scoring, ce qui est mesuré séparément car il modifie la couverture."
+    - "Latence de classement < 50 ms pour 200 candidats sur CPU (contrainte de temps réel session)."
+
+data:
+  dataset_name: ecommerce_candidate_impressions
+  title: Journal de candidats scorés d'un catalogue e-commerce
+  description: >-
+    Jeu d'apprentissage **par couple (utilisateur, article candidat)** : chaque ligne décrit un
+    candidat proposé à un utilisateur lors d'une session, avec les features disponibles à cet
+    instant et la pertinence observée ensuite. 1 200 utilisateurs x 30 candidats = 36 000 lignes.
+    La pertinence est construite à partir d'une affinité latente utilisateur-article (goût par
+    catégorie, sensibilité au prix, appétence à la nouveauté) bruitée, de sorte qu'aucun modèle ne
+    puisse atteindre 1,0 : la part irréductible est mesurée et annoncée. Les utilisateurs froids
+    (peu d'historique) et la longue traîne du catalogue sont volontairement surreprésentés par
+    rapport à un journal réel, parce que c'est là que se joue la qualité d'un moteur de
+    recommandation.
+  n_samples: 36000
+  seed: 42
+  formats: [parquet, csv]
+  target: relevance
+  id_column: sample_id
+  time_column: session_date
+  group_column: user_id
+  columns:
+    - name: sample_id
+      dtype: str
+      role: identifier
+      description: "Identifiant unique du couple (utilisateur, article candidat)"
+      unique: true
+      checks: { regex: "^RC-[0-9]{6}$" }
+      distribution: "identifiants séquentiels déterministes"
+    - name: user_id
+      dtype: str
+      role: group
+      description: "Identifiant utilisateur — clé de regroupement des métriques de classement, jamais une feature"
+      checks: { regex: "^U-[0-9]{4}$" }
+      distribution: "1 200 utilisateurs, 30 candidats chacun ; fréquence uniforme par construction"
+    - name: item_id
+      dtype: str
+      role: identifier
+      description: "Identifiant article du catalogue — jamais une feature, pour les mêmes raisons"
+      checks: { regex: "^I-[0-9]{5}$" }
+      distribution: "catalogue de 900 références, tirage des candidats pondéré par l'affinité et la popularité"
+    - name: session_date
+      dtype: datetime
+      role: timestamp
+      description: "Date de la session au cours de laquelle le candidat a été scoré — clé du split chronologique"
+      distribution: "étalement sur ~14 mois, avec une saisonnalité hebdomadaire et un pic de fin d'année"
+    - name: user_tenure_days
+      dtype: int
+      role: feature
+      description: "Ancienneté du compte utilisateur en jours"
+      unit: "jours"
+      checks: { ge: 0, le: 3000 }
+      distribution: "loi puissance tronquée : beaucoup de comptes récents, peu de comptes anciens"
+    - name: user_orders_12m
+      dtype: int
+      role: feature
+      description: "Nombre de commandes de l'utilisateur sur les 12 derniers mois — pilote le segment froid / tiède / chaud"
+      unit: "commandes"
+      checks: { ge: 0, le: 120 }
+      distribution: "Poisson de moyenne ~4,5, fortement asymétrique"
+    - name: user_spend_eur_12m
+      dtype: float
+      role: feature
+      description: "Dépense cumulée de l'utilisateur sur 12 mois"
+      unit: "EUR"
+      checks: { ge: 0.0, le: 12000.0 }
+      distribution: "log-normale corrélée au nombre de commandes"
+    - name: user_sessions_30d
+      dtype: int
+      role: feature
+      description: "Sessions ouvertes sur les 30 derniers jours — intensité d'usage récente"
+      unit: "sessions"
+      checks: { ge: 0, le: 200 }
+      distribution: "Poisson de moyenne ~9"
+    - name: user_distinct_categories_12m
+      dtype: int
+      role: feature
+      description: "Nombre de catégories distinctes achetées sur 12 mois — amplitude d'exploration"
+      unit: "catégories"
+      checks: { ge: 0, le: 12 }
+      distribution: "binomiale tronquée, corrélée positivement aux commandes"
+    - name: user_avg_basket_eur
+      dtype: float
+      role: feature
+      description: "Panier moyen de l'utilisateur"
+      unit: "EUR"
+      checks: { ge: 0.0, le: 900.0 }
+      distribution: "log-normale de médiane ~65 EUR"
+    - name: user_typical_price_eur
+      dtype: float
+      role: feature
+      description: "Prix médian des articles achetés par l'utilisateur — référence pour mesurer l'écart de prix d'un candidat"
+      unit: "EUR"
+      checks: { ge: 0.0, le: 900.0 }
+      distribution: "log-normale, proche du panier moyen mais moins dispersée"
+    - name: user_return_rate
+      dtype: float
+      role: feature
+      description: "Part des commandes retournées sur 12 mois — un retour fréquent signale une pertinence mal calibrée"
+      unit: "ratio"
+      checks: { ge: 0.0, le: 1.0 }
+      distribution: "bêta centrée sur ~0,08, masse en 0 pour les utilisateurs sans retour"
+    - name: user_price_band_pref
+      dtype: category
+      role: feature
+      description: "Gamme de prix préférée de l'utilisateur"
+      checks: { isin: ["entree", "milieu", "premium"] }
+      distribution: "55 % milieu, 30 % entrée, 15 % premium"
+    - name: user_channel
+      dtype: category
+      role: feature
+      description: "Canal principal d'achat (le classement mobile privilégie les fiches courtes)"
+      checks: { isin: ["web", "mobile", "app"] }
+      distribution: "45 % app, 33 % mobile, 22 % web"
+    - name: user_region
+      dtype: str
+      role: feature
+      description: "Région de livraison — effet sur la disponibilité et les délais"
+      checks: { isin: ["nord", "sud", "est", "ouest", "idf"] }
+      distribution: "34 % IDF, 16 à 18 % par autre région"
+    - name: user_is_member
+      dtype: bool
+      role: feature
+      description: "Adhésion au programme de fidélité"
+      distribution: "38 % de membres, plus fréquents chez les utilisateurs chauds"
+    - name: item_category
+      dtype: category
+      role: feature
+      description: "Catégorie catalogue de l'article"
+      checks: { isin: ["mode", "maison", "high_tech", "sport", "beaute", "alimentaire", "jouet", "jardin"] }
+      distribution: "8 catégories, de 8 % à 19 % du catalogue"
+    - name: item_price_eur
+      dtype: float
+      role: feature
+      description: "Prix de vente de l'article"
+      unit: "EUR"
+      checks: { ge: 1.0, le: 2500.0 }
+      distribution: "log-normale par catégorie (médiane ~45 EUR, high_tech plus cher)"
+    - name: item_rating_avg
+      dtype: float
+      role: feature
+      description: "Note moyenne de l'article"
+      unit: "/5"
+      checks: { ge: 1.0, le: 5.0 }
+      distribution: "bêta recentrée sur ~4,1, peu d'articles sous 2,5"
+    - name: item_reviews_count
+      dtype: int
+      role: feature
+      description: "Nombre d'avis publiés — preuve sociale, mais aussi proxy de l'âge de l'article"
+      unit: "avis"
+      checks: { ge: 0, le: 6000 }
+      distribution: "loi puissance : quelques articles très commentés, une longue traîne à 0 avis"
+    - name: item_stock_units
+      dtype: int
+      role: feature
+      description: "Stock disponible au moment du scoring — un stock nul interdit la publication"
+      unit: "unités"
+      checks: { ge: 0, le: 900 }
+      distribution: "7 % des candidats en rupture, plus fréquent sur les articles très demandés"
+    - name: item_age_days
+      dtype: int
+      role: feature
+      description: "Ancienneté de l'article au catalogue"
+      unit: "jours"
+      checks: { ge: 0, le: 2200 }
+      distribution: "exponentielle de moyenne ~300 jours"
+    - name: item_margin_pct
+      dtype: float
+      role: feature
+      description: "Marge brute de l'article — permet d'arbitrer explicitement pertinence contre valeur"
+      unit: "%"
+      checks: { ge: 0.0, le: 70.0 }
+      distribution: "normale de moyenne ~34 %, plus faible en high_tech, plus forte en beauté"
+    - name: item_views_7d
+      dtype: int
+      role: feature
+      description: "Vues de l'article sur les 7 jours **précédant** la session — fenêtre strictement antérieure, donc sans fuite"
+      unit: "vues"
+      checks: { ge: 0, le: 40000 }
+      distribution: "loi puissance ; sert aussi de score à la baseline popularité"
+    - name: item_conversion_rate_30d
+      dtype: float
+      role: feature
+      description: "Taux de conversion de la fiche sur 30 jours glissants antérieurs"
+      unit: "ratio"
+      checks: { ge: 0.0, le: 0.6 }
+      distribution: "bêta centrée sur ~0,045, plus élevée sur les articles bien notés"
+    - name: item_is_promoted
+      dtype: bool
+      role: feature
+      description: "Article poussé par une opération marketing au moment de la session"
+      distribution: "33,4 % de candidats en promotion : 18 % de références poussées en fond de catalogue, plus un calendrier d'animation chargé en juin, novembre et décembre"
+    - name: user_category_affinity
+      dtype: float
+      role: feature
+      description: "Part des dépenses de l'utilisateur dans la catégorie de l'article — le signal croisé le plus fort"
+      unit: "ratio"
+      checks: { ge: 0.0, le: 1.0 }
+      distribution: "bimodale : 62,6 % de zéros (catégories jamais achetées) et 35,0 % au-dessus de 0,3"
+    - name: user_brand_affinity
+      dtype: float
+      role: feature
+      description: "Affinité de l'utilisateur à la marque de l'article (historique d'achats et de consultations)"
+      unit: "ratio"
+      checks: { ge: 0.0, le: 1.0 }
+      distribution: "bêta de mode ~0,15, masse importante en 0"
+    - name: price_gap_pct
+      dtype: float
+      role: feature
+      description: "Écart relatif entre le prix du candidat et le prix habituel de l'utilisateur — un écart fort fait chuter la pertinence"
+      unit: "%"
+      checks: { ge: -95.0, le: 400.0 }
+      distribution: "centrée sur ~0, asymétrique à droite (les candidats plus chers sont plus fréquents)"
+    - name: days_since_last_view
+      dtype: int
+      role: feature
+      description: "Jours écoulés depuis la dernière consultation de cet article par cet utilisateur"
+      unit: "jours"
+      nullable: true
+      checks: { ge: 0, le: 420 }
+      distribution: "62,1 % de candidats jamais consultés (valeur manquante), le reste en décroissance rapide de médiane 18 jours"
+    - name: user_item_views_30d
+      dtype: int
+      role: feature
+      description: "Consultations de ce candidat par cet utilisateur sur 30 jours glissants antérieurs"
+      unit: "vues"
+      checks: { ge: 0, le: 40 }
+      distribution: "72,5 % de zéros, queue fine — signal d'intention rare mais très prédictif"
+    - name: similar_users_buy_rate
+      dtype: float
+      role: feature
+      description: "Taux d'achat de ce candidat par les utilisateurs les plus proches (signal collaboratif précalculé sur fenêtre antérieure)"
+      unit: "ratio"
+      checks: { ge: 0.0, le: 0.5 }
+      distribution: "bêta centrée sur ~0,06, corrélée à l'affinité catégorie"
+    - name: relevance
+      dtype: int
+      role: target
+      description: "Pertinence observée : 1 si l'utilisateur a ajouté au panier ou acheté, 0 sinon"
+      checks: { isin: [0, 1] }
+      distribution: "13,9 % de positifs au global, 14,6 % sur la fenêtre d'entraînement et 11,5 % sur la fenêtre de test (creux d'été) — la saisonnalité se voit dans la prévalence"
+  insights:
+    - "La pertinence se joue presque entièrement dans les **signaux croisés** : `user_category_affinity`, `price_gap_pct` et `user_item_views_30d` portent l'essentiel du signal, alors que les features purement utilisateur ou purement article ne distinguent pas un bon candidat d'un mauvais."
+    - "`item_views_7d` suit une loi puissance très marquée : classer par cette seule colonne reproduit le moteur historique. C'est une **vraie** baseline — son NDCG@10 de 0,334 bat nettement l'aléatoire (0,230), parce que l'audience observe un attrait latent qui profite aussi à la pertinence — mais elle n'expose que 8,4 % du catalogue dans ses top-10, contre plus de la moitié pour un modèle qui combine attrait et affinité individuelle."
+    - "72,5 % des candidats n'ont jamais été consultés par l'utilisateur (`user_item_views_30d = 0`) et 62,1 % n'ont jamais été vus du tout (`days_since_last_view` manquant) : le moteur travaille majoritairement en exploration, pas en exploitation. Le signal d'intention est rare mais très prédictif quand il existe."
+    - "Les utilisateurs froids (au plus 1 commande sur 12 mois) représentent ~29 % des lignes mais une part bien plus faible des positifs : sans traitement dédié, un modèle global les classe mal et le moteur perd précisément les clients à convertir."
+    - "`item_stock_units = 0` sur ~7 % des candidats, et davantage sur les articles les plus populaires : filtrer après scoring coûte donc de la pertinence mesurée, ce qui doit être chiffré plutôt que supposé nul."
+    - "`price_gap_pct` a un effet en cloche inversée : un candidat très en dessous du prix habituel n'est pas mieux classé qu'un candidat aligné, ce qu'un modèle linéaire ne capture pas et qu'un arbre capture sans feature supplémentaire."
+  recommendations:
+    - "Toujours comparer le modèle à au moins deux références triviales — la popularité (`item_views_7d`) et le tirage aléatoire — et publier l'écart : un NDCG@10 absolu ne veut rien dire."
+    - "Évaluer **par utilisateur** puis moyenner : une moyenne globale des métriques de classement est dominée par les utilisateurs à forte activité et masque l'effondrement sur les nouveaux venus."
+    - "Surveiller la couverture catalogue et la concentration du top-K en plus de la pertinence : un moteur peut améliorer son NDCG en se refermant sur dix best-sellers, ce qui détruit le catalogue à moyen terme."
+    - "Traiter les valeurs manquantes de `days_since_last_view` comme une information (jamais consulté) et non comme un trou à boucher : l'imputation par la médiane effacerait la distinction exploration / exploitation."
+    - "Ne jamais entraîner sur les identifiants : garder `user_id` et `item_id` hors des features, et vérifier par un test qu'un utilisateur absent de l'entraînement obtient malgré tout un classement cohérent."
+  notes:
+    - "Le jeu est un **journal de candidats scorés**, pas une table d'interactions brutes : l'échantillonnage des négatifs est fait en amont par le générateur (30 candidats par utilisateur, dont ~14 % de pertinents), ce qui est le protocole standard d'entraînement d'un modèle de classement."
+    - "Les 30 candidats d'un utilisateur sont tirés à la même date de session : le classement se compare donc à nombre de candidats égal entre utilisateurs, ce qui rend Precision@K et Recall@K comparables. Trente candidats pour un top-10 est un minimum : à 12 candidats le top-10 couvre presque toute la liste, le NDCG sature et même un scoreur aléatoire semble correct (mesuré : NDCG@10 aléatoire de 0,47 à 12 candidats contre 0,23 à 30)."
+    - "La pertinence est générée à partir d'une affinité latente bruitée : le plafond atteignable est inférieur à 1,0 et le rapport d'évaluation l'annonce explicitement pour éviter de poursuivre un bruit."
+    - "Toutes les statistiques article sont des fenêtres glissantes **antérieures** à la session ; la construction est vérifiée par un test de fuite qui recompose une statistique postérieure et montre qu'elle améliore artificiellement les métriques."
+
+metrics:
+  task: ranking
+  primary: ndcg_at_k
+  secondary: [precision_at_k, recall_at_k, map_at_k, hit_rate_at_k]
+  baseline: popularity
+  direction: maximize
+  min_primary: 0.45
+
+preprocessing:
+  numeric:
+    imputer: median
+    clip_outliers: true
+    clip_quantiles: [0.001, 0.999]
+    scaler: standard
+    log1p_columns: [item_reviews_count, item_views_7d, user_spend_eur_12m]
+  categorical:
+    imputer: most_frequent
+    encoder: onehot
+    handle_unknown: ignore
+    min_frequency: 0.01
+    max_categories: 12
+  features:
+    - type: datetime_parts
+      name: session_parts
+      column: session_date
+      prefix: session
+      parts: [month, dayofweek, is_weekend]
+    - type: boolean_flag
+      name: is_cold_user
+      column: user_orders_12m
+      operator: le
+      value: 1.0
+    - type: boolean_flag
+      name: is_out_of_stock
+      column: item_stock_units
+      operator: lt
+      value: 1.0
+    - type: boolean_flag
+      name: item_never_viewed
+      column: user_item_views_30d
+      operator: eq
+      value: 0.0
+    - type: boolean_flag
+      name: is_high_margin
+      column: item_margin_pct
+      operator: gt
+      value: 40.0
+    - type: ratio
+      name: reviews_per_view
+      numerator: item_reviews_count
+      denominator: item_views_7d
+      epsilon: 50.0
+    - type: product
+      name: expected_margin_eur
+      columns: [item_price_eur, item_margin_pct]
+    - type: log1p
+      name: days_since_last_view_log
+      column: days_since_last_view
+    - type: bin
+      name: item_price_bucket
+      column: item_price_eur
+      method: quantile
+      bins: 5
+    - type: bin
+      name: item_popularity_bucket
+      column: item_views_7d
+      method: quantile
+      bins: 5
+    - type: group_stat
+      name: median_price_by_category
+      group_by: item_category
+      value_column: item_price_eur
+      agg: median
+    - type: group_stat
+      name: mean_rating_by_category
+      group_by: item_category
+      value_column: item_rating_avg
+      agg: mean
+    - type: group_stat
+      name: affinity_by_channel
+      group_by: user_channel
+      value_column: user_category_affinity
+      agg: mean
+
+train:
+  split:
+    test_size: 0.2
+    val_size: 0.15
+    stratify: false
+    shuffle: false
+    time_based: true
+  cross_validation:
+    enabled: false
+    folds: 3
+    strategy: kfold
+
+learning_objectives:
+  - "Comprendre pourquoi un problème de recommandation se pose comme un **classement par utilisateur** et non comme une classification globale."
+  - "Construire un journal de candidats scorés : échantillonnage des négatifs, fenêtres glissantes antérieures, absence de fuite temporelle."
+  - "Savoir pourquoi les identifiants ne doivent jamais être des features, et le vérifier par un test de généralisation à un utilisateur inconnu."
+  - "Maîtriser les métriques de classement : Precision@K, Recall@K, NDCG@K, MAP@K, hit-rate — et ce que chacune récompense ou ignore."
+  - "Établir des références triviales (popularité, aléatoire) et mesurer l'apport réel du modèle plutôt qu'un score absolu."
+  - "Évaluer par segment d'activité utilisateur : froid, tiède, chaud — et constater que la moyenne globale masque l'effondrement sur les nouveaux venus."
+  - "Mesurer la **couverture catalogue** et la concentration du top-K : la diversité est une contrainte métier, pas un supplément d'âme."
+  - "Arbitrer pertinence contre marge : deux classements, deux top-K différents, une décision explicite."
+  - "Appliquer une contrainte métier après scoring (stock nul) et chiffrer ce qu'elle coûte en pertinence mesurée."
+  - "Documenter le plafond atteignable quand la cible est bruitée, pour ne pas poursuivre un bruit résiduel."
+  - "Industrialiser : latence de classement sous contrainte temps réel, artefacts rechargables, configuration par Hydra."

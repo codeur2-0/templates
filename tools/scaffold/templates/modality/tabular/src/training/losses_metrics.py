@@ -867,6 +867,15 @@ LOSS_ALIASES: dict[str, dict[str, str]] = {
         "sklearn": "squared_error",
     },
     "anomaly": {"torch": "mse", "tensorflow": "mse", "keras": "mse", "sklearn": "squared_error"},
+    # Classement pointwise : le score publié est une probabilité de pertinence, donc la perte
+    # est la même qu'en binaire. Une perte de classement véritable (LambdaRank, ListNet)
+    # optimiserait directement le NDCG mais n'est disponible dans aucune de ces stacks.
+    "ranking": {
+        "torch": "bce_with_logits",
+        "tensorflow": "binary_crossentropy",
+        "keras": "binary_crossentropy",
+        "sklearn": "log_loss",
+    },
 }
 
 

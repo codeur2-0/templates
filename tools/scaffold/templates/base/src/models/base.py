@@ -63,7 +63,10 @@ SUPERVISED_TASKS: frozenset[str] = frozenset(
 )
 
 #: Tasks whose predictions are normalised probabilities.
-PROBABILITY_TASKS: frozenset[str] = frozenset({"binary", "multiclass"})
+#: ``ranking`` en fait partie : un modèle de classement pointwise score chaque couple
+#: (utilisateur, candidat) par sa probabilité de pertinence, et c'est ce score — jamais la
+#: classe prédite — qui détermine l'ordre publié.
+PROBABILITY_TASKS: frozenset[str] = frozenset({"binary", "multiclass", "ranking"})
 
 
 def _utc_now() -> str:
