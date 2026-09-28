@@ -98,7 +98,8 @@ def write_notebook(path: Path, cells: Sequence[NotebookNode], *, kernel: str = "
         "language_info": {"name": "python", "version": "3.11"},
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    with Path(path).open("w", encoding="utf-8") as handle:
+    # Fins de ligne LF quel que soit l'OS : c'est ce qui rend la reconstruction octet pour octet.
+    with Path(path).open("w", encoding="utf-8", newline="\n") as handle:
         nbformat.write(notebook, handle)
     return path
 

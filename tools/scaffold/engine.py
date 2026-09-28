@@ -203,7 +203,9 @@ class ProjectRenderer:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             if template_rel.endswith(".j2"):
                 content = self._render_template(template_rel)
-                output_path.write_text(content, encoding="utf-8")
+                # `newline="\n"` : sans lui, Windows écrirait des CRLF et une régénération à
+                # templates constants produirait un diff sur chaque ligne de chaque fichier.
+                output_path.write_text(content, encoding="utf-8", newline="\n")
             else:
                 shutil.copyfile(layer / template_rel, output_path)
             report.files.append(output_path)
