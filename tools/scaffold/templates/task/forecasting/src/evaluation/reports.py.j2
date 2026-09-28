@@ -1,0 +1,1535 @@
+{#- Rapport d'évaluation Markdown + figures (famille time_series_forecasting). -#}
+"""Evaluation reports: turn an :class:`EvaluationResult` into readable artefacts.
+
+Two artefacts are produced:
+
+* ``artifacts/reports/evaluation_report.md`` — the document a forecast reviewer reads,
+* ``artifacts/metrics/forecasting_report.json`` — its machine readable counterpart.
+
+A forecast report is not a regression report with different words. It must answer four questions,
+in this order, because that is the order in which a reviewer loses confidence:
+
+1. **does it beat the hand-made reference?** — the seasonal naive is what the business does today;
+   a model that merely matches it has no operational value, whatever its R² says;
+2. **is the error acceptable at every horizon?** — the J+1 error drives daily balancing, the J+7
+   error drives the weekly purchasing programme: a single global MAPE averages two products;
+3. **is the error stable in time, and can the published interval be trusted?** — rolling-origin
+   backtest, residual autocorrelation, realised coverage versus nominal level;
+4. **where does it fail?** — cold snaps, heatwaves, industrial shutdowns, specific months: the days
+   where a forecast error is actually expensive.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping
+
+import numpy as np
+import pandas as pd
+
+from src.evaluation.evaluator import TOLERANCE_PCT, EvaluationResult
+from src.utils.io import write_json, write_text
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+from src.visualization.plots import ForecastingPlots
+
+logger = get_logger(__name__)
+
+#: Titre du cas d'usage (injecté par le moteur de scaffolding depuis le manifeste).
+USE_CASE_TITLE = "{{ spec.title }}"
+
+#: Jeu de données évalué.
+DATASET_NAME = "{{ spec.data.dataset_name }}"
+
+#: Cible métier.
+TARGET_NAME = "{{ spec.data.target or 'load_mw' }}"
+
+#: Métrique pilotant la décision.
+PRIMARY_METRIC = "{{ spec.metrics.primary }}"
+
+#: Unité de la cible, utilisée dans les libellés de tableaux.
+TARGET_UNIT = "MW"
+
+#: Critères de succès du cas d'usage, injectés depuis `extras.quality` du manifeste. Les MAPE
+#sont
+#: exprimés en pourcents, comme les métriques `mape` et `smape` du registre partagé.
+DEFAULT_THRESHOLDS: dict[str, float] = {
+    "mape_max": {{ extras.get("quality", {}).get("mape_max", 4.0) }},
+    "mape_long_horizon_max": {{ extras.get("quality", {}).get("mape_long_horizon_max", 6.0) }},
+    "mase_max": {{ extras.get("quality", {}).get("mase_max", 0.75) }},
+    "improvement_vs_naive_min": {{ extras.get("quality", {}).get("improvement_vs_naive_min", 30.0) }},
+    "bias_max": {{ extras.get("quality", {}).get("bias_max", 1.5) }},
+    "interval_coverage_min": {{ extras.get("quality", {}).get("interval_coverage_min", 85.0) }},
+    "backtest_spread_max": {{ extras.get("quality", {}).get("backtest_spread_max", 2.0) }},
+}
+
+#: Recommandations métier documentées pour ce cas d'usage (famille `time_series_forecasting`).
+BUSINESS_RECOMMENDATIONS: tuple[str, ...] = (
+{% if spec.data.recommendations %}
+{{ py_string_tuple(spec.data.recommendations, indent=4, width=96) }}
+{% else %}
+    "Comparer systématiquement la prévision aux références naïves avant de publier un chiffre.",
+    "Valider par backtest à origine glissante, jamais par validation croisée aléatoire.",
+{% endif %}
+)
+
+#: Nombre de pires prévisions citées dans le rapport.
+TOP_ERRORS = 10
+
+#: Nombre de variables explicatives citées dans le rapport.
+TOP_DRIVERS = 10
+
+
+class ReportBuilder:
+    """Build the Markdown report, its JSON counterpart and the figures."""
+
+    def __init__(
+        self, paths: ProjectPaths | None = None, *, config: Mapping[str, Any] | None = None
+    ) -> None:
+        """Store the output layout and the configuration.
+
+        Args:
+            paths: Project layout (figures and reports directories).
+            config: Root configuration mapping, used to document the run and to override the
+                quality thresholds through ``metrics.thresholds``.
+        """
+        self.paths = paths or ProjectPaths.from_root()
+        self.config: dict[str, Any] = dict(config or {})
+        self.plots = ForecastingPlots(self.paths.figures_dir)
+        self.thresholds: dict[str, float] = _resolve_thresholds(self.config)
+        family = dict(self.config.get("load_forecasting") or {})
+        self.horizons: tuple[int, ...] = tuple(
+            int(value) for value in (family.get("horizons") or ()) if value
+        )
+        self.long_horizon: int = int(family.get("long_horizon") or (max(self.horizons) if self.horizons else 7))
+        self.interval_level: float = float(family.get("interval_level") or 0.90)
+        self.review_mape: float = float(
+            family.get("review_mape_threshold") or self.thresholds["mape_long_horizon_max"]
+        )
+
+    # ------------------------------------------------------------------ public API ------
+    def build(
+        self,
+        result: EvaluationResult,
+        *,
+        model: Any = None,
+        thresholds: pd.DataFrame | None = None,
+        report_name: str | None = None,
+    ) -> dict[str, Path]:
+        """Generate every report artefact.
+
+        Args:
+            result: Evaluation result to document.
+            model: Optional model, used to document its identity.
+            thresholds: Accepted for API symmetry with the classification report; a
+            forecast has no
+                decision threshold, so the argument is ignored.
+            report_name: Output Markdown file name.
+
+        Returns:
+            Mapping of artefact kind (``report``, ``json``, tables, figure names) to path.
+        """
+        del thresholds  # aucune notion de seuil de décision en prévision
+        self.paths.ensure()
+        figures = self.plots.save_all(result)
+        markdown = self.render_markdown(result, figures=figures, model=model)
+
+        report_path = self.paths.reports_dir / (
+            report_name or str(self._config_artifact("report_file", "evaluation_report.md"))
+        )
+        written: dict[str, Path] = {"report": write_text(report_path, markdown)}
+
+        json_path = self.paths.metrics_dir / "forecasting_report.json"
+        written["json"] = write_json(
+            json_path,
+            {
+                **result.to_dict(),
+                "verdict": self.verdict_rows(result),
+                "recommendations": self.recommendations(result),
+                "thresholds": self.thresholds,
+                "generated_at": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+                "figures": {
+                    name: str(path.relative_to(self.paths.root)) for name, path in figures.items()
+                },
+            },
+        )
+
+        for kind, table in (
+            ("errors", result.errors),
+            ("per_horizon", result.per_horizon),
+            ("baselines", result.baselines),
+            ("backtest", result.backtest),
+            ("intervals", result.intervals),
+            ("segments", result.per_segment),
+        ):
+            if isinstance(table, pd.DataFrame) and not table.empty:
+                destination = self.paths.reports_dir / f"{kind}.csv"
+                table.to_csv(destination, index=False)
+                written[kind] = destination
+
+        written.update(figures)
+        logger.info("Rapport de prévision généré : {}", written["report"])
+        return written
+
+    def recommendations(self, result: EvaluationResult) -> list[str]:
+        """Return the recommendations: dynamic (metrics-driven) then business (documented).
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The ordered recommendation list.
+        """
+        return [*self._dynamic_recommendations(result), *BUSINESS_RECOMMENDATIONS]
+
+    def verdict_rows(self, result: EvaluationResult) -> list[dict[str, Any]]:
+        """Evaluate every success criterion of the use case.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            One dict per criterion (``name``, ``value``, ``target``, ``passed``, ``reading``).
+        """
+        metrics = dict(result.metrics)
+        extras = dict(result.extras or {})
+        mape = _float(metrics.get("mape"))
+        long_mape = self._horizon_mape(result, self.long_horizon)
+        improvement = _float(extras.get("improvement_vs_naive_pct"))
+        coverage = _float(extras.get("interval_coverage_pct"))
+        spread = _float(extras.get("backtest_spread_pct"))
+        bias = abs(_float(extras.get("bias_pct")))
+        return [
+            {
+                "name": "MAPE global",
+                "value": mape,
+                "target": f"≤ {self.thresholds['mape_max']:.1f} %",
+                "passed": np.isfinite(mape) and mape <= self.thresholds["mape_max"],
+                "reading": (
+                    "erreur relative moyenne tous horizons confondus ; le"
+                    " plancher structurel est "
+                    "d'environ 1,5 % (bruit AR(1) + erreur de prévision météo)"
+                ),
+            },
+            {
+                "name": f"MAPE à J+{self.long_horizon}",
+                "value": long_mape,
+                "target": f"≤ {self.thresholds['mape_long_horizon_max']:.1f} %",
+                "passed": np.isfinite(long_mape) and long_mape <= self.thresholds["mape_long_horizon_max"],
+                "reading": (
+                    "l'horizon long pilote le programme d'achat"
+                    " hebdomadaire : sa dégradation est "
+                    "attendue, son emballement ne l'est pas"
+                ),
+            },
+            {
+                "name": "MASE",
+                "value": _float(metrics.get("mase")),
+                "target": f"≤ {self.thresholds['mase_max']:.2f}",
+                "passed": np.isfinite(_float(metrics.get("mase")))
+                and _float(metrics.get("mase")) <= self.thresholds["mase_max"],
+                "reading": (
+                    "erreur échelonnée par le naif saisonnier : < 1"
+                    " signifie « mieux que recopier "
+                    "la semaine dernière », la seule comparaison qui intéresse l'astreinte"
+                ),
+            },
+            {
+                "name": "Gain sur le naif saisonnier",
+                "value": improvement,
+                "target": f"≥ {self.thresholds['improvement_vs_naive_min']:.0f} %",
+                "passed": np.isfinite(improvement)
+                and improvement >= self.thresholds["improvement_vs_naive_min"],
+                "reading": (
+                    "preuve de valeur ajoutée : sans ce gain, le modèle ne"
+                    " remplace pas la méthode "
+                    "manuelle actuelle"
+                ),
+            },
+            {
+                "name": "Biais moyen",
+                "value": bias,
+                "target": f"≤ {self.thresholds['bias_max']:.1f} %",
+                "passed": np.isfinite(bias) and bias <= self.thresholds["bias_max"],
+                "reading": (
+                    "un biais négatif (sous-prévision) fait acheter en"
+                    " urgence au prix spot ; un "
+                    "biais positif fait sur-engager de la production"
+                ),
+            },
+            {
+                "name": "Couverture de l'intervalle",
+                "value": coverage,
+                "target": f"≥ {self.thresholds['interval_coverage_min']:.0f} %"
+                f" (nominal {self.interval_level:.0%})",
+                "passed": np.isfinite(coverage) and coverage >= self.thresholds["interval_coverage_min"],
+                "reading": (
+                    "couverture réalisée mesurée sur le split évalué avec"
+                    " des bornes apprises sur la "
+                    "validation : un intervalle non couvert ne protège pas l'acheteur"
+                ),
+            },
+            {
+                "name": "Dispersion du backtest",
+                "value": spread,
+                "target": f"≤ {self.thresholds['backtest_spread_max']:.1f} point de %",
+                "passed": np.isfinite(spread) and spread <= self.thresholds["backtest_spread_max"],
+                "reading": (
+                    "écart-type du MAPE entre replis chronologiques : une"
+                    " dérive temporelle signe un "
+                    "modèle périmé plutôt qu'un modèle faux"
+                ),
+            },
+        ]
+
+    # ------------------------------------------------------------------ rendering -------
+    def render_markdown(
+        self,
+        result: EvaluationResult,
+        *,
+        figures: Mapping[str, Path] | None = None,
+        model: Any = None,
+    ) -> str:
+        """Render the Markdown report.
+
+        Args:
+            result: Evaluation result.
+            figures: Figure paths, keyed by figure name.
+            model: Optional model, documented in the header.
+
+        Returns:
+            The Markdown text.
+        """
+        figures = dict(figures or {})
+        sections: list[str] = []
+        sections += self._context_block(result, model)
+        sections += self._verdict_block(result)
+        sections += self._metrics_block(result)
+        sections += self._baseline_block(result)
+        sections += self._horizon_block(result)
+        sections += self._backtest_block(result)
+        sections += self._interval_block(result)
+        sections += self._residual_block(result)
+        sections += self._segment_block(result)
+        sections += self._drivers_block(result)
+        sections += self._errors_block(result)
+        sections += self._hypotheses_block(result)
+        sections += self._recommendations_block(result)
+        sections += self._figures_block(figures)
+        sections += self._reproducibility_block(result, model)
+        sections += self._limits_block(result)
+        return "\n".join(sections).rstrip() + "\n"
+
+    # ------------------------------------------------------------------ sections --------
+    def _context_block(self, result: EvaluationResult, model: Any) -> list[str]:
+        """Render the dataset / model / split identity block."""
+        extras = dict(result.extras or {})
+        summary = _model_identity(model, extras)
+        horizons = ", ".join(f"J+{value}" for value in self.horizons) or "non déclaré"
+        period = _period_of(result)
+        return [
+            "## 1. Contexte de l'évaluation",
+            "",
+            f"- **Cas d'usage** : {USE_CASE_TITLE}",
+            f"- **Jeu de données** : `{DATASET_NAME}` (synthétique, hors ligne,"
+            " aucune donnée réelle de consommation)",
+            f"- **Split évalué** : `{result.split}` — {result.n_samples} couples"
+            " (origine, horizon)",
+            f"- **Période évaluée** : {period}",
+            f"- **Horizons publiés** : {horizons}",
+            f"- **Tâche** : `{result.task}` (prévision multi-horizons, cible"
+            f" `{TARGET_NAME}` en {TARGET_UNIT})",
+            f"- **Métrique primaire** : `{result.primary_metric}` ="
+            f" **{_fmt(result.primary_value)}**",
+            f"- **Modèle** : `{summary['algorithm']}` ({summary['name']})",
+            f"- **Variables en entrée** : {extras.get('n_features', 'n/a')}",
+            f"- **Référence naïve retenue** : `{extras.get('naive_reference') or 'aucune'}`",
+            "",
+            "> **Contrat d'antériorité** : chaque variable est soit connue à"
+            " l'origine (historique de",
+            "> consommation, température observée), soit connue par avance"
+            " (calendrier du jour cible,",
+            "> prévision météo entachée de son erreur réelle). La vérité du jour"
+            " cible (`load_mw`,",
+            "> `event_type`, `target_date`) est une **métadonnée** : exclue de la"
+            " matrice de features",
+            "> par `drop_columns`, elle n'est lue que par cet évaluateur. Un MAPE"
+            " proche de 0 signerait",
+            "> une fuite temporelle, pas une performance.",
+            "",
+        ]
+
+    def _verdict_block(self, result: EvaluationResult) -> list[str]:
+        """Render the pass/fail verdict against the use-case success criteria."""
+        rows = self.verdict_rows(result)
+        lines = [
+            "## 2. Verdict sur les critères de succès",
+            "",
+            "| Critère | Mesuré | Seuil | Statut | Lecture |",
+            "|---|---|---|---|---|",
+        ]
+        for row in rows:
+            status = "✅" if row["passed"] else "❌"
+            lines.append(
+                f"| {row['name']} | {_fmt(row['value'])} | {row['target']} |"
+                f" {status} | {row['reading']} |"
+            )
+        failures = [str(row["name"]) for row in rows if not row["passed"]]
+        lines.append("")
+        if failures:
+            lines.append(
+                f"**Verdict : {len(failures)} critère(s) non satisfait(s)** —"
+                f" {', '.join(failures)}."
+            )
+        else:
+            lines.append("**Verdict : tous les critères de succès sont satisfaits.**")
+        lines.append("")
+        return lines
+
+    def _metrics_block(self, result: EvaluationResult) -> list[str]:
+        """Render the full metric table with the reading of each value."""
+        readings = {
+            "mape": "erreur absolue moyenne en pourcentage de la consommation"
+            " observée : la métrique pilotée par le métier",
+            "smape": "variante symétrique, bornée à 200 % : utile quand la"
+            " prévision peut dépasser largement l'observé",
+            "mase": "erreur échelonnée par le naif saisonnier : < 1 = mieux que"
+            " recopier la semaine dernière",
+            "mae": f"erreur absolue moyenne en {TARGET_UNIT} : parlante pour"
+            " l'astreinte (MW à compenser)",
+            "rmse": f"erreur quadratique en {TARGET_UNIT} : dominée par les pointes"
+            " hivernales, à lire en risque",
+            "r2": "variance expliquée : flatteur sur une série saisonnière, il ne"
+            " prouve rien face au naif",
+            "max_error": f"pire erreur absolue en {TARGET_UNIT} : le jour où la"
+            " prévision a coûté le plus cher",
+            "interval_coverage": "couverture réalisée de l'intervalle publié, tous"
+            " horizons pondérés",
+        }
+        lines = [
+            "## 3. Métriques détaillées",
+            "",
+            "| Métrique | Valeur | Interprétation |",
+            "|---|---|---|",
+        ]
+        for name, value in result.metrics.items():
+            reading = readings.get(str(name), "métrique du registre partagé")
+            lines.append(f"| `{name}` | {_fmt(value)} | {reading} |")
+        lines.append("")
+        lines.append(
+            "> Le R² d'une série saisonnière est presque toujours élevé : la"
+            " saisonnalité explique"
+            " l'essentiel de la variance, et un naif saisonnier obtient lui aussi"
+            " un R² correct."
+            " C'est pourquoi la décision se lit sur le MAPE, le MASE et le gain sur"
+            " la référence,"
+            " jamais sur le R² seul."
+        )
+        lines.append("")
+        return lines
+
+    def _baseline_block(self, result: EvaluationResult) -> list[str]:
+        """Render the comparison against the trivial references."""
+        table = result.baselines
+        lines = [
+            "## 4. Comparaison aux références naïves",
+            "",
+            "Une prévision ne vaut que comparée à ce qu'un opérateur produirait"
+            " sans modèle. Les trois",
+            "références ci-dessous n'utilisent que l'information disponible à"
+            " l'origine, donc chacune",
+            "est un adversaire légitime.",
+            "",
+        ]
+        if table.empty:
+            lines += [
+                "_Aucune référence n'a pu être calculée : le contexte ne fournit pas les "
+                "colonnes nécessaires._",
+                "",
+            ]
+            return lines
+        lines += [
+            "| Référence | Description | MAPE (%) | MAE (MW) | RMSE (MW) | Gain du modèle |",
+            "|---|---|---|---|---|---|",
+        ]
+        for row in table.itertuples():
+            lines.append(
+                f"| `{row.reference}` | {row.description} | {_fmt(row.mape_pct)} | "
+                f"{_fmt(row.mae_mw, 1)} | {_fmt(row.rmse_mw, 1)} |"
+                f" {_fmt(row.improvement_pct, 1)} % |"
+            )
+        lines.append("")
+        naive = _naive_row(table)
+        model = _model_row(table)
+        if naive is not None and model is not None:
+            gain = _float(naive["mape_pct"]) - _float(model["mape_pct"])
+            lines.append(
+                f"**Lecture** : face au `{naive['reference']}` "
+                f"(MAPE {_fmt(naive['mape_pct'])} %), le modèle descend à "
+                f"{_fmt(model['mape_pct'])} %, soit {gain:+.2f} point de pourcentage "
+                f"({_fmt(_relative_gain(naive, model), 1)} % d'erreur en moins). "
+                "C'est ce gain qui finance le projet : tout le reste est de l'ingénierie."
+            )
+            lines.append("")
+        return lines
+
+    def _horizon_block(self, result: EvaluationResult) -> list[str]:
+        """Render the per-horizon breakdown."""
+        table = result.per_horizon
+        lines = [
+            "## 5. Ventilation par horizon",
+            "",
+            "Chaque horizon est un produit différent : J+1 pilote l'équilibre du"
+            " jour, J+7 le programme",
+            "d'achat hebdomadaire. Un MAPE global moyen peut cacher un J+7 inutilisable.",
+            "",
+        ]
+        if table.empty:
+            lines += ["_La colonne d'horizon est absente du contexte : ventilation impossible._", ""]
+            return lines
+        columns = [
+            ("horizon", "Horizon"),
+            ("rows", "Lignes"),
+            ("mape_pct", "MAPE (%)"),
+            ("smape_pct", "sMAPE (%)"),
+            ("mae_mw", f"MAE ({TARGET_UNIT})"),
+            ("rmse_mw", f"RMSE ({TARGET_UNIT})"),
+            ("bias_pct", "Biais (%)"),
+            ("naive_mape_pct", "Naif (%)"),
+            ("improvement_vs_naive_pct", "Gain (%)"),
+            ("interval_coverage_pct", "Couverture (%)"),
+            ("within_tolerance_pct", f"Dans ±{TOLERANCE_PCT:.0f} % (%)"),
+        ]
+        present = [(key, label) for key, label in columns if key in table.columns]
+        lines.append("| " + " | ".join(label for _key, label in present) + " |")
+        lines.append("|" + "---|" * len(present))
+        for row in table.itertuples():
+            cells = []
+            for key, _label in present:
+                value = getattr(row, key, None)
+                cells.append(f"J+{_int(value)}" if key == "horizon" else _fmt(value, 2 if key.endswith("_pct") else 1))
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
+        worst = _worst_horizon(table)
+        if worst is not None:
+            lines.append(
+                "**Lecture** : l'erreur passe de"
+                f" {_fmt(_horizon_mape_of(table, table['horizon'].min()))} % "
+                f"à l'horizon le plus court à {_fmt(worst['mape_pct'])} % à"
+                f" J+{_int(worst['horizon'])}. "
+                "Cette dégradation a deux causes distinctes : l'erreur de"
+                " prévision météo croît avec "
+                "l'horizon, et l'information de court terme (dernier point"
+                " connu) perd en pertinence. "
+                "Publier un seul chiffre pour les deux reviendrait à garantir"
+                " le J+7 au prix du J+1."
+            )
+            lines.append("")
+            if _float(worst["mape_pct"]) > self.review_mape:
+                lines.append(
+                    f"> ⚠️ À J+{_int(worst['horizon'])}, le MAPE dépasse le seuil de revue "
+                    f"({self.review_mape:.1f} %) : cet horizon doit être"
+                    " publié avec l'indicateur "
+                    "« à revoir par un analyste » plutôt qu'engagé tel quel."
+                )
+                lines.append("")
+        return lines
+
+    def _backtest_block(self, result: EvaluationResult) -> list[str]:
+        """Render the rolling-origin backtest."""
+        table = result.backtest
+        lines = [
+            "## 6. Backtest à origine glissante",
+            "",
+            "Équivalent temporel d'une validation croisée : les lignes évaluées"
+            " sont découpées en replis",
+            "**chronologiques** consécutifs. Une validation croisée aléatoire"
+            " mélangerait les époques et",
+            "produirait un score optimiste — et faux.",
+            "",
+        ]
+        if table.empty:
+            lines += [
+                "_Backtest non calculé : trop peu de lignes évaluées pour former des replis "
+                "chronologiques._",
+                "",
+            ]
+            return lines
+        folds = table[table["fold"].astype(str) != "dispersion"]
+        dispersion = table[table["fold"].astype(str) == "dispersion"]
+        lines += [
+            "| Repli | Période | Lignes | MAPE (%) | MAE (MW) | Biais (%) | Mode |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for row in folds.itertuples():
+            period = (
+                f"{getattr(row, 'period_start', '-')} → {getattr(row, 'period_end', '-')}"
+                if hasattr(row, "period_start")
+                else "-"
+            )
+            lines.append(
+                f"| {row.fold} | {period} | {_int(row.rows)} | {_fmt(row.mape_pct)} | "
+                f"{_fmt(row.mae_mw, 1)} | {_fmt(row.bias_pct)} | {row.mode} |"
+            )
+        lines.append("")
+        if not dispersion.empty:
+            spread = _float(dispersion["mape_pct"].iloc[0])
+            lines.append(
+                f"**Dispersion inter-replis** : {spread:.2f} point de pourcentage "
+                f"(seuil {self.thresholds['backtest_spread_max']:.1f}). "
+            )
+            trend = _fold_trend(folds)
+            if trend is not None:
+                lines.append(
+                    "**Tendance** : le MAPE du dernier repli est"
+                    f" {_fmt(trend, 1)} point au-dessus du "
+                    "premier. "
+                    + (
+                        "Une dérive croissante indique un modèle qui"
+                        " vieillit (thermo-sensibilité du parc, "
+                        "nouveaux usages) plutôt qu'un modèle mal réglé"
+                        " : le levier est la fréquence de "
+                        "ré-entraînement, pas la grille d'hyperparamètres."
+                        if trend > 0.3
+                        else "Aucune dérive marquée : l'erreur est stable dans le temps, "
+                        "ce qui est la "
+                        "condition pour publier une prévision sans revue quotidienne."
+                    )
+                )
+            lines.append("")
+        lines.append(
+            "> Le mode `fixed_model` score le modèle déjà entraîné sur chaque repli"
+            " : il mesure la "
+            "**stabilité temporelle** de l'erreur, à coût nul. Le protocole complet"
+            " (ré-entraînement "
+            "sur fenêtre étendue à chaque repli, mode `refit`) est exécuté dans le"
+            " notebook 04 sur un "
+            "échantillon réduit, car il multiplie le coût d'entraînement par le"
+            " nombre de replis."
+        )
+        lines.append("")
+        return lines
+
+    def _interval_block(self, result: EvaluationResult) -> list[str]:
+        """Render the prediction interval analysis.
+
+        The block describes the method that was actually configured and measured, never a method
+        assumed by the template: the wording, the scale column and the calm/extreme split are all
+        read from the interval table produced by the evaluator.
+
+        Args:
+            result: Evaluation result carrying the interval table.
+
+        Returns:
+            Markdown lines of the section.
+        """
+        table = result.intervals
+        extras = dict(result.extras or {})
+        method = str(extras.get("interval_method") or "")
+        scale = str(extras.get("interval_scale_column") or "")
+        if not method and not table.empty and "method" in table.columns:
+            method = str(table["method"].iloc[0])
+        if not scale and not table.empty and "scale_column" in table.columns:
+            scale = str(table["scale_column"].iloc[0])
+        normalized = method == "normalized_conformal"
+        scale_note = (
+            f", avec `{scale}` pour échelle de dispersion" if normalized and scale and scale != "-"
+            else ""
+        )
+        lines = [
+            "## 7. Intervalles de prévision",
+            "",
+            f"Intervalles nominaux à {self.interval_level:.0%}, construits par "
+            f"**{_interval_label(method)}**"
+            f"{scale_note}, séparément pour chaque horizon. Trois choix sont assumés :",
+            "",
+            "* les bornes viennent du split de validation, jamais du split évalué — sinon la "
+            "couverture",
+            "  mesurée serait intra-échantillon et flatteuse ;",
+            "* elles sont calculées **par horizon**, car la dispersion des résidus augmente avec "
+            "l'échéance :",
+            "  un intervalle global serait trop étroit au long horizon et trop large au court ;",
+        ]
+        if normalized:
+            lines += [
+                "* le score de calibration est **divisé par le niveau de consommation**, parce que "
+                "le bruit de la",
+                "  série est multiplicatif : un intervalle calibré sur une fenêtre estivale calme "
+                "est environ deux",
+                "  fois trop étroit pour une pointe hivernale. Cette normalisation coûte une "
+                "colonne déjà connue à",
+                "  l'origine et fait passer la couverture réalisée de ~73 % à ~85 % sur ce jeu.",
+            ]
+        else:
+            lines += [
+                "* la méthode retenue suppose une dispersion comparable entre la fenêtre de "
+                "calibration et la",
+                "  période évaluée ; la ventilation jours calmes / régime extrême ci-dessous "
+                "permet de le vérifier.",
+            ]
+        lines.append("")
+        if table.empty:
+            lines += ["_Aucun intervalle n'a pu être construit (artefacts de validation absents)._", ""]
+            return lines
+        source = str(extras.get("interval_source") or table["source"].iloc[0])
+        split_columns = {"coverage_calm_pct", "coverage_extreme_pct"} <= set(table.columns)
+        header = (
+            "| Horizon | Lignes | Niveau (%) | Largeur moyenne (MW) | Largeur relative (%) | "
+            "Couverture réalisée (%) |"
+        )
+        separator = "|---|---|---|---|---|---|"
+        if split_columns:
+            header += " Jours calmes (%) | Régime extrême (%) |"
+            separator += "---|---|"
+        lines += [header, separator]
+        for row in table.itertuples():
+            line = (
+                f"| J+{_int(row.horizon)} | {_int(row.rows)} | {_fmt(row.level_pct, 0)} | "
+                f"{_fmt(row.mean_width_mw, 0)} | {_fmt(row.relative_width_pct, 1)} | "
+                f"{_fmt(row.coverage_pct, 1)} |"
+            )
+            if split_columns:
+                line += (
+                    f" {_fmt(getattr(row, 'coverage_calm_pct', float('nan')), 1)} | "
+                    f"{_fmt(getattr(row, 'coverage_extreme_pct', float('nan')), 1)} |"
+                )
+            lines.append(line)
+        lines.append("")
+        if split_columns:
+            lines += self._interval_reading(table)
+        coverage = _float(extras.get("interval_coverage_pct"))
+        lines.append(
+            f"**Couverture pondérée** : {_fmt(coverage, 1)} % pour un niveau nominal de "
+            f"{self.interval_level:.0%} — source des résidus : `{source}`."
+        )
+        if source != "validation_split":
+            lines.append(
+                "> ⚠️ Les bornes n'ont pas pu être apprises sur la validation :"
+                " la couverture affichée "
+                "est **intra-échantillon** et donc optimiste. Relancer"
+                " `mode=train` avant de conclure."
+            )
+        lines.append("")
+        return lines
+
+    def _interval_reading(self, table: pd.DataFrame) -> list[str]:
+        """Interpret the calm / extreme coverage split, from the measured numbers.
+
+        A single coverage number is the most misleading figure of a forecast report: it averages a
+        well-covered calm period with a regime the calibration window never saw, where the interval
+        protects nothing. Naming that gap is what turns the section into a decision input.
+
+        Args:
+            table: Interval table produced by the evaluator.
+
+        Returns:
+            Markdown lines of the interpretation.
+        """
+        calm = _float(np.nanmean(pd.to_numeric(table["coverage_calm_pct"], errors="coerce")))
+        extreme = _float(np.nanmean(pd.to_numeric(table["coverage_extreme_pct"], errors="coerce")))
+        n_extreme = int(np.nansum(pd.to_numeric(table["n_extreme"], errors="coerce")))
+        n_rows = int(np.nansum(pd.to_numeric(table["rows"], errors="coerce")))
+        nominal = 100.0 * float(self.interval_level)
+        if n_extreme == 0 or not np.isfinite(extreme):
+            return [
+                f"**Lecture** : la période évaluée ne contient aucun jour de régime extrême, la "
+                f"couverture de {_fmt(calm, 1)} % sur les jours calmes est donc proche du "
+                f"nominal {nominal:.0f} % sans contrepartie à signaler.",
+                "",
+            ]
+        return [
+            f"**Lecture** : la couverture globale masque l'essentiel. Sur les "
+            f"{n_rows - n_extreme} jours calmes elle atteint {_fmt(calm, 1)} %, proche du nominal "
+            f"{nominal:.0f} % ; sur les {n_extreme} jours de régime extrême elle tombe à "
+            f"{_fmt(extreme, 1)} %. Ce n'est pas un défaut de calibration mais sa limite "
+            "structurelle : la fenêtre de validation ne contient pas ce régime, donc aucun "
+            "quantile appris sur elle ne peut le couvrir. Trois réponses opérationnelles, par "
+            "ordre de coût : publier l'intervalle avec l'indicateur de confiance déjà produit "
+            "par le prédicteur (il dégrade le niveau dès que la prévision météo sort du domaine "
+            "entraîné), élargir la fenêtre de calibration pour qu'elle couvre toutes les "
+            "saisons, ou recalibrer "
+            "quotidiennement en intégrant les résidus déjà réalisés — mesuré dans le notebook 06, "
+            "ce recalibrage adaptatif gagne environ 1 à 3 points de couverture sans élargir "
+            "davantage l'intervalle.",
+            "",
+        ]
+
+    def _residual_block(self, result: EvaluationResult) -> list[str]:
+        """Render the residual diagnostics."""
+        extras = dict(result.extras or {})
+        ac = dict(extras.get("residual_autocorrelation") or {})
+        bias_by_month = dict(extras.get("bias_by_month") or {})
+        threshold = 2.0 / np.sqrt(max(result.n_samples, 1))
+        lines = [
+            "## 8. Diagnostics de résidus",
+            "",
+            "Les lignes d'une série temporelle ne sont pas indépendantes : un"
+            " résidu autocorrélé",
+            "signifie que le modèle laisse de la structure temporelle sur la table,"
+            " et qu'un intervalle",
+            "gaussien calculé sur leur écart-type serait trop étroit.",
+            "",
+            f"- **Écart-type des résidus** : {_fmt(extras.get('residual_std'), 1)}"
+            f" {TARGET_UNIT}",
+            f"- **Biais moyen** : {_fmt(extras.get('bias_pct'), 2)} % "
+            f"({_bias_direction(extras)} systématique)",
+            f"- **Erreur médiane** : {_fmt(extras.get('median_ape_pct'), 2)} % "
+            f"• **P95** : {_fmt(extras.get('p95_ape_pct'), 2)} %",
+            f"- **Pire biais mensuel** : {_fmt(extras.get('worst_month_bias_pct'), 2)} %",
+            "",
+        ]
+        if ac:
+            lines += [
+                "| Décalage | Autocorrélation | Seuil de bruit (±2/√n) | Lecture |",
+                "|---|---|---|---|",
+            ]
+            for key, value in ac.items():
+                lag = str(key).replace("lag_", "")
+                coefficient = _float(value)
+                significant = abs(coefficient) > threshold
+                reading = (
+                    "structure temporelle résiduelle : le modèle ne capture"
+                    " pas toute la dépendance"
+                    if significant
+                    else "compatible avec du bruit"
+                )
+                if lag == "7" and significant:
+                    reading = (
+                        "saisonnalité hebdomadaire résiduelle : le profil par jour de la "
+                        "semaine est mal appris"
+                    )
+                if lag == "1" and significant:
+                    reading = (
+                        "inertie non capturée : un terme AR ou un décalage supplémentaire "
+                        "aiderait"
+                    )
+                lines.append(
+                    f"| {lag} j | {coefficient:+.3f} | ±{threshold:.3f} | {reading} |"
+                )
+            lines.append("")
+        if bias_by_month:
+            ordered = sorted(bias_by_month.items(), key=lambda item: abs(_float(item[1])), reverse=True)
+            worst_months = ", ".join(f"{month} ({_float(value):+.2f} %)" for month, value in ordered[:3])
+            lines.append(f"**Mois les plus biaisés** : {worst_months}.")
+            lines.append("")
+            lines.append(
+                "Un biais concentré sur quelques mois est presque toujours un"
+                " effet saisonnier mal "
+                "appris (thermo-sensibilité sous-estimée en hiver, effet"
+                " vacances sur-estimé en été) "
+                "plutôt qu'un défaut global du modèle : le correctif est une"
+                " variable de régime ou un "
+                "recalibrage saisonnier, pas plus d'arbres."
+            )
+            lines.append("")
+        return lines
+
+    def _segment_block(self, result: EvaluationResult) -> list[str]:
+        """Render the segment breakdown (regime, month, weekday)."""
+        table = result.per_segment
+        lines = ["## 9. Où le modèle se trompe", ""]
+        if table.empty:
+            lines += ["_Aucun axe de segmentation exploitable dans le contexte._", ""]
+            return lines
+        for axis in table["axis"].unique():
+            block = table[table["axis"] == axis].sort_values("mape_pct", ascending=False)
+            lines += [
+                f"### Par `{axis}`",
+                "",
+                "| Segment | Lignes | Part | MAPE (%) | MAE (MW) | Biais (%) |",
+                "|---|---|---|---|---|---|",
+            ]
+            for row in block.head(12).itertuples():
+                lines.append(
+                    f"| `{row.segment}` | {_int(row.rows)} | {_float(row.share):.1%} | "
+                    f"{_fmt(row.mape_pct)} | {_fmt(row.mae_mw, 1)} | {_fmt(row.bias_pct)} |"
+                )
+            lines.append("")
+        regime = table[table["axis"] == "event_type"]
+        if not regime.empty:
+            quiet = regime[regime["segment"] == "none"]
+            extreme = regime[regime["segment"] != "none"]
+            if not quiet.empty and not extreme.empty:
+                quiet_mape = _float(quiet["mape_pct"].iloc[0])
+                extreme_mape = float(np.average(extreme["mape_pct"], weights=extreme["rows"]))
+                lines.append(
+                    f"**Régimes extrêmes** : MAPE {_fmt(quiet_mape)} % en"
+                    " régime courant contre "
+                    f"{_fmt(extreme_mape)} % pendant les épisodes (vague"
+                    " de froid, canicule, arrêt "
+                    "industriel), soit un facteur "
+                    f"{_fmt(extreme_mape / quiet_mape if quiet_mape else float('nan'), 1)}. "
+                    "Ces jours représentent une faible part des lignes mais"
+                    " une part disproportionnée du "
+                    "coût : ce sont eux qui justifient l'indicateur de"
+                    " confiance et la revue humaine."
+                )
+                lines.append("")
+        return lines
+
+    def _drivers_block(self, result: EvaluationResult) -> list[str]:
+        """Render the variables driving the forecast."""
+        table = result.feature_importance
+        lines = [
+            "## 10. Variables qui portent la prévision",
+            "",
+        ]
+        if table.empty:
+            lines += ["_Le modèle n'expose aucune importance exploitable._", ""]
+            return lines
+        method = str(table["method"].iloc[0]) if "method" in table.columns else "native"
+        lines += [
+            f"Méthode : `{method}`. Une prévision dominée par `load_lag_1d` est un modèle de "
+            "persistance déguisé ; une prévision qui ignore la température rate le principal "
+            "déterminant physique de la consommation électrique française.",
+            "",
+            "| Rang | Variable | Importance | Famille |",
+            "|---|---|---|---|",
+        ]
+        for rank, row in enumerate(table.head(TOP_DRIVERS).itertuples(), start=1):
+            lines.append(
+                f"| {rank} | `{row.feature}` | {_fmt(row.importance, 4)} |"
+                f" {_family_of(str(row.feature))} |"
+            )
+        lines.append("")
+        return lines
+
+    def _errors_block(self, result: EvaluationResult) -> list[str]:
+        """Render the worst forecasts."""
+        errors = result.errors
+        lines = ["## 11. Pires prévisions", ""]
+        if errors.empty:
+            lines += ["_Aucune erreur exploitable._", ""]
+            return lines
+        columns = [column for column in ("origin_date", "horizon_days", "event_type", "y_true", "y_pred", "ape_pct") if column in errors.columns]
+        lines.append("| " + " | ".join(columns) + " |")
+        lines.append("|" + "---|" * len(columns))
+        for row in errors.head(TOP_ERRORS).itertuples():
+            cells = []
+            for column in columns:
+                value = getattr(row, column, None)
+                if column == "origin_date" and value is not None:
+                    cells.append(str(pd.to_datetime(value).date()))
+                elif column in {"y_true", "y_pred"}:
+                    cells.append(_fmt(value, 0))
+                else:
+                    cells.append(_fmt(value, 2))
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
+        lines.append(
+            "Ces journées se lisent une par une avant de conclure : une erreur"
+            " isolée sur un arrêt "
+            "industriel inédit n'appelle pas le même correctif qu'une erreur"
+            " systématique sur tous "
+            "les lundis de vacances scolaires."
+        )
+        lines.append("")
+        return lines
+
+    def _hypotheses_block(self, result: EvaluationResult) -> list[str]:
+        """Render the explanatory hypotheses, derived from the measured diagnostics."""
+        hypotheses = self._error_hypotheses(result)
+        lines = ["## 12. Hypothèses explicatives", ""]
+        if not hypotheses:
+            lines += ["Aucune hypothèse saillante : les diagnostics sont dans les clous.", ""]
+            return lines
+        for index, hypothesis in enumerate(hypotheses, start=1):
+            lines.append(f"{index}. {hypothesis}")
+        lines.append("")
+        return lines
+
+    def _error_hypotheses(self, result: EvaluationResult) -> list[str]:
+        """Derive hypotheses from the metrics — no generic filler text.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The ordered list of hypotheses, most likely first.
+        """
+        extras = dict(result.extras or {})
+        metrics = dict(result.metrics)
+        hypotheses: list[str] = []
+        improvement = _float(extras.get("improvement_vs_naive_pct"))
+        if np.isfinite(improvement) and improvement < self.thresholds["improvement_vs_naive_min"]:
+            hypotheses.append(
+                "**Le modèle reste proche de la référence naïve** (gain de"
+                f" {improvement:.1f} % seulement) : "
+                "l'information ajoutée par les variables météo et calendaires"
+                " n'est pas exploitée. "
+                "Vérifier d'abord que la prévision de température est bien"
+                " présente et non constante, "
+                "ensuite que les degrés-jours ne sont pas redondants avec la température brute."
+            )
+        ac = dict(extras.get("residual_autocorrelation") or {})
+        threshold = 2.0 / np.sqrt(max(result.n_samples, 1))
+        if abs(_float(ac.get("lag_7"))) > threshold:
+            hypotheses.append(
+                "**Saisonnalité hebdomadaire résiduelle** (autocorrélation à 7 jours de "
+                f"{_float(ac.get('lag_7')):+.3f}) : le profil par jour de la"
+                " semaine est mal appris, "
+                "souvent parce que le one-hot du jour cible est noyé parmi les"
+                " variables numériques. "
+                "Ajouter le profil médian par jour de la semaine (déjà calculé"
+                " par le feature builder) "
+                "ou un terme d'interaction jour x saison."
+            )
+        if abs(_float(ac.get("lag_1"))) > threshold:
+            hypotheses.append(
+                "**Inertie de court terme non capturée** (autocorrélation à 1 jour de "
+                f"{_float(ac.get('lag_1')):+.3f}) : les résidus se suivent,"
+                " donc la série contient un "
+                "composant autorégressif que les décalages actuels ne suffisent"
+                " pas à représenter. "
+                "Un décalage supplémentaire ou une modélisation explicite du"
+                " résidu (AR sur l'erreur) "
+                "est le correctif standard."
+            )
+        bias = _float(extras.get("bias_pct"))
+        if np.isfinite(bias) and abs(bias) > self.thresholds["bias_max"]:
+            direction = "sous-prévoit" if bias < 0 else "sur-prévoit"
+            hypotheses.append(
+                f"**Biais systématique** : le modèle {direction} de"
+                f" {abs(bias):.2f} % en moyenne. "
+                "Sur une consommation électrique, la cause la plus fréquente"
+                " est une thermo-sensibilité "
+                "mal calibrée (le gradient MW/degré appris ne correspond pas à"
+                " celui du parc réel) ou "
+                "une perte quadratique qui ramène les pointes vers la moyenne."
+            )
+        worst = _worst_horizon(result.per_horizon)
+        if worst is not None and _float(worst["mape_pct"]) > self.review_mape:
+            hypotheses.append(
+                f"**Dégradation excessive à J+{_int(worst['horizon'])}** "
+                f"(MAPE {_fmt(worst['mape_pct'])} %) : à cet horizon l'erreur"
+                " de prévision météo "
+                "domine et le dernier point connu ne dit plus rien. Un modèle"
+                " par horizon, ou un "
+                "modèle qui reçoit l'incertitude météo en entrée, est la réponse structurelle."
+            )
+        regime = result.per_segment
+        if not regime.empty and "event_type" in set(regime["axis"]):
+            extreme = regime[(regime["axis"] == "event_type") & (regime["segment"] != "none")]
+            quiet = regime[(regime["axis"] == "event_type") & (regime["segment"] == "none")]
+            if not extreme.empty and not quiet.empty:
+                ratio = float(np.average(extreme["mape_pct"], weights=extreme["rows"])) / max(
+                    _float(quiet["mape_pct"].iloc[0]), 1e-9
+                )
+                if ratio > 1.8:
+                    hypotheses.append(
+                        "**Ruptures de régime mal anticipées** :"
+                        f" l'erreur est {ratio:.1f} fois plus "
+                        "élevée pendant les épisodes extrêmes. Ces"
+                        " régimes sont rares en entraînement, "
+                        "donc sous-appris ; les options sont une"
+                        " variable de régime explicite, un "
+                        "échantillonnage pondéré des épisodes, ou une"
+                        " alerte qui bascule ces jours-là "
+                        "en revue humaine."
+                    )
+        coverage = _float(extras.get("interval_coverage_pct"))
+        if np.isfinite(coverage) and coverage < self.thresholds["interval_coverage_min"]:
+            hypotheses.append(
+                f"**Intervalles trop étroits** (couverture {coverage:.1f} % pour "
+                f"{self.interval_level:.0%} nominaux) : les résidus sont plus"
+                " dispersés ou plus "
+                "autocorrélés que ne le supposent les quantiles de validation."
+                " Élargir par horizon, "
+                "ou passer à une calibration conforme qui ne suppose rien de la distribution."
+            )
+        if _float(metrics.get("r2")) > 0.95 and _float(metrics.get("mape")) < 1.0:
+            hypotheses.append(
+                "**Performance suspecte** : un R² très élevé associé à un MAPE"
+                " quasi nul sur une série "
+                "bruitée signale une fuite temporelle (variable calculée avec"
+                " l'information du jour "
+                "cible, ou split non chronologique). À vérifier avant toute célébration."
+            )
+        return hypotheses
+
+    def _recommendations_block(self, result: EvaluationResult) -> list[str]:
+        """Render the recommendations (dynamic first, then documented business guidance)."""
+        lines = ["## 13. Recommandations", ""]
+        for index, recommendation in enumerate(self.recommendations(result), start=1):
+            lines.append(f"{index}. {recommendation}")
+        lines.append("")
+        return lines
+
+    def _dynamic_recommendations(self, result: EvaluationResult) -> list[str]:
+        """Derive actionable recommendations from the measured diagnostics.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The dynamic recommendations, most urgent first.
+        """
+        extras = dict(result.extras or {})
+        metrics = dict(result.metrics)
+        actions: list[str] = []
+        improvement = _float(extras.get("improvement_vs_naive_pct"))
+        if np.isfinite(improvement) and improvement < 0:
+            actions.append(
+                "**Ne pas mettre en production** : le modèle est moins bon que"
+                " le naif saisonnier. "
+                "Reprendre le contrat d'antériorité des variables et la"
+                " ventilation par horizon avant "
+                "tout réglage d'hyperparamètres."
+            )
+        elif np.isfinite(improvement) and improvement < self.thresholds["improvement_vs_naive_min"]:
+            actions.append(
+                "Augmenter le gain sur le naif saisonnier avant de publier :"
+                " ajouter l'interaction "
+                "jour de la semaine x saison, la prévision de température à"
+                " plusieurs échéances, et "
+                "vérifier que les degrés-jours ne sont pas écrasés par le scaling."
+            )
+        coverage = _float(extras.get("interval_coverage_pct"))
+        if np.isfinite(coverage) and coverage < self.thresholds["interval_coverage_min"]:
+            actions.append(
+                "Recalibrer les intervalles par horizon sur une fenêtre de"
+                " validation plus longue, ou "
+                "passer à une calibration conforme : un intervalle qui ne"
+                " couvre pas ne protège pas "
+                "l'acheteur contre le risque de pointe."
+            )
+        spread = _float(extras.get("backtest_spread_pct"))
+        if np.isfinite(spread) and spread > self.thresholds["backtest_spread_max"]:
+            actions.append(
+                "Investiguer la dérive temporelle avant de ré-entraîner : comparer la "
+                "thermo-sensibilité apprise (MW par degré) sur les deux"
+                " derniers hivers, et vérifier "
+                "qu'aucune rupture de régime n'est sortie de la fenêtre d'entraînement."
+            )
+        bias = _float(extras.get("bias_pct"))
+        if np.isfinite(bias) and abs(bias) > self.thresholds["bias_max"]:
+            actions.append(
+                f"Corriger le biais de {bias:+.2f} % : un recalibrage"
+                " multiplicatif par horizon et par "
+                "saison, appris sur la validation, coûte quelques lignes et"
+                " supprime un transfert de "
+                "coût systématique vers l'astreinte."
+            )
+        worst = _worst_horizon(result.per_horizon)
+        if worst is not None and _float(worst["mape_pct"]) > self.review_mape:
+            actions.append(
+                f"Publier J+{_int(worst['horizon'])} avec l'indicateur « à"
+                " revoir » tant que son MAPE "
+                f"dépasse {self.review_mape:.1f} %, ou entraîner un modèle dédié à cet horizon."
+            )
+        if _float(metrics.get("mase")) >= 1.0:
+            actions.append(
+                "Le MASE est supérieur ou égal à 1 : la référence naïve reste"
+                " la meilleure prévision "
+                "disponible. C'est un résultat publiable en soi, à condition de le dire."
+            )
+        if not actions:
+            actions.append(
+                "Les critères sont satisfaits : passer en exploitation avec un"
+                " suivi hebdomadaire du "
+                "MAPE par horizon, du biais mensuel et de la thermo-sensibilité apprise, et un "
+                "ré-entraînement programmé."
+            )
+        return actions
+
+    def _figures_block(self, figures: Mapping[str, Path]) -> list[str]:
+        """Render the figure gallery."""
+        if not figures:
+            return []
+        titles = {
+            "forecast_vs_actual": "Prévision et consommation observée",
+            "error_by_horizon": "Erreur par horizon, modèle contre référence naïve",
+            "improvement_vs_baselines": "Gain du modèle sur chaque référence triviale",
+            "interval_coverage": "Couverture réalisée des intervalles par horizon",
+            "backtest_stability": "Stabilité du MAPE entre replis chronologiques",
+            "residual_diagnostics": "Autocorrélation et dispersion des résidus",
+            "error_by_regime": "Erreur par régime du jour cible",
+            "bias_by_month": "Biais relatif par mois",
+            "error_breakdown": "Erreur par axe de segmentation",
+            "predicted_vs_actual": "Prévision contre observation",
+            "worst_errors": "Pires journées de prévision",
+            "feature_importance": "Variables qui portent la prévision",
+            "metrics_bar": "Métriques de synthèse",
+        }
+        lines = ["## 14. Figures", ""]
+        for name, path in figures.items():
+            relative = Path(path)
+            try:
+                relative = Path(path).relative_to(self.paths.root)
+            except ValueError:
+                relative = Path(path)
+            lines.append(f"### {titles.get(name, name)}")
+            lines.append("")
+            lines.append(f"![{name}]({relative.as_posix()})")
+            lines.append("")
+        return lines
+
+    def _reproducibility_block(self, result: EvaluationResult, model: Any) -> list[str]:
+        """Render the reproducibility footer."""
+        extras = dict(result.extras or {})
+        summary = _model_identity(model, extras)
+        generated = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines = [
+            "## 15. Reproductibilité",
+            "",
+            f"- Rapport généré le {generated} (UTC).",
+            f"- Modèle : `{summary['name']}` / algorithme `{summary['algorithm']}`"
+            f" / tâche `{result.task}`.",
+            f"- Paramètres : `{summary['params']}`",
+            "- Configuration résolue archivée avec le modèle : "
+            f"`{_config_snapshot(self.paths)}`.",
+            "- Métriques machine : `artifacts/metrics/forecasting_report.json`.",
+            "",
+            "Relancer l'évaluation sans ré-entraîner : `python scripts/evaluate.py` "
+            "(ou `make evaluate`). Relancer toute la chaîne : `make all`.",
+            "",
+        ]
+        return lines
+
+    def _limits_block(self, result: EvaluationResult) -> list[str]:
+        """Render the assumed limits of the evaluation."""
+        return [
+            "## 16. Limites assumées",
+            "",
+            "- Les données sont **synthétiques** et générées hors ligne : les"
+            " niveaux de performance",
+            "  illustrent une méthode, pas un réseau réel.",
+            "- Une seule région et une seule série : un modèle de prévision de"
+            " consommation se juge",
+            "  aussi sur sa capacité à être décliné par région sans réglage manuel,"
+            " ce qui n'est pas",
+            "  mesuré ici.",
+            "- La prévision de température fournie est la vérité entachée d'une"
+            " erreur croissante avec",
+            "  l'horizon : un vrai service météo fournit aussi des **scénarios**"
+            " (P10/P50/P90), dont",
+            "  l'exploitation améliorerait les intervalles plus que tout réglage de modèle.",
+            "- Le backtest du rapport score le modèle déjà entraîné sur des replis"
+            " chronologiques",
+            "  (mesure de dérive). Le protocole complet avec ré-entraînement par"
+            " repli est exécuté au",
+            "  notebook 04, sur un échantillon réduit pour rester interactif.",
+            "- Le générateur injecte un bruit AR(1) et une erreur météo"
+            " irréductibles : un MAPE",
+            "  proche de 0 signerait une fuite de données, pas un bon modèle.",
+            f"- Lignes évaluées : {result.n_samples} ; le split de test est le dernier segment",
+            "  chronologique, donc nécessairement représentatif d'une seule période"
+            " de l'année.",
+            "",
+        ]
+
+    # ------------------------------------------------------------------ helpers ---------
+    def _horizon_mape(self, result: EvaluationResult, horizon: int) -> float:
+        """Return the MAPE of a given horizon, or NaN.
+
+        Args:
+            result: Evaluation result.
+            horizon: Horizon in days.
+
+        Returns:
+            The MAPE in percent.
+        """
+        table = result.per_horizon
+        if table.empty or "horizon" not in table.columns:
+            return float("nan")
+        match = table[table["horizon"].astype(int) == int(horizon)]
+        return _float(match["mape_pct"].iloc[0]) if not match.empty else float("nan")
+
+    def _config_artifact(self, key: str, default: str) -> str:
+        """Read an artefact file name from the configuration.
+
+        Args:
+            key: Key inside the ``train.artifacts`` node.
+            default: Value used when the key is absent.
+
+        Returns:
+            The resolved file name.
+        """
+        artifacts = (self.config.get("train") or {}).get("artifacts") or {}
+        return str(artifacts.get(key) or default)
+
+
+#: Seuils dont l'unité ne peut pas prêter à confusion. Leur valeur documentée par défaut est ≥
+#10,
+#: donc une déclaration comprise entre 0 et 1 est nécessairement une fraction (0.85 pour 85 %)
+#et
+#: peut être convertie sans deviner. Les autres seuils exprimés en pourcentage (``bias_max``,
+#: ``mape_max``, ``backtest_spread_max``) peuvent légitimement valoir moins de 1 : ils ne sont
+#: jamais réinterprétés, et la chaîne ``target`` du verdict affiche l'unité pour rendre une
+#erreur
+#: de saisie visible à la lecture.
+PERCENT_FRACTION_KEYS: frozenset[str] = frozenset(
+    {"interval_coverage_min", "improvement_vs_naive_min"}
+)
+
+
+def _resolve_thresholds(config: Mapping[str, Any]) -> dict[str, float]:
+    """Merge the documented thresholds with an optional runtime override.
+
+    Args:
+        config: Root configuration mapping.
+
+    Returns:
+        The thresholds to apply.
+    """
+    thresholds = dict(DEFAULT_THRESHOLDS)
+    override = (config.get("metrics") or {}).get("thresholds") or {}
+    for key, value in dict(override).items():
+        if key not in thresholds:
+            continue
+        resolved = float(value)
+        if key in PERCENT_FRACTION_KEYS and 0.0 < resolved <= 1.0:
+            # 0.85 déclaré là où l'unité attendue est le pourcentage : on
+            #convertit et on le dit,
+            # plutôt que de comparer 86.56 à 0.85 et de publier un verdict décoratif.
+            logger.warning(
+                "Seuil '{}' déclaré en fraction ({}): conversion en pourcentage ({})",
+                key,
+                resolved,
+                resolved * 100.0,
+            )
+            resolved *= 100.0
+        thresholds[key] = resolved
+    return thresholds
+
+
+def _model_identity(model: Any, extras: Mapping[str, Any]) -> dict[str, str]:
+    """Return the model identity as strings, tolerant to a missing model.
+
+    Args:
+        model: Optional model object.
+        extras: Evaluation extras (which carry the model summary).
+
+    Returns:
+        Mapping with ``name``, ``algorithm`` and ``params``.
+    """
+    summary = str(extras.get("model") or "")
+    if model is not None:
+        name = summary or str(getattr(model, "name", "") or type(model).__name__)
+        algorithm = str(getattr(model, "algorithm", None) or "n/a")
+        params = str(getattr(model, "params", None) or "n/a")
+    else:
+        name, algorithm, params = summary or "n/a", "n/a", "n/a"
+    return {"name": name, "algorithm": algorithm, "params": params}
+
+
+def _period_of(result: EvaluationResult) -> str:
+    """Return the chronological period covered by the evaluated rows.
+
+    Args:
+        result: Evaluation result.
+
+    Returns:
+        A human readable period, or ``non renseignée``.
+    """
+    frame = result.predictions
+    for column in ("origin_date", "target_date"):
+        if isinstance(frame, pd.DataFrame) and column in frame.columns:
+            stamps = pd.to_datetime(frame[column])
+            return f"{stamps.min().date()} → {stamps.max().date()}"
+    return "non renseignée"
+
+
+def _config_snapshot(paths: ProjectPaths) -> str:
+    """Return the relative path of the resolved-configuration artefact.
+
+    Args:
+        paths: Project layout.
+
+    Returns:
+        A display path.
+    """
+    snapshot = Path(paths.models_dir) / "resolved_config.json"
+    return snapshot.as_posix() if snapshot.exists() else "absente (relancer `mode=train`)"
+
+
+def _naive_row(table: pd.DataFrame) -> dict[str, Any] | None:
+    """Return the seasonal-naive row of the baseline table.
+
+    Args:
+        table: Baseline comparison table.
+
+    Returns:
+        The row as a mapping, or ``None``.
+    """
+    match = table[table["reference"].astype(str).str.contains("seasonal", case=False, na=False)]
+    if match.empty:
+        match = table[table["reference"] != "modèle appris"]
+    return match.iloc[0].to_dict() if not match.empty else None
+
+
+def _model_row(table: pd.DataFrame) -> dict[str, Any] | None:
+    """Return the learned-model row of the baseline table.
+
+    Args:
+        table: Baseline comparison table.
+
+    Returns:
+        The row as a mapping, or ``None``.
+    """
+    match = table[table["reference"] == "modèle appris"]
+    return match.iloc[0].to_dict() if not match.empty else None
+
+
+def _relative_gain(naive: Mapping[str, Any], model: Mapping[str, Any]) -> float:
+    """Relative MAPE reduction of the model against a reference, in percent.
+
+    Args:
+        naive: Reference row.
+        model: Model row.
+
+    Returns:
+        The percentage of error removed.
+    """
+    reference = _float(naive.get("mape_pct"))
+    current = _float(model.get("mape_pct"))
+    if not np.isfinite(reference) or abs(reference) < 1e-9:
+        return float("nan")
+    return 100.0 * (reference - current) / reference
+
+
+def _horizon_mape_of(table: pd.DataFrame, horizon: Any) -> float:
+    """Return the MAPE of one horizon row.
+
+    Args:
+        table: Per-horizon table.
+        horizon: Horizon value.
+
+    Returns:
+        The MAPE in percent.
+    """
+    match = table[table["horizon"] == horizon]
+    return _float(match["mape_pct"].iloc[0]) if not match.empty else float("nan")
+
+
+def _worst_horizon(table: pd.DataFrame) -> dict[str, Any] | None:
+    """Return the horizon row with the highest MAPE.
+
+    Args:
+        table: Per-horizon table.
+
+    Returns:
+        The worst row as a mapping, or ``None``.
+    """
+    if table.empty or "mape_pct" not in table.columns:
+        return None
+    return table.sort_values("mape_pct", ascending=False).iloc[0].to_dict()
+
+
+def _fold_trend(folds: pd.DataFrame) -> float | None:
+    """Return the MAPE difference between the last and the first backtest fold.
+
+    Args:
+        folds: Backtest table without the dispersion row.
+
+    Returns:
+        The difference in percentage points, or ``None`` when fewer than two folds exist.
+    """
+    if folds.empty or len(folds) < 2 or "mape_pct" not in folds.columns:
+        return None
+    values = folds["mape_pct"].astype(float).to_numpy()
+    return float(values[-1] - values[0])
+
+
+def _family_of(feature: str) -> str:
+    """Classify a feature into a readable family, for the importance table.
+
+    Args:
+        feature: Feature name.
+
+    Returns:
+        The family label (météo, calendrier, historique, niveau, horizon, autre).
+    """
+    name = feature.lower()
+    if any(token in name for token in ("temperature", "hdd", "cdd", "cold", "heat")):
+        return "météo"
+    if any(token in name for token in ("weekday", "weekend", "holiday", "doy", "month", "quarter", "year", "school")):
+        return "calendrier"
+    if "rolling" in name or "momentum" in name or "level" in name:
+        return "niveau récent"
+    if "lag" in name or "last_observed" in name or "seasonal_naive" in name or "gap" in name:
+        return "historique"
+    if "horizon" in name:
+        return "horizon"
+    return "autre"
+
+
+def _interval_label(method: str) -> str:
+    """Return the business-readable name of an interval construction method.
+
+    Args:
+        method: Method identifier persisted by the evaluator.
+
+    Returns:
+        A French label usable in the report body.
+    """
+    labels = {
+        "normalized_conformal": "prédiction conforme normalisée par horizon",
+        "conformal": "prédiction conforme par horizon",
+        "residual_quantile": "quantiles de résidus de validation",
+    }
+    return labels.get(method, method or "quantiles de résidus de validation")
+
+
+def _bias_direction(extras: Mapping[str, Any]) -> str:
+    """Return the direction of the mean bias, as a business-readable word.
+
+    A negative bias is a systematic under-forecast, a positive one an over-forecast. Naming the
+    direction matters more than its sign: the buyer reads « sous-prévision » and knows the
+    consequence (buying balancing energy at spot price), while a minus sign needs interpreting.
+
+    Args:
+        extras: Evaluation extras carrying ``bias_pct``.
+
+    Returns:
+        ``sous-prévision`` or ``sur-prévision``.
+    """
+    return "sous-prévision" if _float(extras.get("bias_pct")) < 0 else "sur-prévision"
+
+
+def _float(value: Any) -> float:
+    """Coerce a value to float, mapping anything unusable to NaN.
+
+    Args:
+        value: Value to coerce.
+
+    Returns:
+        The float value.
+    """
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return result
+
+
+def _int(value: Any) -> int:
+    """Coerce a value to int without raising.
+
+    Args:
+        value: Value to coerce.
+
+    Returns:
+        The integer value (0 when unusable).
+    """
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _fmt(value: Any, digits: int = 3) -> str:
+    """Format a number for a Markdown table, keeping NaN readable.
+
+    Args:
+        value: Value to format.
+        digits: Number of decimals.
+
+    Returns:
+        The formatted string.
+    """
+    number = _float(value)
+    if not np.isfinite(number):
+        return "n/a"
+    return f"{number:,.{digits}f}".replace(",", " ")

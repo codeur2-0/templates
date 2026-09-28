@@ -1,0 +1,95 @@
+# =================================================================================================
+# Moteur de recommandation de catalogue e-commerce avec scikit-learn
+# -------------------------------------------------------------------------------------------------
+# Pipeline de recommandation de bout en bout (catalogue synthétique de 900 références x 1 200 utilisateurs -> génération de 36 000 couples (utilisateur, candidat) avec facteur latent d'attrait et probabilité de pertinence -> contrats Pandera -> features d'affinité, d'intention, de signal collaboratif et de fiche article -> gradient boosting par histogrammes -> classement par utilisateur puis publication d'un top-10 sous contraintes métier) pour une équipe Personnalisation, entièrement piloté par Hydra et structuré en objets testables. L'évaluation est menée **par utilisateur** et jamais ligne à ligne : NDCG@10, Precision@10, Recall@10, MAP@10 et hit-rate confrontés au tirage aléatoire, au tri par popularité et au plafond atteignable publié par le générateur, avec couverture catalogue, concentration, démarrage à froid, emplacements perdus en rupture et backtest chronologique. La probabilité oracle est une métadonnée : elle sert à borner la qualité, jamais à entraîner.
+#
+# Toute la configuration du projet vit dans ce dossier. Aucune valeur métier n'est codée en dur
+# dans le code source : chaque paramètre est déclaré ici, typé par `src/schemas/config.py`
+# (Pydantic) et surchargeable en ligne de commande par Hydra.
+#
+#   python -m src.main mode=train ++train.epochs=10 model.params.max_depth=6
+#   python -m src.main --multirun data.n_samples=2000,8000
+#
+# Groupes de configuration (dossier `conf/`) :
+#   data/          jeu de données, cibles, split, contrats de validation
+#   model/         algorithme et hyperparamètres
+#   train/         boucle d'entraînement, callbacks, artefacts produits
+#   preprocessing/ nettoyage, encodage, scaling, feature engineering
+#   hydra/         répertoires de sortie Hydra (run / sweep)
+# =================================================================================================
+
+defaults:
+  - data: default
+  - model: default
+  - train: default
+  - preprocessing: default
+  - hydra: local
+  - _self_
+
+# Mode d'exécution du point d'entrée `src/main.py`.
+#   generate-data : génère le jeu de données synthétique dans data/raw
+#   train         : entraîne, valide, évalue et sauvegarde les artefacts
+#   evaluate      : ré-évalue un modèle existant et régénère les rapports
+#   predict       : exécute des prédictions (fichier ou échantillon)
+#   all           : generate-data -> train -> evaluate -> predict
+mode: train
+
+seed: 42
+log_level: INFO
+log_file: null            # ex. outputs/run.log ; null = console uniquement
+
+project:
+  key: ds-recommendation-sklearn
+  name: ecommerce-catalog-recommendation-sklearn
+  domain: data-science
+  problem: recommendation
+  stack: sklearn
+  family: recommendation
+  modality: tabular
+  title: "Moteur de recommandation de catalogue e-commerce avec scikit-learn"
+  version: 1.0.0
+
+paths:
+  root: null              # null -> résolu depuis src/utils/paths.PROJECT_ROOT
+  data_dir: null
+  artifacts_dir: null
+  outputs_dir: null
+
+metrics:
+  task: ranking
+  primary: ndcg_at_k
+  secondary:
+    - precision_at_k
+    - recall_at_k
+    - map_at_k
+    - hit_rate_at_k
+  baseline: popularity
+  direction: maximize
+  min_primary: 0.45
+
+predict:
+  input: null             # chemin d'un fichier (parquet/csv) ou null pour un échantillon
+  n_samples: 5
+  output: artifacts/reports/predictions.csv
+
+# --- configuration spécifique à la famille `recommendation` ----------------------------------
+recommendation:
+  top_k: 10
+  cutoffs:
+  - 5
+  - 10
+  - 20
+  group_column: user_id
+  item_column: item_id
+  popularity_column: item_views_7d
+  intent_column: user_item_views_30d
+  stock_column: item_stock_units
+  margin_column: item_margin_pct
+  activity_column: user_orders_12m
+  cold_user_max_orders: 1
+  coverage_min: 0.25
+  backtest_spread_max: 0.15
+  category_column: item_category
+  filter_unavailable: true
+  max_per_category: null
+  time_column: session_date

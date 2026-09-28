@@ -1,0 +1,100 @@
+# --------------------------------------------------------------------------------------
+# Global ignore rules for the whole monorepo of Data / AI / MLOps reference projects.
+# Each generated project carries a stricter, project-scoped .gitignore.
+# --------------------------------------------------------------------------------------
+
+# --- Python ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+*.whl
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- Virtual environments -------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Tooling caches -------------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+.cache/
+
+# --- Jupyter --------------------------------------------------------------------------
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+.jupyter/
+profile_default/
+
+# --- Hydra / experiment outputs -------------------------------------------------------
+outputs/
+multirun/
+runs/
+logs/
+wandb/
+mlruns/
+.dvc/
+.dvc_cache/
+*.log
+
+# --- Artefacts lourds (modèles, jeux de données générés, figures) ---------------------
+# Les projets de ce dépôt génèrent leurs données et leurs artefacts à la demande.
+artifacts/**
+!artifacts/.gitkeep
+!artifacts/**/.gitkeep
+data/raw/**
+data/processed/**
+data/external/**
+data/interim/**
+!data/**/.gitkeep
+!data/README.md
+# Jamais de règle `models/` non ancrée : elle avalait `src/models/`, c'est-à-dire la couche
+# modèle de CHAQUE projet et de CHAQUE template de stack (le code était invisible pour git).
+# Les artefacts de modèles vivent sous `artifacts/` (déjà ignoré ci-dessus) et sont de toute
+# façon couverts par les extensions listées ci-dessous.
+artifacts/models/
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.keras
+*.onnx
+*.parquet
+*.duckdb
+*.sqlite
+*.db
+
+# --- Secrets & configuration locale ---------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.yaml
+conf/local/
+
+# --- IDE / OS -------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

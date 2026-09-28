@@ -1,0 +1,52 @@
+# =================================================================================================
+# Modèle : Gradient boosting par histogrammes (HistGradientBoostingClassifier)
+# -------------------------------------------------------------------------------------------------
+# Le gradient boosting par histogrammes est le meilleur rapport précision/coût de scikit-learn
+# pour scorer des couples (utilisateur, candidat) : il apprend sans transformation les
+# **interactions** qui font la pertinence (affinité de catégorie x niveau de prix x intention
+# récente), il est **natif valeurs manquantes** (un nouvel article sans historique de notation ne
+# casse pas la publication), il traite les features catégorielles du catalogue sans one-hot massif
+# — un encodage one-hot de 900 références exploserait la dimension et noierait le signal
+# d'affinité — et il reste déterministe à graine fixée, ce qui est une exigence pour un moteur
+# dont on audite les listes publiées. Ses limites sont documentées ici plutôt que cachées : il
+# apprend un score **ponctuel** par couple et non une préférence relative, si bien qu'il
+# n'optimise pas directement le NDCG (une perte de classement comme LambdaMART serait plus
+# alignée) ; il ne construit aucune représentation latente partagée, donc il ne généralise pas à
+# un utilisateur ou à un article jamais vu en entraînement autrement que par leurs attributs ; et
+# il est sensible au déséquilibre de classes, la pertinence ne concernant qu'environ 14 % des
+# candidats. La comparaison au notebook 04 avec une régression logistique (linéaire, lisible, mais
+# aveugle aux interactions), une forêt aléatoire et un k-plus-proches voisins sur les embeddings
+# de catégorie montre ce que l'on gagne et ce que l'on perd.
+#
+# Alternatives considérées : logistic_regression : coefficients lisibles en log-odds par feature, calibration native excellente, mais incapable de capter les interactions sans features croisées fabriquées à la main — c'est précisément ce que fait le générateur avec l'affinité, donc le gain du boosting se mesure contre elle, random_forest : robuste et peu sensible au réglage, parallélisable, mais moins précis que le boosting sur ce volume et sans gestion aussi fine des manquants, knn : aucune phase d'entraînement, mémoire directe des interactions, mais coût linéaire à l'inférence et sensibilité totale à la métrique choisie, factorisation matricielle (SVD tronquée / ALS) : le modèle historique de la recommandation, excellent pour la découverte collaborative, mais il exige une matrice utilisateur-article dense et ne consomme aucune feature de fiche article — inutile pour un article neuf, trieur par popularité : ce n'est pas un algorithme du registre, mais c'est le seul adversaire qui compte — il est gratuit, explicable et robuste, et tout modèle qui ne le bat pas nettement en NDCG n'a aucune valeur opérationnelle, réseau à deux tours (voir la variante pytorch de cette famille) : apprend des embeddings utilisateur et article et généralise mieux au froid, mais exige bien plus de données et perd l'explicabilité par permutation.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.max_iter=...
+# =================================================================================================
+
+name: "Gradient boosting par histogrammes (HistGradientBoostingClassifier)"
+algorithm: hist_gradient_boosting
+class: SklearnModel
+task: ranking
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `SklearnModel(params=...)` (voir src/models/model.py).
+params:
+  max_iter: 300
+  learning_rate: 0.06
+  max_leaf_nodes: 15
+  min_samples_leaf: 40
+  max_features: 0.7
+  l2_regularization: 1.0
+  loss: log_loss
+  early_stopping: false
+  random_state: 42
+
+# --- options spécifiques à la stack `sklearn` ---------------------------------------
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: group_kfold

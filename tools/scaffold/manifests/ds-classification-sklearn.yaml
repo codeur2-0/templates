@@ -1,0 +1,69 @@
+# ==============================================================================================
+# data-science / classification / with-sklearn
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/binary_classification.yaml` (churn télécom).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet et modèle.
+# ==============================================================================================
+
+key: ds-classification-sklearn
+title: "Prédiction d'attrition client (churn télécom) avec scikit-learn"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> forêt aléatoire -> évaluation et analyse d'erreurs) pour un cas de churn
+  télécom, entièrement piloté par Hydra et structuré en objets testables.
+
+family: binary_classification
+domain: data-science
+problem: classification
+stack: sklearn
+project_slug: telecom-churn-sklearn
+package_name: churn_sklearn
+
+model:
+  display_name: "Forêt aléatoire scikit-learn"
+  algorithm: random_forest
+  rationale: >-
+    La forêt aléatoire est le meilleur compromis pédagogie/performance pour un premier modèle
+    tabulaire : elle capture les non-linéarités et les interactions (contrat mensuel x jeune
+    abonné x satisfaction basse) sans réglage fin, fournit une importance de features native
+    et expose des probabilités exploitables pour le ciblage CRM. Elle sert aussi de référence
+    pour comparer les autres stacks du même cas d'usage.
+  alternatives:
+    - "logistic_regression : baseline interprétable, sensible au scaling et aux interactions"
+    - "hist_gradient_boosting : généralement supérieur, plus coûteux à régler"
+    - "gradient_boosting : variante historique, plus lente"
+    - "extra_trees : plus de variance aléatoire, parfois plus robuste au bruit"
+    - "svm (RBF) : bon sur petits volumes, coûteux au-delà de 100k lignes"
+  params:
+    n_estimators: 300
+    max_depth: 14
+    min_samples_leaf: 8
+    max_features: sqrt
+    class_weight: balanced_subsample
+    criterion: gini
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 1 min).
+  notebook_param_grid:
+    n_estimators: [120, 300]
+    max_depth: [6, 14]
+    min_samples_leaf: [4, 16]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    cross_validation:
+      enabled: true
+      folds: 5
+      strategy: stratified
+  root_conf:
+    decision:
+      threshold: 0.5
+      retention_cost_eur: 25.0
+      customer_lifetime_value_eur: 1450.0
+
+learning_objectives:
+  - "Composer un pipeline scikit-learn propre : ColumnTransformer, transformers custom, fit sur le train uniquement."
+  - "Utiliser une classe abstraite BaseModel pour rendre le framework interchangeable."
+  - "Lire des métriques de classification en contexte déséquilibré (ROC AUC, PR AUC, rappel, précision)."
+  - "Choisir un seuil de décision avec une table d'arbitrage coût/bénéfice plutôt qu'avec 0.5."
+  - "Produire une importance de features et l'interpréter sans sur-vendre la causalité."

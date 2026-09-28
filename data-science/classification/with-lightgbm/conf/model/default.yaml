@@ -1,0 +1,48 @@
+# =================================================================================================
+# Modèle : Gradient boosting LightGBM
+# -------------------------------------------------------------------------------------------------
+# LightGBM entraîne un boosting leaf-wise (histogrammes + croissance par feuille) : à précision
+# comparable, il est nettement plus rapide que les boosters level-wise sur les gros volumes, ce
+# qui compte pour un score recalculé quotidiennement. `num_leaves` pilote la capacité du modèle,
+# l'early stopping natif évite le sur-apprentissage sans réglage manuel du nombre d'arbres, et le
+# support natif des variables catégorielles supprime une partie du one-hot encoding.
+#
+# Alternatives considérées : lightgbm_dart : dropout sur les arbres, régularise les gros ensembles (early stopping indisponible), lightgbm_goss : échantillonnage par gradient, plus rapide encore sur les très gros volumes, logistic_regression : baseline interprétable, sensible au scaling et aux interactions, dummy : plancher à battre — un modèle qui ne le dépasse pas n'a aucune valeur.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_estimators=...
+# =================================================================================================
+
+name: "Gradient boosting LightGBM"
+algorithm: lightgbm
+class: LightGBMModel
+task: binary
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `LightGBMModel(params=...)` (voir src/models/model.py).
+params:
+  n_estimators: 500
+  num_leaves: 31
+  max_depth: -1
+  learning_rate: 0.06
+  min_child_samples: 20
+  subsample: 0.9
+  subsample_freq: 1
+  colsample_bytree: 0.8
+  reg_lambda: 1.5
+  reg_alpha: 0.0
+  min_split_gain: 0.0
+  scale_pos_weight: auto
+  importance_type: gain
+
+# --- options spécifiques à la stack `lightgbm` ---------------------------------------
+early_stopping_rounds: 40
+eval_metric: auc
+native_categorical: true
+cross_validation:
+  enabled: true
+  folds: 5
+  strategy: stratified

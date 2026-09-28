@@ -1,0 +1,78 @@
+# ==============================================================================================
+# data-science / regression / with-sklearn
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/regression.yaml` (estimation de prix immobilier, AVM).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet et modèle.
+# ==============================================================================================
+
+key: ds-regression-sklearn
+title: "Estimation du prix de vente immobilier (AVM) avec scikit-learn"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> gradient boosting histogrammé -> analyse des résidus par segment) pour un modèle
+  d'évaluation automatisée de prix immobilier, entièrement piloté par Hydra et structuré en objets
+  testables. L'estimation publiée est une fourchette assortie d'un niveau de confiance.
+
+family: regression
+domain: data-science
+problem: regression
+stack: sklearn
+project_slug: real-estate-avm-sklearn
+package_name: avm_sklearn
+
+model:
+  display_name: "Gradient boosting histogrammé scikit-learn (régression)"
+  algorithm: hist_gradient_boosting
+  rationale: >-
+    Le gradient boosting histogrammé est l'estimateur scikit-learn le plus solide sur données
+    tabulaires : il apprend les non-linéarités du cas (effet concave de la surface, interaction
+    étage x ascenseur, malus énergétique non linéaire), gère nativement les valeurs manquantes
+    (`condition_score`, `condo_fees_eur`) sans imputation préalable, et converge en environ une
+    seconde sur 8 000 biens. Mesuré sur ce jeu (split de test) : RMSE ~34 800 EUR, MAE
+    ~22 800 EUR, R2 ~0,95, MAPE ~7,5 % et ~72 % des estimations dans la fourchette publiée
+    de ±10 % — contre ~9,5 % de MAPE et ~62 % de couverture pour une forêt aléatoire réglée. Il sert de référence aux autres stacks du cas
+    d'usage.
+  alternatives:
+    - "random_forest : robuste, importance native, mais ~2 points de MAPE au-dessus et couverture plus faible"
+    - "logistic_regression (Ridge en régression) : baseline linéaire interprétable, sous-estime les effets concaves"
+    - "gradient_boosting : variante historique, plus lente à entraîner"
+    - "extra_trees : plus de variance aléatoire, parfois plus robuste au bruit"
+    - "svm (SVR) : bon sur petits volumes, coûteux au-delà de 100k lignes"
+  params:
+    max_iter: 400
+    learning_rate: 0.05
+    max_leaf_nodes: 31
+    min_samples_leaf: 20
+    l2_regularization: 1.0
+    early_stopping: false
+    loss: squared_error
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 1 min).
+  notebook_param_grid:
+    max_iter: [150, 400]
+    learning_rate: [0.05, 0.12]
+    min_samples_leaf: [10, 40]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    cross_validation:
+      enabled: true
+      folds: 5
+      # Une cible continue ne se stratifie pas : validation croisée aléatoire standard.
+      strategy: kfold
+  root_conf:
+    estimation:
+      tolerance_pct: 10.0            # fourchette publiée : +/- 10 % autour de l'estimation
+      depth_column: recent_sales_1km # profondeur du marché -> niveau de confiance
+      unit_column: surface_m2        # prix au m2 affiché à l'utilisateur
+      min_market_depth: 10           # en dessous, le bien est orienté vers une revue humaine
+
+learning_objectives:
+  - "Composer un pipeline de régression scikit-learn propre : ColumnTransformer, transformers custom, fit sur le train uniquement."
+  - "Exploiter la gestion native des manquants d'un boosting histogrammé, et la comparer à une imputation explicite."
+  - "Utiliser une classe abstraite BaseModel pour rendre le framework interchangeable."
+  - "Lire des métriques de régression en contexte hétéroscédastique (RMSE, MAE, MAPE, R2, erreur maximale)."
+  - "Diagnostiquer un biais segmenté : la RMSE globale masque une sous-estimation systématique d'un quartier."
+  - "Publier une fourchette et un niveau de confiance plutôt qu'un prix unique, et mesurer la couverture."
+  - "Produire une importance de features et l'interpréter sans sur-vendre la causalité."

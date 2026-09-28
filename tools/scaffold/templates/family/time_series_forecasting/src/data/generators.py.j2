@@ -1,0 +1,1077 @@
+{#- Générateur synthétique du cas d'usage « prévision de consommation électrique régionale » (famille time_series_forecasting). -#}
+"""Synthetic data generator — {{ spec.data.title }}.
+
+Business scenario
+    {{ wrap(business.context, 96, indent=4) }}
+
+How the data is built
+    The generator does **not** draw rows independently: it first simulates a daily electricity
+    load series with an explicit, physically motivated model, then expands that series into a
+    supervised frame of ``(origin, horizon)`` pairs.
+
+    Step 1 — the underlying daily series (~3.4 years):
+
+    * **base level and slow trend** — regional consumption around {{ extras.get('data_conf', {}).get('base_load_mw', 2100) }} MW with a mild
+      efficiency-driven decline (~-0.8 % per year);
+    * **annual seasonality** — winter peak, summer trough (sinusoid on the day of year);
+    * **weekly seasonality** — Monday ramp, Friday evening drop, deep weekend trough;
+    * **thermo-sensitivity** — the dominant French driver: +3.5 % of load per degree below 15 °C
+      (heating) and +2.2 % per degree above 24 °C (cooling), applied on a two-day smoothed
+      temperature to reproduce building inertia;
+    * **calendar** — the eleven metropolitan public holidays (Easter-based dates computed with the
+      Meeus algorithm, not hard-coded per year), plus ``pont`` bridge days and school holidays;
+    * **regime breaks** — two cold snaps, two heatwaves and three industrial shutdowns, i.e. the
+      days where a forecast is worth money;
+    * **autocorrelated noise** — multiplicative AR(1) with rho ~0.6, so residuals are *not* white
+      and naive Gaussian intervals are too narrow.
+
+    Step 2 — the supervised expansion. For every origin day ``t`` and every horizon
+    ``h in (1, 2, 3, 7)`` a row is emitted carrying the load observed at ``t + h``.
+
+    The anteriority contract (the single most important property of this dataset)
+    ---------------------------------------------------------------------------
+    Every feature falls in exactly one of three buckets:
+
+    * ``known at origin`` — ``load_last_observed``, ``load_lag_*``, ``load_rolling_*``,
+      ``temperature_lag_1d``, ``temperature_rolling_mean_7d``: computed on the series **up to and
+      including ``t``**;
+    * ``known in advance`` — the calendar of the target day (weekday, weekend, public holiday,
+      school holiday, day-of-year encoding) and the **temperature forecast** for that day *and for
+      the day before it*, which is the truth corrupted by a forecast error growing with the horizon
+      (0.35 °C at J+1 up to ~1.2 °C at J+7). The day-before forecast matters because the load reacts
+      to a two-day smoothed temperature: without it no model can rebuild the building inertia. Real forecasters never get the true future temperature, and pretending
+      otherwise is the classic leakage that makes a backtest look brilliant;
+    * ``ground truth only`` — ``load_mw`` (the target), ``target_date``, ``target_month``,
+      ``event_type`` and ``is_extreme_event``: metadata used to measure and to explain errors,
+      excluded from the feature matrix by ``drop_columns``.
+
+    ``load_seasonal_naive`` deserves a note: it reads the load of ``target_date - 7 days``, which
+    looks like it reaches into the future but never does, because every horizon is <= 7 days, so
+    ``t + h - 7 <= t``. It is both a legitimate feature (the seasonal-naive anchor) and the
+    reference the model must beat.
+
+    Two traps keep the exercise honest: informative missingness on the observed temperature
+    (~3 %, winter-biased — sensors fail in freezing weather, which is exactly when the load is
+    most temperature-sensitive) and irreducible noise, so a MAPE near zero would mean leakage, not
+    a good model.
+
+Determinism
+    ``generate()`` is a pure function of ``(n_samples, seed, options)``: two runs produce the same
+    bytes, which is what makes stack-to-stack comparisons meaningful.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any, ClassVar
+
+import numpy as np
+import numpy.typing as npt
+import pandas as pd
+
+from src.data.schemas import RawDataSchema
+from src.utils.io import write_json, write_table_multiple
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+
+logger = get_logger(__name__)
+
+#: Default dataset name (overridable through the constructor / Hydra config).
+DEFAULT_DATASET_NAME = "{{ spec.data.dataset_name }}"
+
+#: Default forecast horizons, in days. All are <= 7 so that the seasonal-naive anchor stays legal.
+DEFAULT_HORIZONS: tuple[int, ...] = (1, 2, 3, 7)
+
+#: Columns whose value belongs to the future: ground truth for evaluation, never features.
+DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
+    "load_mw",
+    "target_date",
+    "target_month",
+    "event_type",
+    "is_extreme_event",
+)
+
+#: French weekday abbreviations used for the one-hot encoded target calendar.
+WEEKDAY_LABELS: tuple[str, ...] = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+#: Month abbreviations kept as metadata for the seasonal error breakdown.
+MONTH_LABELS: tuple[str, ...] = (
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "may",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec",
+)
+
+#: Weekly profile of the regional load (Monday = 0): residential trough, industrial weekday peak.
+WEEKDAY_FACTORS: tuple[float, ...] = (1.060, 1.040, 1.030, 1.020, 0.990, 0.845, 0.800)
+
+#: Fixed-date metropolitan public holidays (month, day). Easter-based ones are computed.
+FIXED_HOLIDAYS: tuple[tuple[int, int], ...] = (
+    (1, 1),
+    (5, 1),
+    (5, 8),
+    (7, 14),
+    (8, 15),
+    (11, 1),
+    (11, 11),
+    (12, 25),
+)
+
+#: Approximate French school holiday windows (month, start day, month, end day), zone-agnostic.
+SCHOOL_HOLIDAY_WINDOWS: tuple[tuple[int, int, int, int], ...] = (
+    (2, 8, 2, 24),
+    (4, 6, 4, 22),
+    (7, 6, 8, 31),
+    (10, 19, 11, 4),
+    (12, 20, 12, 31),
+    (1, 1, 1, 4),
+)
+
+#: Climatological normals of the simulated region: mean annual temperature and amplitude.
+TEMPERATURE_MEAN_C = 12.4
+TEMPERATURE_AMPLITUDE_C = 9.6
+
+#: Temperature shift (°C) applied during a regime episode, before the three-day smoothing.
+COLD_SNAP_SHIFT_C = -7.5
+HEATWAVE_SHIFT_C = 6.0
+
+#: Heating and cooling thresholds of the thermo-sensitivity model (°C).
+HEATING_THRESHOLD_C = 15.0
+COOLING_THRESHOLD_C = 24.0
+
+#: Degree-day reference temperatures exposed as features (industry convention).
+HDD_BASE_C = 18.0
+CDD_BASE_C = 24.0
+
+
+class SyntheticDataGenerator:
+    """Deterministic generator of the {{ spec.data.dataset_name | replace("_", " ") }} dataset.
+
+    Example:
+        >>> generator = SyntheticDataGenerator(n_samples=40, seed=42, horizons=(1, 7))
+        >>> frame = generator.generate()
+        >>> frame.shape[0]
+        40
+        >>> {"load_mw", "horizon_days", "origin_date"} <= set(frame.columns)
+        True
+        >>> bool(frame["origin_date"].is_monotonic_increasing)
+        True
+    """
+
+    #: Options accepted from ``conf/data/default.yaml`` (extra keys of the data node).
+    SUPPORTED_OPTIONS: ClassVar[tuple[str, ...]] = (
+        "horizons",
+        "start_date",
+        "warmup_days",
+        "base_load_mw",
+        "annual_amplitude",
+        "trend_per_year",
+        "heat_gradient",
+        "cool_gradient",
+        "holiday_drop",
+        "school_holiday_lift",
+        "noise_sigma",
+        "noise_ar",
+        "forecast_error_j1",
+        "forecast_error_growth",
+        "missing_temperature_rate",
+        "cold_snap_days",
+        "heatwave_days",
+        "shutdown_days",
+    )
+
+    #: Columns produced, in the order they appear in the frame (``RawDataSchema`` is strict).
+    COLUMNS: ClassVar[tuple[str, ...]] = (
+        "sample_id",
+        "origin_date",
+        "horizon_days",
+        "target_date",
+        "target_month",
+        "event_type",
+        "is_extreme_event",
+        "load_mw",
+        "load_last_observed",
+        "load_lag_1d",
+        "load_lag_2d",
+        "load_lag_7d",
+        "load_lag_14d",
+        "load_lag_28d",
+        "load_rolling_mean_7d",
+        "load_rolling_std_7d",
+        "load_rolling_min_7d",
+        "load_rolling_mean_28d",
+        "load_seasonal_naive",
+        "temperature_forecast_c",
+        "temperature_forecast_prev_c",
+        "temperature_anomaly_c",
+        "temperature_lag_1d",
+        "temperature_rolling_mean_7d",
+        "hdd_target",
+        "cdd_target",
+        "target_weekday",
+        "target_is_weekend",
+        "target_is_holiday",
+        "target_school_holiday",
+        "target_doy_sin",
+        "target_doy_cos",
+    )
+
+    def __init__(
+        self,
+        *,
+        n_samples: int = {{ spec.data.n_samples }},
+        seed: int = {{ spec.data.seed }},
+        dataset_name: str | None = None,
+        output_dir: Path | str | None = None,
+        formats: Sequence[str] = ("parquet", "csv"),
+        horizons: Sequence[int] = DEFAULT_HORIZONS,
+        start_date: str = "{{ extras.get('data_conf', {}).get('start_date', '2021-01-01') }}",
+        warmup_days: int = 40,
+        base_load_mw: float = {{ extras.get('data_conf', {}).get('base_load_mw', 2100.0) }},
+        annual_amplitude: float = 0.18,
+        trend_per_year: float = -0.008,
+        heat_gradient: float = 0.035,
+        cool_gradient: float = 0.012,
+        holiday_drop: float = 0.13,
+        school_holiday_lift: float = 0.015,
+        noise_sigma: float = 0.022,
+        noise_ar: float = 0.60,
+        forecast_error_j1: float = 0.35,
+        forecast_error_growth: float = 0.14,
+        missing_temperature_rate: float = 0.03,
+        cold_snap_days: int = 18,
+        heatwave_days: int = 18,
+        shutdown_days: int = 9,
+    ) -> None:
+        """Store every generation parameter — nothing is hard-coded downstream.
+
+        Args:
+            n_samples: Number of ``(origin, horizon)`` rows to produce.
+            seed: Random seed; two runs with the same seed give identical bytes.
+            dataset_name: Logical dataset name (file stem and error messages).
+            output_dir: Directory receiving the exported tables.
+            formats: Export formats, e.g. ``("parquet", "csv")``.
+            horizons: Forecast horizons in days, all <= 7 to keep the seasonal anchor legal.
+            start_date: First day of the simulated series (ISO format).
+            warmup_days: Days simulated before the first origin, so that every lag and rolling
+                window is defined without padding the frame with NaN.
+            base_load_mw: Mean regional load in MW, before seasonality.
+            annual_amplitude: Relative amplitude of the annual cycle (0.18 = +/-18 %).
+            trend_per_year: Relative yearly drift of the load (negative = efficiency gains).
+            heat_gradient: Relative load increase per degree below ``HEATING_THRESHOLD_C``.
+            cool_gradient: Relative load increase per degree above ``COOLING_THRESHOLD_C``
+                (much lower than the heating gradient: the French building stock is poorly
+                air-conditioned, which is a real and measurable asymmetry).
+            holiday_drop: Relative load drop on a public holiday.
+            school_holiday_lift: Relative load lift during school holidays (residential share).
+            noise_sigma: Standard deviation of the multiplicative AR(1) noise.
+            noise_ar: Lag-1 autocorrelation of that noise.
+            forecast_error_j1: Standard deviation (°C) of the temperature forecast error at J+1.
+            forecast_error_growth: Additional error standard deviation (°C) per horizon day.
+            missing_temperature_rate: Share of days whose observed temperature is unavailable.
+            cold_snap_days: Total days of cold-snap episodes over the simulated period.
+            heatwave_days: Total days of heatwave episodes.
+            shutdown_days: Total days of industrial shutdowns (demand-side shock, no weather
+                signature: the hardest regime to forecast, on purpose).
+
+        Raises:
+            ValueError: When ``n_samples`` or ``horizons`` are not usable.
+        """
+        resolved = tuple(int(value) for value in horizons)
+        if not resolved:
+            msg = "at least one horizon is required"
+            raise ValueError(msg)
+        if any(value < 1 or value > 7 for value in resolved):
+            msg = "horizons must lie in [1, 7] days so the seasonal-naive anchor stays legal"
+            raise ValueError(msg)
+        if n_samples < len(resolved):
+            msg = f"n_samples must be at least the number of horizons ({len(resolved)})"
+            raise ValueError(msg)
+
+        self.n_samples = int(n_samples)
+        self.seed = int(seed)
+        self.dataset_name = dataset_name or DEFAULT_DATASET_NAME
+        self.output_dir = Path(output_dir) if output_dir is not None else Path("data/raw")
+        self.formats = tuple(formats)
+        self.horizons = resolved
+        self.start_date = pd.Timestamp(start_date)
+        self.warmup_days = int(warmup_days)
+        self.base_load_mw = float(base_load_mw)
+        self.annual_amplitude = float(annual_amplitude)
+        self.trend_per_year = float(trend_per_year)
+        self.heat_gradient = float(heat_gradient)
+        self.cool_gradient = float(cool_gradient)
+        self.holiday_drop = float(holiday_drop)
+        self.school_holiday_lift = float(school_holiday_lift)
+        self.noise_sigma = float(noise_sigma)
+        self.noise_ar = float(noise_ar)
+        self.forecast_error_j1 = float(forecast_error_j1)
+        self.forecast_error_growth = float(forecast_error_growth)
+        self.missing_temperature_rate = float(missing_temperature_rate)
+        self.cold_snap_days = int(cold_snap_days)
+        self.heatwave_days = int(heatwave_days)
+        self.shutdown_days = int(shutdown_days)
+
+    # ------------------------------------------------------------------ generation ------
+    def generate(self) -> pd.DataFrame:
+        """Build the supervised ``(origin, horizon)`` frame.
+
+        The series is simulated first (weather, calendar, load), then every as-of-origin feature is
+        computed on that series, then rows are expanded per horizon. The frame is sorted by origin
+        and horizon, so the chronological split downstream needs no reordering.
+
+        Returns:
+            A frame of exactly ``n_samples`` rows and ``len(COLUMNS)`` columns, validated against
+            :class:`~src.data.schemas.RawDataSchema`.
+        """
+        # Nombre d'origines = plafond de `n_samples / len(horizons)` : l'expansion produit alors
+        # au moins `n_samples` lignes, et la troncature finale tombe exactement sur le compte
+        # demandé. La dernière origine peut donc être partielle (au plus `len(horizons) - 1`
+        # lignes), ce qui déséquilibre les horizons de quelques unités seulement.
+        n_origins = -(-self.n_samples // len(self.horizons))
+        series = self._simulate_series(n_origins)
+        frame = self._expand(series, n_origins)
+        frame = frame.sort_values(["origin_date", "horizon_days"], kind="mergesort")
+        frame = frame.head(self.n_samples).reset_index(drop=True)
+        # L'identifiant est construit APRÈS le tri : il suit l'ordre chronologique de publication,
+        # et le numéro d'origine reflète la position réelle dans la série.
+        positions = np.arange(len(frame), dtype="int64") // len(self.horizons)
+        frame["sample_id"] = [
+            f"FC-{int(origin):05d}-H{int(horizon):d}"
+            for origin, horizon in zip(positions, frame["horizon_days"].to_numpy(), strict=True)
+        ]
+        frame = frame[list(self.COLUMNS)]
+        validated = RawDataSchema.validate(frame)
+        logger.info(
+            "Generated {} rows ({} origins x {} horizons) from {} to {}",
+            len(validated),
+            n_origins,
+            len(self.horizons),
+            validated["origin_date"].min().date(),
+            validated["origin_date"].max().date(),
+        )
+        return validated
+
+    def _simulate_series(self, n_origins: int) -> pd.DataFrame:
+        """Simulate the daily series that feeds the expansion.
+
+        Args:
+            n_origins: Number of forecast origins to serve.
+
+        Returns:
+            A frame indexed by day with ``load``, ``temperature``, ``is_holiday``,
+            ``school_holiday``, ``event_type`` and the as-of-origin lag/rolling features.
+        """
+        n_days = self.warmup_days + n_origins + max(self.horizons) + 2
+        dates = pd.date_range(self.start_date, periods=n_days, freq="D")
+        day_of_year = dates.dayofyear.to_numpy(dtype="float64")
+
+        events = self._regime_breaks(n_days, dates)
+        temperature = self._temperature(n_days, day_of_year, events)
+        normal = self._climatological_normal(day_of_year)
+        is_holiday = self._public_holidays(dates)
+        school_holiday = self._school_holidays(dates)
+        load = self._load(
+            dates=dates,
+            day_of_year=day_of_year,
+            temperature=temperature,
+            is_holiday=is_holiday,
+            school_holiday=school_holiday,
+            events=events,
+        )
+
+        frame = pd.DataFrame(
+            {
+                "date": dates,
+                "load": load,
+                "temperature": temperature,
+                "normal": normal,
+                "is_holiday": is_holiday,
+                "school_holiday": school_holiday,
+                "event_type": events,
+                "day_of_year": dates.dayofyear.to_numpy(dtype="int64"),
+                "weekday": dates.dayofweek.to_numpy(dtype="int64"),
+                "month": dates.month.to_numpy(dtype="int64"),
+            }
+        )
+        return self._as_of_features(frame)
+
+    def _temperature(
+        self, n_days: int, day_of_year: npt.NDArray[np.float64], events: np.ndarray
+    ) -> np.ndarray:
+        """Simulate the daily mean temperature: annual cycle, weather noise and regime episodes.
+
+        A cold snap must actually be cold and a heatwave actually hot: shifting only the load would
+        create shocks the model can never explain from its weather input, which is not how a real
+        network behaves — and would teach the wrong lesson about exogenous variables.
+
+        Args:
+            n_days: Number of days.
+            day_of_year: Day-of-year of each simulated day.
+            events: Regime-break label of each day.
+
+        Returns:
+            Temperature in °C, one value per day.
+        """
+        rng = np.random.default_rng(self.seed + 101)
+        seasonal = TEMPERATURE_MEAN_C - TEMPERATURE_AMPLITUDE_C * np.cos(
+            2.0 * np.pi * (day_of_year - 15.0) / 365.25
+        )
+        # AR(1) weather: persistent spells rather than white noise, so cold snaps look real.
+        innovations = rng.normal(0.0, 1.55, size=n_days)
+        ar = np.zeros(n_days, dtype="float64")
+        for index in range(1, n_days):
+            ar[index] = 0.74 * ar[index - 1] + innovations[index]
+
+        shift = np.zeros(n_days, dtype="float64")
+        shift[events == "cold_snap"] = COLD_SNAP_SHIFT_C
+        shift[events == "heatwave"] = HEATWAVE_SHIFT_C
+        # Un front météo n'arrive pas en un jour : le décalage est lissé sur trois jours, ce qui
+        # produit une montée et une descente progressives, comme sur une vraie série.
+        kernel = np.array([0.25, 0.5, 0.25], dtype="float64")
+        smoothed = np.convolve(shift, kernel, mode="same")
+        return seasonal + ar + smoothed
+
+    def _climatological_normal(self, day_of_year: npt.NDArray[np.float64]) -> np.ndarray:
+        """Return the smooth climatological normal used for the temperature anomaly.
+
+        Args:
+            day_of_year: Day-of-year of each simulated day.
+
+        Returns:
+            Normal temperature in °C.
+        """
+        return TEMPERATURE_MEAN_C - TEMPERATURE_AMPLITUDE_C * np.cos(
+            2.0 * np.pi * (day_of_year - 15.0) / 365.25
+        )
+
+    @staticmethod
+    def _easter(year: int) -> pd.Timestamp:
+        """Compute Easter Sunday with the Meeus/Jones/Butcher Gregorian algorithm.
+
+        Args:
+            year: Calendar year.
+
+        Returns:
+            The timestamp of Easter Sunday.
+        """
+        golden = year % 19
+        century = year // 100
+        remaining = year % 100
+        leap_correction = century // 4
+        century_remainder = century % 4
+        long_term = (century + 8) // 25
+        adjusted = (century - long_term + 1) // 3
+        epact = (19 * golden + century - leap_correction - adjusted + 15) % 30
+        quarter = remaining // 4
+        quarter_remainder = remaining % 4
+        weekday_correction = (32 + 2 * century_remainder + 2 * quarter - epact - quarter_remainder) % 7
+        month_correction = (golden + 11 * epact + 22 * weekday_correction) // 451
+        month = (epact + weekday_correction - 7 * month_correction + 114) // 31
+        day = ((epact + weekday_correction - 7 * month_correction + 114) % 31) + 1
+        return pd.Timestamp(year=year, month=month, day=day)
+
+    def _public_holidays(self, dates: pd.DatetimeIndex) -> np.ndarray:
+        """Flag the eleven metropolitan French public holidays.
+
+        Args:
+            dates: Simulated calendar.
+
+        Returns:
+            Boolean array, one flag per day.
+        """
+        movable: set[pd.Timestamp] = set()
+        for year in sorted(set(dates.year)):
+            easter = self._easter(int(year))
+            movable.add(easter + pd.Timedelta(days=1))  # Easter Monday
+            movable.add(easter + pd.Timedelta(days=39))  # Ascension
+            movable.add(easter + pd.Timedelta(days=50))  # Whit Monday
+        fixed = {
+            pd.Timestamp(year=int(year), month=month, day=day)
+            for year in sorted(set(dates.year))
+            for month, day in FIXED_HOLIDAYS
+        }
+        holidays = movable | fixed
+        return dates.isin(sorted(holidays))
+
+    @staticmethod
+    def _school_holidays(dates: pd.DatetimeIndex) -> np.ndarray:
+        """Flag school holiday periods (zone-agnostic approximation of the French calendar).
+
+        Args:
+            dates: Simulated calendar.
+
+        Returns:
+            Boolean array, one flag per day.
+        """
+        month = dates.month.to_numpy()
+        day = dates.day.to_numpy()
+        flags = np.zeros(len(dates), dtype=bool)
+        for start_month, start_day, end_month, end_day in SCHOOL_HOLIDAY_WINDOWS:
+            if start_month == end_month:
+                flags |= (month == start_month) & (day >= start_day) & (day <= end_day)
+            elif start_month < end_month:
+                flags |= (month == start_month) & (day >= start_day)
+                flags |= (month == end_month) & (day <= end_day)
+                flags |= (month > start_month) & (month < end_month)
+            else:  # window wrapping over the new year (20 Dec -> 4 Jan)
+                flags |= (month == start_month) & (day >= start_day)
+                flags |= (month == end_month) & (day <= end_day)
+                flags |= (month > start_month) | (month < end_month)
+        return flags
+
+    def _regime_breaks(self, n_days: int, dates: pd.DatetimeIndex) -> np.ndarray:
+        """Place the extreme episodes that a forecast must survive.
+
+        Cold snaps and heatwaves are weather-driven and shift the load up; industrial shutdowns are
+        demand-side and shift it down. Their dates are drawn deterministically from the seed so the
+        error analysis can always find them again.
+
+        Args:
+            n_days: Number of simulated days.
+            dates: Simulated calendar.
+
+        Returns:
+            String array of episode labels (``none``, ``cold_snap``, ``heatwave``,
+            ``industrial_shutdown``).
+        """
+        rng = np.random.default_rng(self.seed + 202)
+        events = np.array(["none"] * n_days, dtype=object)
+        month = dates.month.to_numpy()
+        warmup = self.warmup_days
+        usable = np.arange(warmup + 30, n_days - max(self.horizons) - 3)
+
+        def _place(label: str, total_days: int, allowed_months: Sequence[int], length: int) -> None:
+            candidates = usable[(np.isin(month[usable], list(allowed_months)))]
+            if len(candidates) == 0 or total_days <= 0:
+                return
+            placed = 0
+            guard = 0
+            while placed < total_days and guard < 200:
+                guard += 1
+                start = int(rng.choice(candidates))
+                span = np.arange(start, min(start + length, n_days))
+                if any(events[span] != "none"):
+                    continue
+                events[span] = label
+                placed += len(span)
+
+        _place("cold_snap", self.cold_snap_days, (1, 2, 12), 5)
+        _place("heatwave", self.heatwave_days, (7, 8), 6)
+        _place("industrial_shutdown", self.shutdown_days, (3, 5, 6, 9, 10, 11), 3)
+        return events.astype(str)
+
+    def _load(
+        self,
+        *,
+        dates: pd.DatetimeIndex,
+        day_of_year: npt.NDArray[np.float64],
+        temperature: np.ndarray,
+        is_holiday: np.ndarray,
+        school_holiday: np.ndarray,
+        events: np.ndarray,
+    ) -> np.ndarray:
+        """Build the daily load from an explicit multiplicative model.
+
+        Args:
+            dates: Simulated calendar.
+            day_of_year: Day-of-year of each simulated day.
+            temperature: Simulated daily mean temperature.
+            is_holiday: Public-holiday flags.
+            school_holiday: School-holiday flags.
+            events: Regime-break labels.
+
+        Returns:
+            Load in MW, one value per day.
+        """
+        n_days = len(dates)
+        years_elapsed = np.arange(n_days, dtype="float64") / 365.25
+        trend = 1.0 + self.trend_per_year * years_elapsed
+        annual = 1.0 + self.annual_amplitude * np.cos(2.0 * np.pi * (day_of_year - 15.0) / 365.25)
+        weekly = np.asarray(WEEKDAY_FACTORS, dtype="float64")[dates.dayofweek.to_numpy()]
+
+        # Building inertia: the load reacts to a two-day smoothed temperature, not to the raw day.
+        smoothed = np.empty_like(temperature)
+        smoothed[0] = temperature[0]
+        smoothed[1:] = 0.55 * temperature[1:] + 0.45 * temperature[:-1]
+        heating = np.clip(HEATING_THRESHOLD_C - smoothed, 0.0, None)
+        cooling = np.clip(smoothed - COOLING_THRESHOLD_C, 0.0, None)
+        thermo = 1.0 + self.heat_gradient * heating + self.cool_gradient * cooling
+
+        calendar = np.where(is_holiday, 1.0 - self.holiday_drop, 1.0)
+        calendar = calendar * np.where(school_holiday, 1.0 + self.school_holiday_lift, 1.0)
+        calendar = calendar * self._bridge_days(dates, is_holiday)
+
+        # Le surcroît de consommation d'un épisode météo passe déjà par la thermo-sensibilité (la
+        # température est réellement déplacée) : ces facteurs ne représentent que l'effet résiduel
+        # (éclairage, chauffage d'appoint, comportement des industriels). L'arrêt industriel, lui,
+        # est un choc de demande pur, sans signature météo : c'est le régime le plus difficile à
+        # prévoir, et il le reste volontairement.
+        regime = np.ones(n_days, dtype="float64")
+        regime[events == "cold_snap"] = 1.06
+        regime[events == "heatwave"] = 1.04
+        regime[events == "industrial_shutdown"] = 0.76
+
+        rng = np.random.default_rng(self.seed + 303)
+        innovations = rng.normal(0.0, self.noise_sigma, size=n_days)
+        noise = np.zeros(n_days, dtype="float64")
+        for index in range(1, n_days):
+            noise[index] = self.noise_ar * noise[index - 1] + innovations[index]
+
+        load = self.base_load_mw * trend * annual * weekly * thermo * calendar * regime
+        return np.clip(load * (1.0 + noise), 250.0, None)
+
+    @staticmethod
+    def _bridge_days(dates: pd.DatetimeIndex, is_holiday: np.ndarray) -> np.ndarray:
+        """Apply a lighter drop on bridge days (working day sandwiched between holidays/weekend).
+
+        Args:
+            dates: Simulated calendar.
+            is_holiday: Public-holiday flags.
+
+        Returns:
+            Multiplicative factor per day.
+        """
+        weekday = dates.dayofweek.to_numpy()
+        before = np.roll(is_holiday, 1)
+        after = np.roll(is_holiday, -1)
+        before[0] = False
+        after[-1] = False
+        weekend_before = np.isin(weekday - 1, (5, 6))
+        weekend_after = np.isin(weekday + 1, (5, 6))
+        bridge = (~is_holiday) & (weekday < 5) & (
+            (before & after) | (before & weekend_after) | (after & weekend_before)
+        )
+        return np.where(bridge, 0.93, 1.0)
+
+    @staticmethod
+    def _as_of_features(frame: pd.DataFrame) -> pd.DataFrame:
+        """Add the lag and rolling features, computed on the time-ordered series.
+
+        These features must be built **here** rather than by a row-wise feature builder: a lag only
+        makes sense on a sorted series, and the builder downstream receives rows in arbitrary order.
+
+        Args:
+            frame: Simulated daily series.
+
+        Returns:
+            The frame with ``load_*`` and ``temperature_*`` as-of columns appended.
+        """
+        ordered = frame.sort_values("date").reset_index(drop=True)
+        load = ordered["load"]
+        temperature = ordered["temperature"]
+        for lag in (1, 2, 7, 14, 28):
+            ordered[f"load_lag_{lag}d"] = load.shift(lag)
+        ordered["load_last_observed"] = load
+        ordered["load_rolling_mean_7d"] = load.rolling(7, min_periods=7).mean()
+        ordered["load_rolling_std_7d"] = load.rolling(7, min_periods=7).std()
+        ordered["load_rolling_min_7d"] = load.rolling(7, min_periods=7).min()
+        ordered["load_rolling_mean_28d"] = load.rolling(28, min_periods=28).mean()
+        ordered["temperature_rolling_mean_7d"] = temperature.rolling(7, min_periods=7).mean()
+        return ordered
+
+    def _expand(self, series: pd.DataFrame, n_origins: int) -> pd.DataFrame:
+        """Turn the daily series into ``(origin, horizon)`` supervised rows.
+
+        Args:
+            series: Simulated series with as-of-origin features.
+            n_origins: Number of origins to emit.
+
+        Returns:
+            The expanded frame (not yet sorted, identified nor validated).
+        """
+        first = self.warmup_days
+        origin_index = np.arange(first, first + n_origins, dtype="int64")
+        rng = np.random.default_rng(self.seed + 404)
+        parts = [
+            self._horizon_block(series, origin_index, horizon, rng) for horizon in self.horizons
+        ]
+        return pd.concat(parts, ignore_index=True)
+
+    def _horizon_block(
+        self,
+        series: pd.DataFrame,
+        origin_index: np.ndarray,
+        horizon: int,
+        rng: np.random.Generator,
+    ) -> pd.DataFrame:
+        """Build every row of a single horizon.
+
+        Args:
+            series: Simulated series with as-of-origin features.
+            origin_index: Positions of the origins inside ``series``.
+            horizon: Horizon in days for this block.
+            rng: Seeded generator used for the temperature forecast error.
+
+        Returns:
+            One row per origin, columns in :attr:`COLUMNS` order (identifier added later).
+        """
+        target_index = origin_index + horizon
+        origin = series.iloc[origin_index]
+        target = series.iloc[target_index]
+
+        error_sigma = self.forecast_error_j1 + self.forecast_error_growth * (horizon - 1)
+        temperature_forecast = target["temperature"].to_numpy(dtype="float64") + rng.normal(
+            0.0, error_sigma, size=len(target_index)
+        )
+        temperature_previous = self._previous_day_forecast(series, target_index, horizon, rng)
+        normal = target["normal"].to_numpy(dtype="float64")
+        day_of_year = target["day_of_year"].to_numpy(dtype="float64")
+        weekday = target["weekday"].to_numpy(dtype="int64")
+        event = target["event_type"].to_numpy(dtype=object).astype(str)
+
+        temperature_observed = origin["temperature"].to_numpy(dtype="float64").copy()
+        temperature_rolling = origin["temperature_rolling_mean_7d"].to_numpy(dtype="float64").copy()
+        missing = self._temperature_missing_mask(temperature_observed, rng)
+        temperature_observed[missing] = np.nan
+        temperature_rolling[missing] = np.nan
+        if horizon == 1:
+            # À J+1 la « veille de la cible » EST l'origine : une panne de capteur ce jour-là rend
+            # les deux colonnes indisponibles. Laisser la valeur propre ici créerait une incohérence
+            # exploitable par le modèle (et impossible en production).
+            temperature_previous = temperature_previous.copy()
+            temperature_previous[missing] = np.nan
+
+        return pd.DataFrame(
+            {
+                "origin_date": origin["date"].to_numpy(),
+                "horizon_days": np.full(len(origin_index), horizon, dtype="int64"),
+                "target_date": target["date"].to_numpy(),
+                "target_month": [MONTH_LABELS[int(value) - 1] for value in target["month"]],
+                "event_type": event,
+                "is_extreme_event": event != "none",
+                "load_mw": target["load"].to_numpy(dtype="float64"),
+                "load_last_observed": origin["load_last_observed"].to_numpy(dtype="float64"),
+                "load_lag_1d": origin["load_lag_1d"].to_numpy(dtype="float64"),
+                "load_lag_2d": origin["load_lag_2d"].to_numpy(dtype="float64"),
+                "load_lag_7d": origin["load_lag_7d"].to_numpy(dtype="float64"),
+                "load_lag_14d": origin["load_lag_14d"].to_numpy(dtype="float64"),
+                "load_lag_28d": origin["load_lag_28d"].to_numpy(dtype="float64"),
+                "load_rolling_mean_7d": origin["load_rolling_mean_7d"].to_numpy(dtype="float64"),
+                "load_rolling_std_7d": origin["load_rolling_std_7d"].to_numpy(dtype="float64"),
+                "load_rolling_min_7d": origin["load_rolling_min_7d"].to_numpy(dtype="float64"),
+                "load_rolling_mean_28d": origin["load_rolling_mean_28d"].to_numpy(dtype="float64"),
+                "load_seasonal_naive": self._seasonal_anchor(series, target_index),
+                "temperature_forecast_c": np.round(temperature_forecast, 2),
+                "temperature_forecast_prev_c": np.round(temperature_previous, 2),
+                "temperature_anomaly_c": np.round(temperature_forecast - normal, 2),
+                "temperature_lag_1d": np.round(temperature_observed, 2),
+                "temperature_rolling_mean_7d": np.round(temperature_rolling, 2),
+                "hdd_target": np.round(np.clip(HDD_BASE_C - temperature_forecast, 0.0, None), 2),
+                "cdd_target": np.round(np.clip(temperature_forecast - CDD_BASE_C, 0.0, None), 2),
+                "target_weekday": [WEEKDAY_LABELS[int(value)] for value in weekday],
+                "target_is_weekend": weekday >= 5,
+                "target_is_holiday": target["is_holiday"].to_numpy(dtype=bool),
+                "target_school_holiday": target["school_holiday"].to_numpy(dtype=bool),
+                "target_doy_sin": np.sin(2.0 * np.pi * day_of_year / 365.25),
+                "target_doy_cos": np.cos(2.0 * np.pi * day_of_year / 365.25),
+            }
+        )
+
+    def _previous_day_forecast(
+        self, series: pd.DataFrame, target_index: np.ndarray, horizon: int, rng: np.random.Generator
+    ) -> np.ndarray:
+        """Return the temperature forecast of the day **before** the target day.
+
+        Building inertia is the reason this column exists: the load reacts to a two-day smoothed
+        temperature, not to the single target day, and a model given only ``temperature_forecast_c``
+        cannot reconstruct that smoothing. The column stays inside the anteriority contract —
+        for ``horizon == 1`` the previous day *is* the origin, so the value is the **observation**
+        (with the same sensor-outage mask applied by the caller's neighbour); for a longer horizon
+        it is a forecast, corrupted by the error of a one-day-shorter lead time.
+
+        Args:
+            series: Simulated daily series.
+            target_index: Positions of the target days.
+            horizon: Horizon in days of the block being built.
+            rng: Seeded generator used for the forecast error.
+
+        Returns:
+            Temperature in °C of the day preceding each target day.
+        """
+        previous_index = target_index - 1
+        if horizon == 1:
+            # La veille de J+1 est l'origine elle-même : la valeur est observée, pas prévue.
+            return series["temperature"].to_numpy(dtype="float64")[previous_index]
+        previous_sigma = self.forecast_error_j1 + self.forecast_error_growth * (horizon - 2)
+        return series["temperature"].to_numpy(dtype="float64")[previous_index] + rng.normal(
+            0.0, previous_sigma, size=len(target_index)
+        )
+
+    @staticmethod
+    def _seasonal_anchor(series: pd.DataFrame, target_index: np.ndarray) -> np.ndarray:
+        """Return the seasonal-naive anchor: the load of the target day, one week earlier.
+
+        Legal for every horizon <= 7 days because ``target - 7 <= origin``.
+
+        Args:
+            series: Simulated daily series.
+            target_index: Positions of the target days.
+
+        Returns:
+            Load in MW, one value per target day.
+        """
+        anchor_index = np.clip(target_index - 7, 0, len(series) - 1)
+        return series["load"].to_numpy(dtype="float64")[anchor_index]
+
+    def _temperature_missing_mask(
+        self, temperature: np.ndarray, rng: np.random.Generator
+    ) -> np.ndarray:
+        """Draw the sensor-outage mask: missingness is informative and winter-biased.
+
+        Args:
+            temperature: Observed temperature at each origin.
+            rng: Seeded generator.
+
+        Returns:
+            Boolean mask of unavailable observations.
+        """
+        cold_bonus = np.clip((10.0 - temperature) / 10.0, 0.0, None)
+        probability = np.clip(self.missing_temperature_rate * (1.0 + 1.4 * cold_bonus), 0.0, 0.35)
+        return rng.random(len(temperature)) < probability
+
+    # ------------------------------------------------------------------ export ----------
+    def export(self, frame: pd.DataFrame | None = None) -> dict[str, Path]:
+        """Write the dataset in every configured format.
+
+        Args:
+            frame: Data to write; generated when ``None``.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        data = frame if frame is not None else self.generate()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        base = self.output_dir / self.dataset_name
+        written = write_table_multiple(data, base, formats=self.formats)
+        logger.info("Dataset exported: {}", {fmt: str(path) for fmt, path in written.items()})
+        return written
+
+    def run(self) -> dict[str, Path]:
+        """Generate, export and persist the generation metadata.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        frame = self.generate()
+        written = self.export(frame)
+        payload = self.metadata(frame)
+        payload["files"] = {fmt: str(path) for fmt, path in written.items()}
+        write_json(self.output_dir / "generation_metadata.json", payload)
+        return written
+
+    def sample(self, n_samples: int, *, with_target: bool = False) -> pd.DataFrame:
+        """Draw a small sample, typically used to demo inference.
+
+        Args:
+            n_samples: Number of rows.
+            with_target: Keep the ground-truth columns (``load_mw``, target calendar metadata) or
+                drop them, as a real forecast request would.
+
+        Returns:
+            The sampled frame.
+        """
+        frame = self.generate()
+        sample_frame = frame.head(max(int(n_samples), 1)).copy()
+        if not with_target:
+            hidden = [name for name in DIAGNOSTIC_COLUMNS if name in frame.columns]
+            sample_frame = sample_frame.drop(columns=hidden)
+        return sample_frame
+
+    # ------------------------------------------------------------------ metadata --------
+    def metadata(self, frame: pd.DataFrame) -> dict[str, Any]:
+        """Build the traceability payload of a generation run.
+
+        Args:
+            frame: Generated data.
+
+        Returns:
+            JSON-serialisable metadata (seed, shape, horizons, per-horizon load statistics,
+            episode counts, missing rates, trivial-baseline errors, option values).
+        """
+        missing = frame.isna().sum()
+        payload: dict[str, Any] = {
+            "dataset_name": self.dataset_name,
+            "generator": type(self).__name__,
+            "seed": self.seed,
+            "series_start": str(self.start_date.date()),
+            "horizons": list(self.horizons),
+            "n_samples": len(frame),
+            "n_columns": int(frame.shape[1]),
+            "n_origins": int(frame["origin_date"].nunique()),
+            "window_start": str(pd.Timestamp(frame["origin_date"].min()).date()),
+            "window_end": str(pd.Timestamp(frame["target_date"].max()).date()),
+            "dtypes": {str(column): str(dtype) for column, dtype in frame.dtypes.items()},
+            "missing_cells": int(missing.sum()),
+            "missing_rate": float(missing.sum()) / float(max(frame.size, 1)),
+            "missing_by_column": {
+                str(column): int(value) for column, value in missing.items() if value > 0
+            },
+            "load_mw": {
+                "mean": float(frame["load_mw"].mean()),
+                "std": float(frame["load_mw"].std()),
+                "min": float(frame["load_mw"].min()),
+                "p50": float(frame["load_mw"].median()),
+                "max": float(frame["load_mw"].max()),
+            },
+            "events": {
+                str(label): int(count)
+                for label, count in frame["event_type"].value_counts().items()
+            },
+            "extreme_share": float(frame["is_extreme_event"].mean()),
+            "trivial_baselines_mape": self._baseline_errors(frame),
+            "options": {
+                "base_load_mw": self.base_load_mw,
+                "annual_amplitude": self.annual_amplitude,
+                "trend_per_year": self.trend_per_year,
+                "heat_gradient": self.heat_gradient,
+                "cool_gradient": self.cool_gradient,
+                "holiday_drop": self.holiday_drop,
+                "school_holiday_lift": self.school_holiday_lift,
+                "noise_sigma": self.noise_sigma,
+                "noise_ar": self.noise_ar,
+                "forecast_error_j1": self.forecast_error_j1,
+                "forecast_error_growth": self.forecast_error_growth,
+                "missing_temperature_rate": self.missing_temperature_rate,
+                "warmup_days": self.warmup_days,
+            },
+        }
+        return payload
+
+    @staticmethod
+    def _baseline_errors(frame: pd.DataFrame) -> dict[str, float]:
+        """Compute the MAPE of the three trivial references every forecaster must beat.
+
+        These numbers are the honest yardstick of the project: a learned model that does not beat
+        ``seasonal_naive`` has no operational value, whatever its R² says.
+
+        Args:
+            frame: Generated data.
+
+        Returns:
+            Mapping of baseline name to MAPE in percent.
+        """
+        actual = frame["load_mw"].to_numpy(dtype="float64")
+        denominator = np.where(np.abs(actual) < 1e-9, np.nan, np.abs(actual))
+        references = {
+            "persistence": frame["load_last_observed"].to_numpy(dtype="float64"),
+            "seasonal_naive": frame["load_seasonal_naive"].to_numpy(dtype="float64"),
+            "rolling_mean_7d": frame["load_rolling_mean_7d"].to_numpy(dtype="float64"),
+        }
+        return {
+            name: round(float(np.nanmean(np.abs(values - actual) / denominator) * 100.0), 3)
+            for name, values in references.items()
+        }
+
+    def describe_target(self, frame: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Describe the target per horizon (one row per forecast horizon).
+
+        Args:
+            frame: Frame to describe; ``None`` generates one.
+
+        Returns:
+            A table with counts, load statistics, seasonal-naive MAPE and extreme-event share.
+        """
+        data = frame if frame is not None else self.generate()
+        table = (
+            data.groupby("horizon_days", observed=True)
+            .agg(
+                rows=("load_mw", "size"),
+                mean_load=("load_mw", "mean"),
+                median_load=("load_mw", "median"),
+                std_load=("load_mw", "std"),
+                min_load=("load_mw", "min"),
+                max_load=("load_mw", "max"),
+                naive_mape=("load_mw", lambda series: float("nan")),
+                extreme_share=("is_extreme_event", "mean"),
+            )
+            .round(3)
+        )
+        # MAPE of the seasonal-naive reference, per horizon: the bar the model has to clear.
+        grouped = data.assign(
+            ape=(
+                (data["load_mw"] - data["load_seasonal_naive"]).abs()
+                / data["load_mw"].abs().clip(lower=1e-9)
+            )
+        ).groupby("horizon_days", observed=True)["ape"]
+        table["naive_mape"] = (grouped.mean() * 100.0).round(3)
+        return table.reset_index().rename(columns={"horizon_days": "segment"})
+
+    def summary(self) -> pd.DataFrame:
+        """Return a one-row-per-column statistical summary of the generated frame."""
+        frame = self.generate()
+        rows: list[dict[str, Any]] = []
+        for column in frame.columns:
+            series = frame[column]
+            entry: dict[str, Any] = {
+                "column": column,
+                "dtype": str(series.dtype),
+                "nulls": int(series.isna().sum()),
+                "null_share": round(float(series.isna().mean()), 4),
+                "nunique": int(series.nunique(dropna=True)),
+            }
+            numeric = pd.to_numeric(series, errors="coerce")
+            if numeric.notna().any() and not pd.api.types.is_object_dtype(series):
+                values = numeric.to_numpy(dtype="float64")
+                entry |= {
+                    "min": round(float(np.nanmin(values)), 3),
+                    "p50": round(float(np.nanmedian(values)), 3),
+                    "mean": round(float(np.nanmean(values)), 3),
+                    "p95": round(float(np.nanpercentile(values, 95)), 3),
+                    "max": round(float(np.nanmax(values)), 3),
+                }
+            else:
+                top = series.dropna().astype(str).value_counts().head(3)
+                entry["top_values"] = ", ".join(f"{key}({value})" for key, value in top.items())
+            rows.append(entry)
+        return pd.DataFrame(rows)
+
+    # ------------------------------------------------------------------ factories -------
+    @classmethod
+    def from_config(
+        cls, config: Mapping[str, Any], paths: ProjectPaths | None = None
+    ) -> SyntheticDataGenerator:
+        """Build a generator from the ``data`` configuration node.
+
+        Args:
+            config: Root configuration mapping (or the ``data`` node alone).
+            paths: Project layout (defaults to :meth:`ProjectPaths.from_root`).
+
+        Returns:
+            The configured generator.
+        """
+        # Même forme que les autres familles : `dict(...)` borne l'inférence mypy.
+        node = dict(config.get("data", config) or {})
+        layout = paths or ProjectPaths.from_root()
+        options = {
+            key: node[key] for key in cls.SUPPORTED_OPTIONS if key in node and node[key] is not None
+        }
+        return cls(
+            n_samples=int(node.get("n_samples", {{ spec.data.n_samples }})),
+            seed=int(config.get("seed", node.get("seed", {{ spec.data.seed }}))),
+            dataset_name=str(node.get("dataset_name", DEFAULT_DATASET_NAME)),
+            output_dir=layout.raw_dir,
+            formats=tuple(node.get("formats", ("parquet", "csv"))),
+            **options,
+        )
+
+
+def build_dataset(**kwargs: Any) -> pd.DataFrame:
+    """Module-level helper used by ad-hoc scripts and notebooks.
+
+    Args:
+        **kwargs: Constructor options of :class:`SyntheticDataGenerator`.
+
+    Returns:
+        The generated frame.
+    """
+    return SyntheticDataGenerator(**kwargs).generate()

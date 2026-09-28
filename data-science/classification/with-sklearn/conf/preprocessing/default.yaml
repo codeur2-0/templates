@@ -1,0 +1,74 @@
+# =================================================================================================
+# Preprocessing & feature engineering
+# -------------------------------------------------------------------------------------------------
+# Décrit le pipeline appliqué aux données (nettoyage, encodage, scaling) ainsi que les features
+# dérivées construites par `src/features/build_features.py`.
+#
+# Règle d'or : tout ce qui est **appris** sur les données (moyennes, médianes, catégories,
+# encodeurs) doit être appris sur le train uniquement, puis appliqué au val/test. C'est le rôle
+# du pipeline scikit-learn encapsulé dans `src/preprocessing/pipelines.py`.
+# =================================================================================================
+
+numeric:
+  imputer: median
+  imputer_fill_value: 0.0
+  clip_outliers: true
+  clip_quantiles:
+  - 0.01
+  - 0.99
+  scaler: standard
+  log1p_columns:
+  - total_charges
+categorical:
+  imputer: most_frequent
+  imputer_fill_value: unknown
+  encoder: onehot
+  handle_unknown: ignore
+  min_frequency: 0.02
+  max_categories: 10
+features:
+- type: ratio
+  name: charges_per_tenure
+  numerator: monthly_charges
+  denominator: tenure_months
+  epsilon: 1.0
+- type: ratio
+  name: tickets_per_product
+  numerator: support_tickets_6m
+  denominator: num_products
+  epsilon: 1.0
+- type: bin
+  name: tenure_bucket
+  column: tenure_months
+  method: quantile
+  bins: 4
+- type: boolean_flag
+  name: heavy_data_user
+  column: avg_monthly_data_gb
+  operator: gt
+  value: 200.0
+- type: boolean_flag
+  name: low_satisfaction
+  column: satisfaction_score
+  operator: lt
+  value: 5.0
+- type: group_stat
+  name: charges_by_contract
+  group_by: contract_type
+  value_column: monthly_charges
+  agg: mean
+- type: datetime_parts
+  name: signup_cohort
+  column: signup_date
+  prefix: signup
+  parts:
+  - year
+  - month
+  - quarter
+columns: {}
+validation:
+  raw: true
+  processed: true
+  inference: true
+  strict: true
+  lazy: false

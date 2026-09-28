@@ -1,0 +1,506 @@
+"""Synthetic data generator — Abonnés télécom et attrition (churn).
+
+Business scenario
+        L'opérateur perd chaque mois une part significative de ses abonnés au profit de concurrents.
+    Acquérir un client coûte 5 à 7 fois plus cher que d'en conserver un, et les campagnes de
+    rétention actuelles sont déclenchées au feeling, trop tard et sur trop de monde (coût
+    inutile, fatigue commerciale).
+
+How the data is built
+    The generator does **not** draw columns independently. It first builds a latent customer
+    profile (tenure, contract, plan, usage), then derives the observable columns from it, and
+    finally computes the churn probability through an explicit logistic model with
+    interactions. Consequences, on purpose:
+
+    * features are correlated the way real data is (``total_charges`` grows with ``tenure``),
+    * the target is *non linear* and contains interactions, so a linear model is a decent but
+      imperfect baseline while a boosting/MLP model can do better,
+    * irreducible noise keeps the achievable roc_auc realistic (no 1.0 score),
+    * a few legitimate outliers and missing values exercise the preprocessing.
+
+Determinism
+    ``generate()`` is a pure function of ``(n_samples, seed, options)``: two runs produce the
+    same bytes, which is what makes stack-to-stack comparisons meaningful.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, ClassVar, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+
+from src.data.schemas import RawDataSchema
+from src.utils.io import write_json, write_table_multiple
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+
+logger = get_logger(__name__)
+
+#: Default dataset name (overridable through the constructor / Hydra config).
+DEFAULT_DATASET_NAME = "telecom_churn"
+
+#: Business categories of the categorical features.
+CONTRACT_TYPES: tuple[str, ...] = ("month_to_month", "one_year", "two_year")
+INTERNET_SERVICES: tuple[str, ...] = ("fiber", "dsl", "none")
+PAYMENT_METHODS: tuple[str, ...] = ("electronic_check", "mailed_check", "bank_transfer", "credit_card")
+REGIONS: tuple[str, ...] = ("north", "south", "east", "west")
+
+#: Columns holding missing values on purpose, with their missing rate.
+MISSING_POLICY: dict[str, float] = {"satisfaction_score": 1.0, "avg_monthly_data_gb": 0.6}
+
+#: Logistic model coefficients driving the churn probability (interpretable on purpose).
+CHURN_COEFFICIENTS: dict[str, float] = {
+    "intercept": -1.35,
+    "contract_month_to_month": 1.05,
+    "contract_one_year": -0.25,
+    "internet_fiber": 0.45,
+    "payment_electronic_check": 0.55,
+    "tenure_years": -0.75,
+    "monthly_charges_std": 0.60,
+    "support_tickets": 0.28,
+    "satisfaction_centered": -0.55,
+    "promotion": -0.35,
+    "products": -0.12,
+    "usage_std": 0.10,
+}
+
+
+class SyntheticDataGenerator:
+    """Deterministic generator of the telecom churn dataset.
+
+    Example:
+        >>> generator = SyntheticDataGenerator(n_samples=200, seed=42)
+        >>> frame = generator.generate()
+        >>> frame.shape[0]
+        200
+        >>> sorted({"churned"} <= set(frame.columns))
+        [True]
+    """
+
+    #: Options accepted from ``conf/data/default.yaml`` (extra keys of the data node).
+    SUPPORTED_OPTIONS: ClassVar[tuple[str, ...]] = (
+        "positive_rate",
+        "missing_rate",
+        "outlier_rate",
+        "n_segments",
+    )
+
+    def __init__(
+        self,
+        *,
+        n_samples: int = 4000,
+        seed: int = 42,
+        dataset_name: str | None = None,
+        output_dir: Path | str | None = None,
+        formats: Sequence[str] = ("parquet", "csv"),
+        positive_rate: float | None = 0.26,
+        missing_rate: float = 0.05,
+        outlier_rate: float = 0.01,
+        n_segments: int = 4,
+    ) -> None:
+        """Store the generation parameters.
+
+        Args:
+            n_samples: Number of customer rows to generate.
+            seed: Random seed (fully determines the output).
+            dataset_name: Base file name (defaults to :data:`DEFAULT_DATASET_NAME`).
+            output_dir: Directory receiving the files (defaults to ``data/raw``).
+            formats: Formats to write (``parquet`` and/or ``csv``).
+            positive_rate: Target share of churned customers; the intercept is calibrated to
+                reach it (``None`` keeps the raw logistic rate).
+            missing_rate: Global scaling of the missing-value injection.
+            outlier_rate: Share of rows receiving a legitimate extreme value.
+            n_segments: Number of latent customer segments mixed in the population.
+
+        Raises:
+            ValueError: When a parameter is out of its valid range.
+        """
+        if n_samples < 50:
+            msg = f"n_samples must be >= 50 to keep the dataset meaningful, got {n_samples}"
+            raise ValueError(msg)
+        if not 0.0 <= missing_rate <= 0.5:
+            msg = f"missing_rate must be in [0, 0.5], got {missing_rate}"
+            raise ValueError(msg)
+        if not 0.0 <= outlier_rate <= 0.2:
+            msg = f"outlier_rate must be in [0, 0.2], got {outlier_rate}"
+            raise ValueError(msg)
+        if positive_rate is not None and not 0.0 < positive_rate < 1.0:
+            msg = f"positive_rate must be in (0, 1), got {positive_rate}"
+            raise ValueError(msg)
+
+        self.n_samples = int(n_samples)
+        self.seed = int(seed)
+        self.dataset_name = dataset_name or DEFAULT_DATASET_NAME
+        self.output_dir = Path(output_dir) if output_dir is not None else ProjectPaths.from_root().raw_dir
+        self.formats = tuple(formats)
+        self.positive_rate = positive_rate
+        self.missing_rate = float(missing_rate)
+        self.outlier_rate = float(outlier_rate)
+        self.n_segments = int(n_segments)
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], paths: ProjectPaths | None = None) -> SyntheticDataGenerator:
+        """Build the generator from a Hydra configuration mapping.
+
+        Args:
+            config: Root configuration (``data`` node) or the ``data`` node itself.
+            paths: Optional project paths.
+
+        Returns:
+            The configured generator.
+        """
+        data_node = dict(config.get("data", config) or {})
+        layout = paths or ProjectPaths.from_config(config)
+        options = {key: data_node[key] for key in cls.SUPPORTED_OPTIONS if key in data_node}
+        return cls(
+            n_samples=int(data_node.get("n_samples", 4000)),
+            seed=int(config.get("seed", data_node.get("seed", 42))),
+            dataset_name=str(data_node.get("dataset_name", DEFAULT_DATASET_NAME)),
+            output_dir=layout.raw_dir,
+            formats=tuple(data_node.get("formats", ("parquet", "csv"))),
+            **options,
+        )
+
+    # ------------------------------------------------------------------ generation ------
+    def generate(self) -> pd.DataFrame:
+        """Generate the dataset.
+
+        Returns:
+            A validated ``DataFrame`` with the columns declared in ``RawDataSchema``.
+        """
+        rng = np.random.default_rng(self.seed)
+        logger.info(
+            "Generating {} customers | seed={} segments={} positive_rate={}",
+            self.n_samples,
+            self.seed,
+            self.n_segments,
+            self.positive_rate,
+        )
+
+        profile = self._latent_profile(rng)
+        frame = pd.DataFrame(
+            {
+                "customer_id": [f"CUS-{index:05d}" for index in range(1, self.n_samples + 1)],
+                "signup_date": self._signup_dates(rng, profile),
+                "tenure_months": profile["tenure_months"],
+                "contract_type": profile["contract_type"],
+                "internet_service": profile["internet_service"],
+                "payment_method": profile["payment_method"],
+                "region": profile["region"],
+                "monthly_charges": profile["monthly_charges"],
+                "total_charges": profile["total_charges"],
+                "support_tickets_6m": profile["support_tickets"],
+                "avg_monthly_data_gb": profile["usage_gb"],
+                "num_products": profile["num_products"],
+                "has_promotion": profile["has_promotion"],
+                "satisfaction_score": profile["satisfaction"],
+            }
+        )
+        frame["churn_probability"] = self._churn_probability(frame, profile)
+        frame["churned"] = (rng.random(self.n_samples) < frame["churn_probability"]).astype(int)
+        frame = frame.drop(columns=["churn_probability"])
+
+        frame = self._inject_outliers(frame, rng)
+        frame = self._inject_missing(frame, rng)
+        frame = self._enforce_schema_bounds(frame)
+
+        validated = RawDataSchema.validate(frame)
+        logger.info(
+            "Dataset generated | rows={} cols={} churn_rate={:.3f} missing_cells={}",
+            len(validated),
+            validated.shape[1],
+            float(validated["churned"].mean()),
+            int(validated.isna().to_numpy().sum()),
+        )
+        return validated
+
+    def _latent_profile(self, rng: np.random.Generator) -> dict[str, Any]:
+        """Draw the latent customer profiles (segments with different behaviours)."""
+        n = self.n_samples
+        weights = np.linspace(1.0, 0.45, self.n_segments)
+        weights = weights / weights.sum()
+        segment = rng.choice(self.n_segments, size=n, p=weights)
+
+        segment_tenure_mean = np.linspace(8.0, 52.0, self.n_segments)[segment]
+        tenure = np.clip(rng.gamma(shape=2.2, scale=segment_tenure_mean / 2.2) , 0, 72).astype(int)
+
+        contract_probability = np.where(
+            segment == 0, 0.62, np.where(segment == self.n_segments - 1, 0.18, 0.35)
+        )
+        contract_type = np.where(
+            rng.random(n) < contract_probability,
+            "month_to_month",
+            rng.choice(["one_year", "two_year"], size=n, p=[0.45, 0.55]),
+        )
+
+        internet_service = rng.choice(INTERNET_SERVICES, size=n, p=[0.55, 0.30, 0.15])
+        payment_method = rng.choice(PAYMENT_METHODS, size=n, p=[0.34, 0.16, 0.28, 0.22])
+        region = rng.choice(REGIONS, size=n, p=[0.28, 0.24, 0.26, 0.22])
+
+        base_charge = np.where(internet_service == "fiber", 78.0, np.where(internet_service == "dsl", 55.0, 24.0))
+        tenure_discount = np.clip(1.0 - 0.004 * tenure, 0.72, 1.0)
+        monthly_charges = base_charge * tenure_discount * rng.normal(1.0, 0.11, size=n)
+        monthly_charges = np.clip(monthly_charges, 18.0, 180.0).round(2)
+
+        total_charges = np.clip(monthly_charges * np.maximum(tenure, 1) * rng.normal(1.0, 0.02, size=n), 18.0, 9000.0).round(2)
+
+        ticket_rate = np.where(contract_type == "month_to_month", 0.55, 0.28) * np.where(
+            internet_service == "fiber", 1.35, 1.0
+        )
+        support_tickets = rng.poisson(ticket_rate * 2.1).clip(0, 14).astype(int)
+
+        usage_gb = np.where(
+            internet_service == "none",
+            rng.normal(2.0, 1.2, size=n).clip(0.0, 12.0),
+            rng.gamma(shape=2.6, scale=np.where(internet_service == "fiber", 62.0, 34.0)),
+        ).clip(0.0, 900.0).round(2)
+
+        num_products = rng.choice([1, 2, 3, 4, 5], size=n, p=[0.18, 0.27, 0.26, 0.19, 0.10]).astype(int)
+        has_promotion = (rng.random(n) < np.where(tenure < 12, 0.42, 0.18)).astype(int)
+
+        satisfaction_mean = (
+            7.4
+            - 0.42 * np.clip(support_tickets, 0, 6)
+            + 0.012 * np.clip(tenure, 0, 60)
+            - 0.55 * (contract_type == "month_to_month")
+            + 0.35 * has_promotion
+            + rng.normal(0.0, 0.55, size=n)
+        )
+        satisfaction = np.clip(satisfaction_mean, 1.0, 10.0).round(2)
+
+        return {
+            "segment": segment,
+            "tenure_months": tenure,
+            "contract_type": contract_type,
+            "internet_service": internet_service,
+            "payment_method": payment_method,
+            "region": region,
+            "monthly_charges": monthly_charges,
+            "total_charges": total_charges,
+            "support_tickets": support_tickets,
+            "usage_gb": usage_gb,
+            "num_products": num_products,
+            "has_promotion": has_promotion,
+            "satisfaction": satisfaction,
+        }
+
+    def _signup_dates(self, rng: np.random.Generator, profile: Mapping[str, Any]) -> pd.Series:
+        """Derive signup dates from the tenure (the more recent, the shorter the tenure)."""
+        reference = pd.Timestamp("2026-01-31")
+        tenure = np.asarray(profile["tenure_months"], dtype="int64")
+        jitter = rng.integers(0, 28, size=len(tenure))
+        offsets = pd.to_timedelta(tenure * 30 + jitter, unit="D")
+        return pd.Series(reference - offsets, name="signup_date")
+
+    def _churn_probability(self, frame: pd.DataFrame, profile: Mapping[str, Any]) -> np.ndarray:
+        """Compute the churn probability from an explicit, interpretable logistic model."""
+        coefficients = CHURN_COEFFICIENTS
+        tenure_years = np.asarray(frame["tenure_months"], dtype="float64") / 12.0
+        monthly_std = (np.asarray(frame["monthly_charges"], dtype="float64") - 65.0) / 25.0
+        usage_std = (np.asarray(frame["avg_monthly_data_gb"], dtype="float64") - 90.0) / 70.0
+        satisfaction_centered = np.asarray(frame["satisfaction_score"], dtype="float64") - 6.5
+
+        logit = (
+            coefficients["intercept"]
+            + coefficients["contract_month_to_month"] * (frame["contract_type"] == "month_to_month").to_numpy()
+            + coefficients["contract_one_year"] * (frame["contract_type"] == "one_year").to_numpy()
+            + coefficients["internet_fiber"] * (frame["internet_service"] == "fiber").to_numpy()
+            + coefficients["payment_electronic_check"] * (frame["payment_method"] == "electronic_check").to_numpy()
+            + coefficients["tenure_years"] * tenure_years
+            + coefficients["monthly_charges_std"] * monthly_std
+            + coefficients["support_tickets"] * np.asarray(frame["support_tickets_6m"], dtype="float64")
+            + coefficients["satisfaction_centered"] * satisfaction_centered
+            + coefficients["promotion"] * np.asarray(frame["has_promotion"], dtype="float64")
+            + coefficients["products"] * np.asarray(frame["num_products"], dtype="float64")
+            + coefficients["usage_std"] * usage_std
+        )
+        # Interaction métier : un client récent, en contrat mensuel et insatisfait part très vite.
+        logit += 0.55 * (
+            (frame["contract_type"] == "month_to_month").to_numpy()
+            * (tenure_years < 0.75)
+            * (satisfaction_centered < 0.0)
+        )
+        probability = 1.0 / (1.0 + np.exp(-logit))
+
+        return _calibrate_rate(logit, self.positive_rate) if self.positive_rate is not None else np.clip(
+            1.0 / (1.0 + np.exp(-logit)), 1e-4, 1.0 - 1e-4
+        )
+
+    def _inject_outliers(self, frame: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+        """Add legitimate extreme values (enterprise customers, heavy users, complaint storms)."""
+        output = frame.copy()
+        n_outliers = max(int(self.n_samples * self.outlier_rate), 1)
+        rows = rng.choice(self.n_samples, size=n_outliers, replace=False)
+        output.loc[rows, "monthly_charges"] = np.clip(
+            output.loc[rows, "monthly_charges"].to_numpy() * rng.uniform(1.6, 2.3, size=n_outliers), 18.0, 480.0
+        ).round(2)
+        output.loc[rows, "support_tickets_6m"] = np.clip(
+            output.loc[rows, "support_tickets_6m"].to_numpy() + rng.integers(4, 9, size=n_outliers), 0, 14
+        ).astype(int)
+        heavy = rng.choice(self.n_samples, size=max(n_outliers // 2, 1), replace=False)
+        output.loc[heavy, "avg_monthly_data_gb"] = np.clip(
+            rng.uniform(620.0, 980.0, size=len(heavy)), 0.0, 1000.0
+        ).round(2)
+        logger.debug("Injected {} outlier rows ({} heavy users)", n_outliers, len(heavy))
+        return output
+
+    def _inject_missing(self, frame: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+        """Inject missing values on the columns of :data:`MISSING_POLICY`."""
+        output = frame.copy()
+        for column, weight in MISSING_POLICY.items():
+            if column not in output.columns:
+                continue
+            rate = min(self.missing_rate * weight, 0.35)
+            mask = rng.random(len(output)) < rate
+            output.loc[mask, column] = np.nan
+            logger.debug("Column '{}' | {:.2%} missing values", column, float(mask.mean()))
+        return output
+
+    def _enforce_schema_bounds(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Clip every column inside the bounds declared by ``RawDataSchema``."""
+        output = frame.copy()
+        output["tenure_months"] = np.clip(output["tenure_months"].astype("int64"), 0, 72)
+        output["monthly_charges"] = np.clip(output["monthly_charges"].astype("float64"), 18.0, 480.0).round(2)
+        output["total_charges"] = np.clip(output["total_charges"].astype("float64"), 18.0, 20000.0).round(2)
+        output["support_tickets_6m"] = np.clip(output["support_tickets_6m"].astype("int64"), 0, 14)
+        output["avg_monthly_data_gb"] = np.clip(
+            output["avg_monthly_data_gb"].astype("float64").fillna(output["avg_monthly_data_gb"].median()), 0.0, 1000.0
+        ).round(2)
+        output["avg_monthly_data_gb"] = output["avg_monthly_data_gb"].where(
+            frame["avg_monthly_data_gb"].notna(), other=np.nan
+        )
+        output["num_products"] = np.clip(output["num_products"].astype("int64"), 1, 5)
+        output["has_promotion"] = output["has_promotion"].astype("int64").clip(0, 1)
+        output["satisfaction_score"] = output["satisfaction_score"].astype("float64").round(2)
+        output["churned"] = output["churned"].astype("int64").clip(0, 1)
+        output["contract_type"] = output["contract_type"].astype(str)
+        output["internet_service"] = output["internet_service"].astype(str)
+        output["payment_method"] = output["payment_method"].astype(str)
+        output["region"] = output["region"].astype(str)
+        return output
+
+    # ------------------------------------------------------------------ export ----------
+    def export(self, frame: pd.DataFrame | None = None) -> dict[str, Path]:
+        """Write the dataset in every configured format.
+
+        Args:
+            frame: Data to write; generated when ``None``.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        data = frame if frame is not None else self.generate()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        base = self.output_dir / self.dataset_name
+        written = write_table_multiple(data, base, formats=self.formats)
+        logger.info("Dataset exported: {}", {fmt: str(path) for fmt, path in written.items()})
+        return written
+
+    def run(self) -> dict[str, Path]:
+        """Generate, export and persist the generation metadata.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        frame = self.generate()
+        written = self.export(frame)
+        payload = self.metadata(frame)
+        payload["files"] = {fmt: str(path) for fmt, path in written.items()}
+        write_json(self.output_dir / "generation_metadata.json", payload)
+        return written
+
+    def sample(self, n_samples: int, *, with_target: bool = False) -> pd.DataFrame:
+        """Draw a small sample, typically used to demo inference.
+
+        Args:
+            n_samples: Number of rows.
+            with_target: Keep the target column (evaluation) or drop it (real inference).
+
+        Returns:
+            The sampled frame.
+        """
+        frame = self.generate()
+        sample_frame = frame.head(max(int(n_samples), 1)).copy()
+        if not with_target and "churned" in sample_frame.columns:
+            sample_frame = sample_frame.drop(columns=["churned"])
+        return sample_frame
+
+    # ------------------------------------------------------------------ metadata --------
+    def metadata(self, frame: pd.DataFrame) -> dict[str, Any]:
+        """Build the traceability payload of a generation run.
+
+        Args:
+            frame: Generated data.
+
+        Returns:
+            JSON-serialisable metadata (seed, shape, dtypes, distributions, missing rate).
+        """
+        missing = frame.isna().sum()
+        target = frame["churned"] if "churned" in frame.columns else None
+        return {
+            "dataset_name": self.dataset_name,
+            "generator": type(self).__name__,
+            "seed": self.seed,
+            "n_samples": int(len(frame)),
+            "n_columns": int(frame.shape[1]),
+            "columns": list(frame.columns),
+            "dtypes": {column: str(dtype) for column, dtype in frame.dtypes.items()},
+            "missing_cells": int(missing.sum()),
+            "missing_rate_by_column": {
+                str(column): round(float(value) / max(len(frame), 1), 4)
+                for column, value in missing[missing > 0].items()
+            },
+            "target": None
+            if target is None
+            else {
+                "column": "churned",
+                "positive_rate": round(float(target.mean()), 4),
+                "counts": {str(key): int(value) for key, value in target.value_counts().items()},
+            },
+            "numeric_summary": {
+                column: {
+                    "mean": round(float(frame[column].mean()), 4),
+                    "std": round(float(frame[column].std()), 4),
+                    "min": round(float(frame[column].min()), 4),
+                    "max": round(float(frame[column].max()), 4),
+                }
+                for column in frame.select_dtypes(include=[np.number]).columns
+            },
+            "categorical_summary": {
+                column: {str(key): int(value) for key, value in frame[column].value_counts().items()}
+                for column in ("contract_type", "internet_service", "payment_method", "region")
+                if column in frame.columns
+            },
+        }
+
+
+def _calibrate_rate(logit: np.ndarray, target_rate: float, *, iterations: int = 60) -> np.ndarray:
+    """Calibrate the churn rate exactly, by shifting the logistic intercept.
+
+    Scaling probabilities would distort them (values above 1, loss of monotonicity). Instead we
+    solve for the offset ``delta`` such that ``mean(sigmoid(logit + delta)) == target_rate``
+    with a bisection: the ranking of the customers is preserved, only the operating point moves.
+
+    Args:
+        logit: Raw logits of the latent churn model.
+        target_rate: Desired share of positive class.
+        iterations: Bisection iterations (60 is far beyond double precision needs).
+
+    Returns:
+        The calibrated probabilities in ``[1e-4, 1 - 1e-4]``.
+    """
+    array = np.asarray(logit, dtype="float64")
+    low, high = -20.0, 20.0
+    for _ in range(iterations):
+        delta = (low + high) / 2.0
+        rate = float((1.0 / (1.0 + np.exp(-(array + delta)))).mean())
+        if rate < target_rate:
+            low = delta
+        else:
+            high = delta
+    delta = (low + high) / 2.0
+    probability = 1.0 / (1.0 + np.exp(-(array + delta)))
+    logger.debug("Churn rate calibrated | delta={:.4f} achieved={:.4f}", delta, float(probability.mean()))
+    return np.clip(probability, 1e-4, 1.0 - 1e-4)

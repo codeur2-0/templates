@@ -1,0 +1,283 @@
+# ==============================================================================================
+# data-science / recommendation / with-sklearn
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/recommendation.yaml` (moteur de recommandation de
+# catalogue pour un e-commerçant). Ce manifeste ne décrit QUE ce qui change avec la stack :
+# identité du projet, modèle, point de fonctionnement et politique de publication.
+# ==============================================================================================
+
+key: ds-recommendation-sklearn
+title: "Moteur de recommandation de catalogue e-commerce avec scikit-learn"
+summary: >-
+  Pipeline de recommandation de bout en bout (catalogue synthétique de 900 références x 1 200
+  utilisateurs -> génération de 36 000 couples (utilisateur, candidat) avec facteur latent
+  d'attrait et probabilité de pertinence -> contrats Pandera -> features d'affinité, d'intention,
+  de signal collaboratif et de fiche article -> gradient boosting par histogrammes -> classement
+  par utilisateur puis publication d'un top-10 sous contraintes métier) pour une équipe
+  Personnalisation, entièrement piloté par Hydra et structuré en objets testables. L'évaluation est
+  menée **par utilisateur** et jamais ligne à ligne : NDCG@10, Precision@10, Recall@10, MAP@10 et
+  hit-rate confrontés au tirage aléatoire, au tri par popularité et au plafond atteignable publié
+  par le générateur, avec couverture catalogue, concentration, démarrage à froid, emplacements
+  perdus en rupture et backtest chronologique. La probabilité oracle est une métadonnée : elle sert
+  à borner la qualité, jamais à entraîner.
+
+family: recommendation
+domain: data-science
+problem: recommendation
+stack: sklearn
+project_slug: ecommerce-catalog-recommendation-sklearn
+package_name: catalog_reco_sklearn
+
+model:
+  display_name: "Gradient boosting par histogrammes (HistGradientBoostingClassifier)"
+  algorithm: hist_gradient_boosting
+  rationale: >-
+    Le gradient boosting par histogrammes est le meilleur rapport précision/coût de scikit-learn
+    pour scorer des couples (utilisateur, candidat) : il apprend sans transformation les
+    **interactions** qui font la pertinence (affinité de catégorie x niveau de prix x intention
+    récente), il est **natif valeurs manquantes** (un nouvel article sans historique de notation ne
+    casse pas la publication), il traite les features catégorielles du catalogue sans one-hot
+    massif — un encodage one-hot de 900 références exploserait la dimension et noierait le signal
+    d'affinité — et il reste déterministe à graine fixée, ce qui est une exigence pour un moteur
+    dont on audite les listes publiées. Ses limites sont documentées ici plutôt que cachées : il
+    apprend un score **ponctuel** par couple et non une préférence relative, si bien qu'il
+    n'optimise pas directement le NDCG (une perte de classement comme LambdaMART serait plus
+    alignée) ; il ne construit aucune représentation latente partagée, donc il ne généralise pas à
+    un utilisateur ou à un article jamais vu en entraînement autrement que par leurs attributs ; et
+    il est sensible au déséquilibre de classes, la pertinence ne concernant qu'environ 14 % des
+    candidats. La comparaison au notebook 04 avec une régression logistique (linéaire, lisible,
+    mais aveugle aux interactions), une forêt aléatoire et un k-plus-proches voisins sur les
+    embeddings de catégorie montre ce que l'on gagne et ce que l'on perd.
+  alternatives:
+    - "logistic_regression : coefficients lisibles en log-odds par feature, calibration native excellente, mais incapable de capter les interactions sans features croisées fabriquées à la main — c'est précisément ce que fait le générateur avec l'affinité, donc le gain du boosting se mesure contre elle"
+    - "random_forest : robuste et peu sensible au réglage, parallélisable, mais moins précis que le boosting sur ce volume et sans gestion aussi fine des manquants"
+    - "knn : aucune phase d'entraînement, mémoire directe des interactions, mais coût linéaire à l'inférence et sensibilité totale à la métrique choisie"
+    - "factorisation matricielle (SVD tronquée / ALS) : le modèle historique de la recommandation, excellent pour la découverte collaborative, mais il exige une matrice utilisateur-article dense et ne consomme aucune feature de fiche article — inutile pour un article neuf"
+    - "trieur par popularité : ce n'est pas un algorithme du registre, mais c'est le seul adversaire qui compte — il est gratuit, explicable et robuste, et tout modèle qui ne le bat pas nettement en NDCG n'a aucune valeur opérationnelle"
+    - "réseau à deux tours (voir la variante pytorch de cette famille) : apprend des embeddings utilisateur et article et généralise mieux au froid, mais exige bien plus de données et perd l'explicabilité par permutation"
+  # Les valeurs ci-dessous ne sont pas des défauts d'éditeur : elles sont le point retenu par un
+  # balayage en trois étapes sur le split chronologique de **validation** (jamais sur le test),
+  # moyenné sur cinq graines (42, 7, 123, 2024, 999) parce qu'un écart inférieur à l'écart-type
+  # entre graines n'est pas un gain. Protocole et mesures : notebook 04 (exploration des modèles)
+  # et notebook 05 (entraînement).
+  params:
+    # Nombre d'itérations. Au-delà de 300 arbres le NDCG de validation est plat à ±0,002 près :
+    # l'ensemble n'apporte plus rien et ne fait que rallonger l'entraînement.
+    max_iter: 300
+    # Pas d'apprentissage modéré : à 0,12 l'ensemble mémorise les couples les plus fréquents et le
+    # NDCG de validation recule, à 0,02 il n'a pas convergé en 300 itérations.
+    learning_rate: 0.06
+    # Complexité par arbre. 31 feuilles (défaut scikit-learn) sur 23 400 lignes d'entraînement
+    # laissait un écart train/validation de NDCG supérieur à 0,06 : l'ensemble mémorisait des
+    # couples (utilisateur, article) vus. À 15 feuilles l'écart se resserre sans perte de qualité.
+    max_leaf_nodes: 15
+    # Garde-fou contre la mémorisation d'un couple isolé. Un utilisateur n'a que 30 candidats par
+    # session : sans feuille minimale, un arbre peut isoler un couple unique et le revoir à
+    # l'identique en validation.
+    min_samples_leaf: 40
+    # Chaque arbre ne voit que 70 % des colonnes. Plusieurs features sont des transformations
+    # monotones les unes des autres (vues 7 j, vues 30 j, conversions) et concentreraient sinon
+    # tous les splits sur le même signal d'audience — ce qui transformerait le modèle en trieur par
+    # popularité déguisé, exactement ce que l'évaluation cherche à détecter.
+    max_features: 0.7
+    # Régularisation défensive : {0, 1, 5} sont indiscernables à dispersion près, la complexité
+    # étant déjà portée par le nombre de feuilles et le sous-échantillonnage de colonnes.
+    l2_regularization: 1.0
+    # Perte logistique : le score publié est une probabilité de pertinence, ce qui autorise un
+    # seuil de publication et un calibrage ultérieur. Une perte de classement serait mieux alignée
+    # sur le NDCG mais n'existe pas dans scikit-learn : c'est une limite assumée et documentée.
+    loss: log_loss
+    # L'arrêt anticipé interne est désactivé : la validation chronologique est déjà portée par le
+    # split et par le backtest de l'évaluateur, et deux mécanismes d'arrêt concurrents rendraient le
+    # résultat dépendant de l'ordre des tirages.
+    early_stopping: false
+    random_state: 42
+
+extras:
+  # Date d'ouverture de la fenêtre d'observation (~14 mois, pour qu'une saisonnalité annuelle et un
+  # pic de fin d'année soient tous deux visibles).
+  reference_date: "2024-09-02"
+  # Grille d'hyperparamètres explorée par le notebook 04 (8 combinaisons : l'exécution reste
+  # < 3 min). Elle est centrée sur le point retenu et porte sur les deux réglages qui ont réellement
+  # bougé la validation, pour que le notebook rejoue la décision au lieu de la paraphraser.
+  notebook_param_grid:
+    max_leaf_nodes: [15, 31]
+    max_features: [0.7, 1.0]
+    learning_rate: [0.04, 0.08]
+  # Taille des fixtures pytest : 600 lignes = 20 utilisateurs x 30 candidats, assez pour que chaque
+  # utilisateur conserve plusieurs candidats pertinents dans les trois splits et que les métriques
+  # par coupure soient calculables sans être bruitées.
+  test_n_samples: 600
+  # Options du générateur synthétique, exposées dans `conf/data/default.yaml` et transmises par
+  # `SyntheticDataGenerator.from_config` (aucune valeur codée en dur dans le code).
+  data_conf:
+    # 36 000 couples = 1 200 utilisateurs x 30 candidats. Le nombre d'utilisateurs n'est **pas**
+    # déclaré ici : il découle de `data.n_samples` divisé par `candidates_per_user`, parce que le
+    # nombre de lignes est le contrat vérifié par les tests et par le pipeline de génération. Le
+    # générateur arrondit à un multiple entier de listes de candidats, si bien que chaque
+    # utilisateur est scoré sur le même nombre de candidats : sans cette contrainte, Precision@K et
+    # Recall@K ne seraient pas comparables d'un utilisateur à l'autre.
+    catalog_size: 900
+    # Trente candidats pour un top-10 : le modèle doit réellement choisir. À douze candidats un
+    # top-10 est presque toute la liste, le NDCG@10 sature et même un scoreur aléatoire paraît
+    # correct, ce qui détruit la comparaison aux références.
+    candidates_per_user: 30
+    # Prévalence visée de la pertinence. L'ordonnée à l'origine du logit latent est calibrée par
+    # bissection pour que le jeu généré respecte ce taux (mesuré : 13,93 %).
+    positive_rate: 0.14
+    window_days: 420
+    # Part d'utilisateurs à une commande ou moins sur 12 mois : le segment de démarrage à froid,
+    # dont le rappel est un objectif à part entière (mesuré : 28,8 %).
+    cold_user_share: 0.29
+    # Part de candidats en rupture : jamais publiables. Un moteur qui les publie perd un
+    # emplacement rare (mesuré : 9,9 % des candidats, 7,5 % des emplacements du top-10 avant
+    # filtrage).
+    out_of_stock_rate: 0.07
+    # Part de candidats jamais consultés par l'utilisateur : le moteur explore bien plus qu'il
+    # n'exploite, ce qui est la situation réelle d'un catalogue de 900 références (mesuré : 62,1 %).
+    never_viewed_share: 0.62
+    # Écart-type du bruit du logit latent. C'est lui qui fixe le **plafond atteignable** : le NDCG
+    # oracle publié dans les métadonnées est calculé avec ce bruit, donc aucun modèle réel ne peut
+    # le dépasser. Le réduire rendrait le problème artificiellement facile et le plafond trompeur.
+    noise_scale: 0.95
+    # Poids du terme de popularité **observé** (vues sur 7 jours) dans le logit latent. Volontairement
+    # faible : un poids fort laisserait la référence par popularité gagner seule, et la comparaison
+    # n'apprendrait rien.
+    popularity_weight: 0.25
+    # Poids du facteur latent d'**attrait** de l'article. C'est le réglage le plus important du
+    # générateur : l'attrait pilote à la fois les vues, la note, le taux de conversion ET la
+    # pertinence. Sans lui, la popularité ne porte aucun signal de pertinence et le tri par
+    # popularité est une référence ridicule (NDCG proche de l'aléatoire) ; avec lui, les best-sellers
+    # sont des best-sellers **parce qu'ils plaisent largement**, ce qui est le cas réel et fait de la
+    # popularité une référence forte mais battable. Mesuré : aléatoire 0,230 < popularité 0,334 <
+    # modèle 0,584 < plafond oracle 0,722.
+    appeal_weight: 1.30
+  # Critères de succès du cas d'usage, lus par le rapport d'évaluation.
+  #
+  # Calibration : les valeurs de NDCG, précision, rappel et couverture sont des **fractions**
+  # comprises entre 0 et 1, comme les métriques `ndcg_at_k`, `precision_at_k` et `recall_at_k` du
+  # registre ; le gain relatif sur la popularité est exprimé en **pourcents**. Les seuils sont
+  # calibrés sur les mesures réelles de ce générateur (seed 42, 36 000 lignes) et laissent une
+  # marge supérieure à la dispersion entre graines. Un seuil non atteint n'est pas caché : le
+  # verdict du rapport l'affiche en échec, avec la valeur mesurée.
+  quality:
+    # NDCG@10 sur le test chronologique. Plancher structurel : l'aléatoire vaut 0,230 et la
+    # popularité 0,334 sur ce jeu de candidats, le plafond oracle vaut 0,722. Un seuil de 0,45
+    # correspond à environ 49 % du chemin entre la popularité et le plafond — atteignable sans
+    # fuite, et un NDCG proche du plafond signerait une fuite de la probabilité oracle.
+    ndcg_min: 0.45
+    # Precision@10 : au moins un emplacement publié sur cinq doit correspondre à une intention
+    # réelle. Avec une prévalence de 11,5 % sur le test et 30 candidats, publier au hasard donne
+    # environ 0,115 ; 0,22 est donc le double du hasard. Mesuré : 0,274.
+    precision_min: 0.22
+    # Recall@10 : part de la pertinence disponible capturée dans les dix emplacements. Mesuré :
+    # 0,742, ce qui laisse de la marge — le seuil borne un effondrement, pas une performance.
+    recall_min: 0.55
+    # Gain minimal de NDCG sur le tri par popularité, en pourcents : en dessous de 25 %, le modèle
+    # ne justifie pas son coût d'exploitation face à un moteur gratuit et explicable. Mesuré :
+    # +82,8 %.
+    improvement_vs_popularity_min: 25.0
+    # Part minimale du catalogue exposée par au moins un top-10. Le tri par popularité n'expose que
+    # 8,4 % des 900 références ; le modèle en expose 55,7 %. Un seuil de 25 % borne la fermeture du
+    # moteur, qui est le mode de défaillance le plus fréquent d'un recommandeur en production.
+    coverage_min: 0.25
+    # Rappel des utilisateurs froids rapporté au rappel global. Mesuré : 0,98 — le modèle ne dépend
+    # pas de l'historique. Le seuil de 0,60 borne une dérive vers un moteur qui exclurait de fait
+    # les nouveaux venus.
+    cold_start_ratio_min: 0.60
+    # Part maximale d'emplacements publiés pointant vers un article indisponible. Mesuré avant
+    # filtrage : 7,5 %. Le prédicteur applique un filtre de disponibilité **après** le classement,
+    # ce qui ramène cette part à zéro en publication ; le seuil borne le cas où le filtre serait
+    # désactivé.
+    out_of_stock_max: 0.15
+    # Amplitude maximale du NDCG entre les plis chronologiques du backtest : mesure la stabilité
+    # opérationnelle, pas la performance.
+    #
+    # Le seuil est calibré sur le **plancher de bruit** du découpage, mesuré par bootstrap sur le
+    # split de test : avec 3 plis de 73 utilisateurs évaluables, l'écart-type du NDCG entre
+    # utilisateurs vaut 0,277, donc l'erreur-type d'un pli vaut ~0,032 et l'amplitude produite par
+    # le seul hasard vaut en moyenne 0,100 (p95 : 0,164). L'amplitude réellement observée est de
+    # 0,094 — sous la moyenne du bruit. Un seuil placé à 0,05 serait donc sous le plancher de
+    # bruit : il ne mesurerait que l'échantillonnage et déclencherait une alerte décorative à
+    # chaque exécution. 0,15 est juste sous le p95 du bruit (~5 % de faux positifs à cette
+    # résolution) : le critère ne peut se déclencher que sur une instabilité réelle.
+    backtest_spread_max: 0.15
+  model_conf:
+    # Validation croisée désactivée par défaut : les couples sont groupés par utilisateur et par
+    # session, et un K-fold aléatoire placerait le même utilisateur des deux côtés, ce qui
+    # transformerait la validation en fuite. Le split chronologique par session porte la validation.
+    cross_validation:
+      enabled: false
+      folds: 3
+      strategy: group_kfold
+  root_conf:
+    recommendation:
+      # Nombre d'emplacements publiés par utilisateur. C'est la contrainte produit : la surface
+      # d'affichage réelle ne montre pas plus de dix articles. Toute l'évaluation est menée à ce K,
+      # et les autres coupures ne servent qu'à documenter l'arbitrage.
+      top_k: 10
+      # Coupures évaluées pour montrer le compromis précision/rappel en fonction de K. Le K retenu
+      # est inclus automatiquement par l'évaluateur s'il n'est pas listé ici.
+      cutoffs: [5, 10, 20]
+      # Colonne portant l'unité d'évaluation. Aucun nom de colonne n'est codé en dur dans
+      # l'évaluateur : le regrouper autrement (par session, par segment) ne demande qu'un
+      # changement de configuration.
+      group_column: user_id
+      item_column: item_id
+      # Colonne d'audience utilisée comme référence par popularité. C'est le moteur historique du
+      # site : le battre est la condition minimale pour justifier un modèle.
+      popularity_column: item_views_7d
+      # Colonne d'intention récente utilisée comme référence d'exploitation pure : ne recommander
+      # que ce que l'utilisateur a déjà consulté. Elle capture le retour des visiteurs sans rien
+      # découvrir, et l'écart du modèle à cette référence mesure la part de découverte ajoutée.
+      intent_column: user_item_views_30d
+      # Colonne de stock : zéro unité signifie non publiable. Le filtre est appliqué **après** le
+      # classement, ce qui le rend explicite, testable et réversible, plutôt que laissé au modèle.
+      stock_column: item_stock_units
+      # Colonne de marge, utilisée pour chiffrer l'arbitrage entre classement par pertinence et
+      # classement pondéré par la marge. Le rapport publie les deux NDCG et les deux marges
+      # moyennes, pour que la décision soit prise en comité et non implicite dans le code.
+      margin_column: item_margin_pct
+      # Colonne d'activité utilisée pour définir le segment de démarrage à froid.
+      activity_column: user_orders_12m
+      # Un utilisateur à une commande ou moins sur 12 mois est considéré froid : il ne peut être
+      # servi que par les attributs du catalogue, puisque son historique est quasi vide.
+      cold_user_max_orders: 1
+      # Part minimale du catalogue à exposer (identique à `extras.quality.coverage_min`, lue par
+      # l'évaluateur pour son verdict et par le rapport pour sa courbe).
+      coverage_min: 0.25
+      # Amplitude maximale du NDCG entre plis chronologiques (identique à
+      # `extras.quality.backtest_spread_max`). L'évaluateur la lit pour son verdict interne, le
+      # rapport pour le verdict affiché : les deux doivent rester alignés, sinon le champ `extras`
+      # du JSON et le tableau du rapport se contredisent. Calibration et justification du plancher
+      # de bruit : voir `extras.quality.backtest_spread_max` ci-dessus.
+      backtest_spread_max: 0.15
+      # Colonne de catégorie, utilisée par le filtre de diversité du prédicteur.
+      category_column: item_category
+      # Politique de publication du prédicteur : retirer les articles indisponibles après
+      # classement, puis repêcher les candidats disponibles suivants pour ne pas perdre
+      # d'emplacement.
+      filter_unavailable: true
+      # Plafond d'emplacements par catégorie dans une liste publiée. Une liste de dix articles
+      # d'une même catégorie peut être optimale au NDCG et désastreuse à l'usage : la contrainte est
+      # un arbitrage assumé, réglable en configuration, dont le coût en NDCG est mesurable en la
+      # désactivant. `null` désactive la contrainte.
+      max_per_category: null
+      # Colonne de date de session, utilisée par le backtest chronologique de l'évaluateur.
+      time_column: session_date
+
+learning_objectives:
+  - "Construire un jeu de candidats (utilisateur x article) plutôt qu'une matrice d'interactions, et comprendre ce que ce choix autorise : consommer les features de fiche article, scorer un article neuf, publier sous contraintes métier."
+  - "Formaliser le contrat d'antériorité de chaque feature : connue avant la session (fiche article, historique agrégé), connue au moment de la session (intention récente), ou interdite (issue de la session elle-même)."
+  - "Comprendre pourquoi l'unité d'évaluation est l'utilisateur et non la ligne : une précision calculée sur toutes les lignes mêle un client très actif à un nouveau venu et ne décrit aucun des deux."
+  - "Choisir les bonnes métriques de classement : NDCG et son discount logarithmique, Precision@K contre Recall@K, MAP, hit-rate — et savoir laquelle pilote quelle décision produit."
+  - "Confronter systématiquement un modèle à trois références (tirage aléatoire, tri par popularité, exploitation de l'intention récente) et à un plafond atteignable publié par le générateur, plutôt que commenter un NDCG absolu dénué de référence."
+  - "Comprendre pourquoi un générateur de données doit faire de la popularité une référence **forte mais battable** : sans facteur latent d'attrait commun aux vues et à la pertinence, le tri par popularité est ridicule et la comparaison n'apprend rien."
+  - "Mesurer ce que le NDCG ne voit pas : couverture catalogue, concentration (Herfindahl), biais de popularité, et la boucle de rétroaction qu'ils amorcent en production."
+  - "Traiter le démarrage à froid comme un objectif à part entière et mesurer le rappel des nouveaux utilisateurs rapporté au rappel global."
+  - "Appliquer les contraintes métier (disponibilité du stock, diversité par catégorie) comme des filtres post-classement explicites et testables, plutôt que de les laisser au modèle."
+  - "Chiffrer l'arbitrage entre pertinence et marge au lieu de le trancher implicitement dans le code de publication."
+  - "Analyser les erreurs de classement en deux familles — oublis et fausses promesses — dont les causes et les correctifs diffèrent, et les classer par coût NDCG."
+  - "Mesurer l'importance par permutation sur le NDCG plutôt que sur l'impureté : détecter qu'un moteur dont le score s'effondre quand on mélange l'audience est un trieur par popularité habillé en modèle."
+  - "Valider par backtest chronologique et lire la dispersion de la qualité entre périodes plutôt qu'un score unique."
+  - "Industrialiser l'ensemble : configuration Hydra, artefacts traçables, tests pytest, rapports générés, publication batch et unitaire d'un top-K."

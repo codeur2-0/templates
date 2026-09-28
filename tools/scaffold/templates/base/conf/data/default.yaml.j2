@@ -1,0 +1,64 @@
+# =================================================================================================
+# Données : {{ spec.data.title }}
+# -------------------------------------------------------------------------------------------------
+{{ wrap(spec.data.description, 98, prefix="# ") }}
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: {{ spec.data.dataset_name }}
+n_samples: {{ spec.data.n_samples }}
+seed: {{ spec.data.seed }}
+formats:
+{% for fmt in spec.data.formats %}
+  - {{ fmt }}
+{% endfor %}
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+{% if spec.data.target %}
+target: {{ spec.data.target }}
+{% else %}
+target: null              # apprentissage non supervisé : pas de cible
+{% endif %}
+{% if spec.data.id_column %}
+id_column: {{ spec.data.id_column }}
+{% else %}
+id_column: null
+{% endif %}
+{% if spec.data.time_column %}
+time_column: {{ spec.data.time_column }}
+{% else %}
+time_column: null
+{% endif %}
+{% if spec.data.group_column %}
+group_column: {{ spec.data.group_column }}
+{% else %}
+group_column: null
+{% endif %}
+{% if spec.data.positive_rate is not none %}
+positive_rate: {{ spec.data.positive_rate }}
+{% endif %}
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: {{ py(names_with_role(spec.data.columns, ["identifier", "metadata", "timestamp"])) }}
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+{% if extras.get('data_conf') %}
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+{{ yaml_dump(extras.get('data_conf')) }}
+{% endif %}

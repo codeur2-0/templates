@@ -1,0 +1,10 @@
+# ==============================================================================================
+# {{ spec.title }} — dépendances runtime
+# ------------------------------------------------------------------------------------------------
+# Installation : `pip install -r requirements.txt`  (ou `make install`)
+# La source de vérité pour les métadonnées reste `pyproject.toml` ; ce fichier est fourni pour
+# les environnements qui ne peuvent pas installer le projet en mode éditable.
+# ==============================================================================================
+{% for dep in dependencies %}
+{{ dep }}
+{% endfor %}

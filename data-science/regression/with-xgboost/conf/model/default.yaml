@@ -1,0 +1,48 @@
+# =================================================================================================
+# Modèle : Gradient boosting XGBoost (régression)
+# -------------------------------------------------------------------------------------------------
+# XGBoost est la référence industrielle sur données tabulaires : le boosting régularisé (L1/L2,
+# subsampling, shrinkage) apprend les non-linéarités du cas (effet concave de la surface,
+# interaction étage x ascenseur, malus énergétique non linéaire) tout en restant maîtrisable grâce
+# à l'early stopping natif sur un split de validation. L'objectif `reg:squarederror` cible
+# directement la RMSE, métrique de décision du projet, et l'importance au gain fournit les
+# facteurs explicatifs affichés avec l'estimation.
+#
+# Alternatives considérées : xgboost_dart : dropout sur les arbres, régularise les gros ensembles (early stopping non supporté), xgboost_linear : booster linéaire, vérifie qu'une part du signal est bien linéaire, random_forest : moins sensible au réglage, importance native, mais généralement moins précis, dummy : plancher à battre — un modèle qui ne le dépasse pas n'a aucune valeur.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_estimators=...
+# =================================================================================================
+
+name: "Gradient boosting XGBoost (régression)"
+algorithm: xgboost
+class: XGBoostModel
+task: regression
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `XGBoostModel(params=...)` (voir src/models/model.py).
+params:
+  n_estimators: 600
+  max_depth: 6
+  learning_rate: 0.06
+  subsample: 0.9
+  colsample_bytree: 0.8
+  min_child_weight: 5
+  reg_lambda: 1.5
+  reg_alpha: 0.0
+  gamma: 0.0
+  importance_type: gain
+
+# --- options spécifiques à la stack `xgboost` ---------------------------------------
+early_stopping_rounds: 50
+eval_metric:
+- rmse
+- mae
+native_categorical: true
+cross_validation:
+  enabled: true
+  folds: 5
+  strategy: kfold

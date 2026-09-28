@@ -1,0 +1,43 @@
+# =================================================================================================
+# Données : Abonnés télécom et attrition (churn)
+# -------------------------------------------------------------------------------------------------
+# Population d'abonnés d'un opérateur télécom, avec leurs caractéristiques contractuelles, d'usage
+# et de relation client, et l'étiquette d'attrition observée. Les données sont générées par un
+# modèle logistique latent avec interactions : le signal est réel mais bruité, ce qui reproduit
+# fidèlement la difficulté d'un cas churn industriel.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: telecom_churn
+n_samples: 4000
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: churned
+id_column: customer_id
+time_column: null
+group_column: null
+positive_rate: 0.26
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['customer_id', 'signup_date']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)

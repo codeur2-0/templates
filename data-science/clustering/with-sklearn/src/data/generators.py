@@ -1,0 +1,839 @@
+"""Synthetic data generator — Base clients e-commerce et comportement d'achat sur 12 mois.
+
+Business scenario
+        La segmentation actuelle est artisanale : trois seuils RFM (récence, fréquence, montant)
+    posés à la main dans un tableur, revus une fois par an. Elle classe 62 % des clients dans un
+    seul groupe « standard », ignore complètement le comportement promotionnel, le taux de
+    retour et la pression sur le service client, et ne dit rien des nouveaux inscrits qui n'ont
+    pas encore commandé. Résultat : les campagnes sont indifférenciées, le coût d'acquisition
+    augmente, et le churn des clients à fort potentiel n'est détecté qu'après six mois
+    d'inactivité.
+
+How the data is built
+    The generator does **not** draw columns independently. It first assigns every customer to one
+    of six **latent behavioural profiles** (loyal VIP, deal hunter, occasional buyer, dormant,
+    curious newcomer, dissatisfied customer), then derives every observable column from that
+    profile:
+
+    * frequency, basket size, revenue and catalogue breadth come from profile-specific
+      distributions (Poisson / log-normal), bounded by the account tenure;
+    * promotion sensitivity, return rate, support pressure, email engagement and mobile usage are
+      drawn per profile, so the profiles differ on *behaviour*, not only on spend;
+    * ``loyalty_tier`` is **derived from revenue** on purpose: it is a circular variable, and
+      discovering that it merely reproduces the business rule is part of the exercise;
+    * a share of customers is deliberately **blended** between two profiles, so clusters overlap
+      and an honest silhouette stays in the 0.25-0.45 range;
+    * ``churned_next_90d`` (external validity) is generated from the profile *and* the observed
+      recency, so a good segmentation must separate churn risk;
+    * ``latent_segment`` and ``churned_next_90d`` are metadata: they are excluded from the feature
+      matrix by ``drop_columns`` and only used for diagnostics.
+
+Determinism
+    ``generate()`` is a pure function of ``(n_samples, seed, options)``: two runs produce the
+    same bytes, which is what makes stack-to-stack comparisons meaningful.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, ClassVar, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+
+from src.data.schemas import RawDataSchema
+from src.utils.io import write_json, write_table_multiple
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+
+logger = get_logger(__name__)
+
+#: Default dataset name (overridable through the constructor / Hydra config).
+DEFAULT_DATASET_NAME = "retail_customer_base"
+
+#: Latent behavioural profiles, their population share and their churn risk.
+SEGMENTS: tuple[str, ...] = (
+    "vip_fidele",
+    "chasseur_promo",
+    "acheteur_occasionnel",
+    "dormeur",
+    "nouveau_curieux",
+    "client_insatisfait",
+)
+SEGMENT_WEIGHTS: tuple[float, ...] = (0.08, 0.18, 0.32, 0.20, 0.14, 0.08)
+
+#: Per-profile behaviour. Keys are distribution parameters, values are profile-specific.
+#:
+#: * ``orders_lambda``    — Poisson intensity of 12-month orders (before tenure scaling)
+#: * ``basket_log_mu``    — mean of log(avg basket), so the basket is log-normal
+#: * ``basket_log_sigma`` — dispersion of log(avg basket)
+#: * ``discount_a/b``     — Beta parameters of the promotion share
+#: * ``return_a/b``       — Beta parameters of the return rate
+#: * ``tickets_lambda``   — Poisson intensity of support tickets
+#: * ``opens_rate``       — probability of opening a weekly newsletter
+#: * ``sessions_lambda``  — Poisson intensity of web sessions
+#: * ``mobile_mu``        — mean mobile session share
+#: * ``recency_scale``    — scale (days) of the exponential recency of an active buyer
+#: * ``tenure_mu``        — mean account tenure in months
+#: * ``nps_mu``           — mean declared NPS (0-10)
+#: * ``opt_in``           — probability of marketing consent
+#: * ``churn``            — base probability of no order in the next 90 days
+SEGMENT_PROFILES: dict[str, dict[str, float]] = {
+    "vip_fidele": {
+        "orders_lambda": 15.0,
+        "basket_log_mu": 5.55,
+        "basket_log_sigma": 0.30,
+        "discount_a": 2.0,
+        "discount_b": 14.0,
+        "return_a": 2.0,
+        "return_b": 44.0,
+        "tickets_lambda": 0.30,
+        "opens_rate": 0.42,
+        "sessions_lambda": 78.0,
+        "mobile_mu": 0.46,
+        "recency_scale": 18.0,
+        "tenure_mu": 44.0,
+        "nps_mu": 8.7,
+        "opt_in": 0.86,
+        "churn": 0.04,
+    },
+    "chasseur_promo": {
+        "orders_lambda": 7.0,
+        "basket_log_mu": 4.45,
+        "basket_log_sigma": 0.38,
+        "discount_a": 9.0,
+        "discount_b": 3.0,
+        "return_a": 3.0,
+        "return_b": 30.0,
+        "tickets_lambda": 0.70,
+        "opens_rate": 0.88,
+        "sessions_lambda": 120.0,
+        "mobile_mu": 0.68,
+        "recency_scale": 26.0,
+        "tenure_mu": 30.0,
+        "nps_mu": 6.4,
+        "opt_in": 0.95,
+        "churn": 0.12,
+    },
+    "acheteur_occasionnel": {
+        "orders_lambda": 3.0,
+        "basket_log_mu": 4.95,
+        "basket_log_sigma": 0.34,
+        "discount_a": 4.0,
+        "discount_b": 9.0,
+        "return_a": 2.5,
+        "return_b": 34.0,
+        "tickets_lambda": 0.45,
+        "opens_rate": 0.34,
+        "sessions_lambda": 42.0,
+        "mobile_mu": 0.58,
+        "recency_scale": 52.0,
+        "tenure_mu": 34.0,
+        "nps_mu": 6.9,
+        "opt_in": 0.68,
+        "churn": 0.18,
+    },
+    "dormeur": {
+        "orders_lambda": 0.6,
+        "basket_log_mu": 4.70,
+        "basket_log_sigma": 0.40,
+        "discount_a": 3.0,
+        "discount_b": 8.0,
+        "return_a": 2.0,
+        "return_b": 38.0,
+        "tickets_lambda": 0.25,
+        "opens_rate": 0.12,
+        "sessions_lambda": 9.0,
+        "mobile_mu": 0.52,
+        "recency_scale": 210.0,
+        "tenure_mu": 40.0,
+        "nps_mu": 5.8,
+        "opt_in": 0.44,
+        "churn": 0.55,
+    },
+    "nouveau_curieux": {
+        "orders_lambda": 1.6,
+        "basket_log_mu": 4.55,
+        "basket_log_sigma": 0.42,
+        "discount_a": 5.0,
+        "discount_b": 6.0,
+        "return_a": 3.0,
+        "return_b": 26.0,
+        "tickets_lambda": 0.55,
+        "opens_rate": 0.46,
+        "sessions_lambda": 95.0,
+        "mobile_mu": 0.79,
+        "recency_scale": 34.0,
+        "tenure_mu": 6.0,
+        "nps_mu": 7.2,
+        "opt_in": 0.80,
+        "churn": 0.26,
+    },
+    "client_insatisfait": {
+        "orders_lambda": 4.5,
+        "basket_log_mu": 4.85,
+        "basket_log_sigma": 0.36,
+        "discount_a": 4.0,
+        "discount_b": 8.0,
+        "return_a": 8.0,
+        "return_b": 14.0,
+        "tickets_lambda": 3.20,
+        "opens_rate": 0.22,
+        "sessions_lambda": 55.0,
+        "mobile_mu": 0.61,
+        "recency_scale": 68.0,
+        "tenure_mu": 28.0,
+        "nps_mu": 3.1,
+        "opt_in": 0.52,
+        "churn": 0.38,
+    },
+}
+
+#: Acquisition channels and their population share (global), then per-profile tilt.
+CHANNELS: tuple[str, ...] = (
+    "organic",
+    "paid_search",
+    "social",
+    "marketplace",
+    "referral",
+    "email",
+)
+CHANNEL_WEIGHTS: tuple[float, ...] = (0.26, 0.22, 0.19, 0.14, 0.11, 0.08)
+#: Multiplicative tilt applied to the global channel mix for each profile (normalised at runtime).
+CHANNEL_TILT: dict[str, tuple[float, ...]] = {
+    "vip_fidele": (1.30, 0.70, 0.60, 0.70, 2.10, 0.90),
+    "chasseur_promo": (0.70, 0.90, 1.40, 1.20, 0.60, 2.20),
+    "acheteur_occasionnel": (1.10, 1.10, 1.00, 1.00, 1.00, 0.90),
+    "dormeur": (1.00, 1.20, 1.10, 1.50, 0.50, 0.60),
+    "nouveau_curieux": (0.80, 1.10, 2.00, 1.20, 0.80, 0.70),
+    "client_insatisfait": (0.90, 1.20, 1.10, 1.60, 0.60, 0.70),
+}
+
+#: Regions and their population share (slightly tilted by profile, e.g. dense urban VIPs).
+REGIONS: tuple[str, ...] = (
+    "ile_de_france",
+    "nord",
+    "ouest",
+    "sud_ouest",
+    "sud_est",
+    "est",
+)
+REGION_WEIGHTS: tuple[float, ...] = (0.24, 0.16, 0.17, 0.13, 0.18, 0.12)
+REGION_TILT: dict[str, tuple[float, ...]] = {
+    "vip_fidele": (1.60, 0.85, 0.90, 0.85, 1.10, 0.85),
+    "chasseur_promo": (0.90, 1.20, 1.10, 1.10, 1.00, 1.10),
+    "acheteur_occasionnel": (1.00, 1.00, 1.00, 1.00, 1.00, 1.00),
+    "dormeur": (0.85, 1.15, 1.15, 1.15, 1.00, 1.15),
+    "nouveau_curieux": (1.15, 1.00, 0.95, 0.95, 1.10, 0.95),
+    "client_insatisfait": (0.95, 1.05, 1.05, 1.05, 1.05, 1.05),
+}
+
+#: Loyalty tiers, assigned from revenue quantiles (deliberately circular variable).
+LOYALTY_TIERS: tuple[str, ...] = ("none", "silver", "gold", "platinum")
+
+#: Number of newsletter sends per year (one per week) used to draw the open count.
+NEWSLETTER_SENDS_PER_YEAR = 52
+
+#: Upper bound of the catalogue breadth (number of product categories).
+MAX_CATEGORIES = 12
+
+
+class SyntheticDataGenerator:
+    """Deterministic generator of the retail customer base dataset.
+
+    Example:
+        >>> generator = SyntheticDataGenerator(n_samples=400, seed=42)
+        >>> frame = generator.generate()
+        >>> frame.shape[0]
+        400
+        >>> sorted({"latent_segment"} <= set(frame.columns))
+        [True]
+    """
+
+    #: Options accepted from ``conf/data/default.yaml`` (extra keys of the data node).
+    SUPPORTED_OPTIONS: ClassVar[tuple[str, ...]] = (
+        "segment_blend_rate",
+        "missing_rate",
+        "outlier_rate",
+        "tenure_cap_months",
+    )
+
+    def __init__(
+        self,
+        *,
+        n_samples: int = 6000,
+        seed: int = 42,
+        dataset_name: str | None = None,
+        output_dir: Path | str | None = None,
+        formats: Sequence[str] = ("parquet", "csv"),
+        segment_blend_rate: float = 0.14,
+        missing_rate: float = 0.08,
+        outlier_rate: float = 0.01,
+        tenure_cap_months: int = 62,
+    ) -> None:
+        """Store the generation parameters.
+
+        Args:
+            n_samples: Number of customer rows to generate.
+            seed: Random seed (fully determines the output).
+            dataset_name: Base file name (defaults to :data:`DEFAULT_DATASET_NAME`).
+            output_dir: Directory receiving the files (defaults to ``data/raw``).
+            formats: Formats to write (``parquet`` and/or ``csv``).
+            segment_blend_rate: Share of customers whose behaviour is blended with a second
+                profile. This is what makes the latent structure **overlapping**: with ``0.14``,
+                roughly one customer in seven sits between two groups, and an honest silhouette
+                lands between 0.25 and 0.45 instead of the near-perfect 0.7 a disjoint generator
+                would produce.
+            missing_rate: Share of customers with an unanswered NPS survey (response bias: the
+                dissatisfied answer more often).
+            outlier_rate: Share of customers turned into legitimate whales (very high revenue).
+            tenure_cap_months: Maximum account tenure in months (bounds ``signup_date``).
+
+        Raises:
+            ValueError: When a parameter is out of its valid range.
+        """
+        if n_samples < 50:
+            msg = f"n_samples must be >= 50 to keep the dataset meaningful, got {n_samples}"
+            raise ValueError(msg)
+        if not 0.0 <= segment_blend_rate <= 0.6:
+            msg = f"segment_blend_rate must be in [0, 0.6], got {segment_blend_rate}"
+            raise ValueError(msg)
+        if not 0.0 <= missing_rate <= 0.5:
+            msg = f"missing_rate must be in [0, 0.5], got {missing_rate}"
+            raise ValueError(msg)
+        if not 0.0 <= outlier_rate <= 0.2:
+            msg = f"outlier_rate must be in [0, 0.2], got {outlier_rate}"
+            raise ValueError(msg)
+        if tenure_cap_months < 6:
+            msg = f"tenure_cap_months must be >= 6, got {tenure_cap_months}"
+            raise ValueError(msg)
+
+        self.n_samples = int(n_samples)
+        self.seed = int(seed)
+        self.dataset_name = dataset_name or DEFAULT_DATASET_NAME
+        self.output_dir = (
+            Path(output_dir) if output_dir is not None else ProjectPaths.from_root().raw_dir
+        )
+        self.formats = tuple(formats)
+        self.segment_blend_rate = float(segment_blend_rate)
+        self.missing_rate = float(missing_rate)
+        self.outlier_rate = float(outlier_rate)
+        self.tenure_cap_months = int(tenure_cap_months)
+        #: Reference date: "today" for the snapshot of the customer base.
+        self.reference_date = pd.Timestamp("2026-01-31")
+
+    # ------------------------------------------------------------------ generation ------
+    def generate(self) -> pd.DataFrame:
+        """Generate the dataset.
+
+        Returns:
+            A validated ``DataFrame`` with the columns declared in ``RawDataSchema``.
+        """
+        rng = np.random.default_rng(self.seed)
+        logger.info(
+            "Generating {} customers | seed={} blend_rate={} outlier_rate={}",
+            self.n_samples,
+            self.seed,
+            self.segment_blend_rate,
+            self.outlier_rate,
+        )
+
+        segment = self._draw_segments(rng)
+        profile = self._behaviour(rng, segment)
+        frame = pd.DataFrame(
+            {
+                "customer_id": [f"CUS-{index:06d}" for index in range(1, self.n_samples + 1)],
+                "signup_date": profile["signup_date"],
+                "last_order_date": profile["last_order_date"],
+                "tenure_months": profile["tenure_months"],
+                "recency_days": profile["recency_days"],
+                "orders_12m": profile["orders_12m"],
+                "revenue_12m_eur": profile["revenue_12m_eur"],
+                "avg_basket_eur": profile["avg_basket_eur"],
+                "distinct_categories_12m": profile["distinct_categories_12m"],
+                "discount_share": profile["discount_share"],
+                "return_rate": profile["return_rate"],
+                "support_tickets_12m": profile["support_tickets_12m"],
+                "newsletter_opens_12m": profile["newsletter_opens_12m"],
+                "web_sessions_12m": profile["web_sessions_12m"],
+                "mobile_share": profile["mobile_share"],
+                "loyalty_tier": profile["loyalty_tier"],
+                "acquisition_channel": profile["acquisition_channel"],
+                "region": profile["region"],
+                "nps_score": profile["nps_score"],
+                "opt_in_marketing": profile["opt_in_marketing"],
+                "latent_segment": pd.Series(segment, dtype="str"),
+                "churned_next_90d": profile["churned_next_90d"],
+            }
+        )
+        frame = self._inject_outliers(frame, rng)
+        frame = self._inject_missing(frame, rng)
+        frame = self._enforce_schema_bounds(frame)
+
+        validated = RawDataSchema.validate(frame)
+        logger.info(
+            "Dataset generated | rows={} cols={} median_revenue={:.0f} missing_cells={}",
+            len(validated),
+            validated.shape[1],
+            float(validated["revenue_12m_eur"].median()),
+            int(validated.isna().to_numpy().sum()),
+        )
+        return validated
+
+    def _draw_segments(self, rng: np.random.Generator) -> np.ndarray:
+        """Assign a latent profile to every customer, blending a share of them.
+
+        Args:
+            rng: Seeded random generator.
+
+        Returns:
+            An array of profile names (length ``n_samples``). The blended rows keep the name of
+            their **dominant** profile: the label is a simplification, exactly like in production
+            where a customer rarely belongs to one box.
+        """
+        n = self.n_samples
+        primary = rng.choice(SEGMENTS, size=n, p=_normalise(SEGMENT_WEIGHTS))
+        secondary = rng.choice(SEGMENTS, size=n, p=_normalise(SEGMENT_WEIGHTS))
+        blended = rng.random(n) < self.segment_blend_rate
+        # Le profil secondaire est stocké pour le tirage comportemental (mélange 60/40).
+        self._secondary = np.where(blended & (secondary != primary), secondary, primary)
+        self._blended = blended & (secondary != primary)
+        return primary
+
+    def _behaviour(self, rng: np.random.Generator, segment: np.ndarray) -> dict[str, Any]:
+        """Draw every observable column from the latent profiles.
+
+        Args:
+            rng: Seeded random generator.
+            segment: Dominant profile of each customer.
+
+        Returns:
+            Mapping of column name to values (already clipped to the schema bounds).
+        """
+        n = self.n_samples
+        secondary = getattr(self, "_secondary", segment)
+        blended = getattr(self, "_blended", np.zeros(n, dtype=bool))
+        weight = np.where(blended, 0.40, 0.0)  # part du profil secondaire dans le mélange
+
+        def mixed(key: str) -> np.ndarray:
+            """Interpolate a profile parameter between the dominant and the blended profile."""
+            primary_value = np.array(
+                [SEGMENT_PROFILES[name][key] for name in segment], dtype="float64"
+            )
+            secondary_value = np.array(
+                [SEGMENT_PROFILES[name][key] for name in secondary], dtype="float64"
+            )
+            return primary_value * (1.0 - weight) + secondary_value * weight
+
+        # --- ancienneté du compte -----------------------------------------------------------
+        tenure_mu = np.clip(mixed("tenure_mu"), 1.0, None)
+        tenure = rng.gamma(shape=3.2, scale=tenure_mu / 3.2)
+        tenure_months = np.clip(np.round(tenure), 0, self.tenure_cap_months).astype(int)
+        tenure_days = tenure_months.astype("float64") * 30.44
+        signup_jitter = rng.integers(0, 28, size=n).astype("float64")
+        signup_date = self.reference_date - pd.to_timedelta(tenure_days + signup_jitter, unit="D")
+
+        # --- fréquence d'achat (bornée par l'ancienneté : un compte de 2 mois ne commande pas 20 fois)
+        exposure = np.clip(tenure_months.astype("float64") / 12.0, 0.08, 1.0)
+        orders = rng.poisson(np.clip(mixed("orders_lambda") * exposure, 0.02, None))
+        orders = np.minimum(orders, 60).astype(int)
+
+        # --- panier moyen et chiffre d'affaires ---------------------------------------------
+        basket = rng.lognormal(mean=mixed("basket_log_mu"), sigma=mixed("basket_log_sigma"))
+        basket = np.clip(basket, 8.0, 950.0)
+        revenue = np.round(orders * basket * rng.normal(1.0, 0.08, size=n), 2)
+        revenue = np.clip(revenue, 0.0, 15000.0)
+        # Panier moyen non observé quand le client n'a pas commandé : manquant structurel.
+        avg_basket = np.where(orders > 0, np.round(revenue / np.maximum(orders, 1), 2), np.nan)
+
+        # --- récence --------------------------------------------------------------------------
+        active = orders > 0
+        recency_active = rng.exponential(scale=np.clip(mixed("recency_scale"), 3.0, None))
+        recency_inactive = rng.uniform(200.0, 720.0, size=n)
+        recency = np.where(active, recency_active, recency_inactive)
+        # La dernière commande ne peut pas précéder l'inscription.
+        recency = np.minimum(recency, np.maximum(tenure_days, 1.0))
+        recency_days = np.clip(np.round(recency), 1, 730).astype(int)
+        last_order_date = self.reference_date - pd.to_timedelta(
+            recency_days.astype("float64"), unit="D"
+        )
+
+        # --- largeur du catalogue, promotions, retours, SAV, email, sessions -------------------
+        categories = np.round(
+            np.minimum(orders * rng.normal(0.55, 0.12, size=n), MAX_CATEGORIES)
+        ).astype(int)
+        categories = np.clip(np.where(active, categories, 0), 0, MAX_CATEGORIES)
+        discount = rng.beta(a=np.clip(mixed("discount_a"), 0.5, None),
+                            b=np.clip(mixed("discount_b"), 0.5, None))
+        returns = rng.beta(a=np.clip(mixed("return_a"), 0.5, None),
+                           b=np.clip(mixed("return_b"), 0.5, None))
+        returns = np.where(active, returns, returns * 0.3)
+        tickets = rng.poisson(np.clip(mixed("tickets_lambda"), 0.01, None))
+        opt_in = rng.random(n) < mixed("opt_in")
+        # Un client non consentant ne reçoit pas la newsletter : zéro ouverture par construction.
+        opens = rng.binomial(NEWSLETTER_SENDS_PER_YEAR, np.clip(mixed("opens_rate"), 0.0, 1.0))
+        opens = np.where(opt_in, opens, 0)
+        sessions = rng.poisson(np.clip(mixed("sessions_lambda") * exposure, 0.5, None))
+        sessions = np.maximum(sessions, np.where(active, 2, 0))
+
+        # --- part mobile, avec dérive d'usage pour les inscrits récents ------------------------
+        drift = np.clip((18.0 - tenure_months.astype("float64")) / 18.0, 0.0, 1.0) * 0.12
+        mobile = rng.beta(
+            a=np.clip((mixed("mobile_mu") + drift) * 12.0, 0.5, None),
+            b=np.clip((1.0 - mixed("mobile_mu") - drift) * 12.0, 0.5, None),
+        )
+
+        # --- NPS déclaré ----------------------------------------------------------------------
+        nps = np.round(rng.normal(loc=mixed("nps_mu"), scale=1.4))
+        nps_score = np.clip(nps, 0, 10).astype("float64")
+
+        # --- churn observé à 90 jours : profil latent + récence déjà constatée -----------------
+        base_churn = mixed("churn")
+        stalled = recency_days > 90
+        churn_probability = np.clip(base_churn + np.where(stalled, 0.45, -0.05), 0.01, 0.97)
+        churned = rng.random(n) < churn_probability
+
+        return {
+            "signup_date": signup_date,
+            "last_order_date": last_order_date,
+            "tenure_months": tenure_months,
+            "recency_days": recency_days,
+            "orders_12m": orders,
+            "revenue_12m_eur": revenue,
+            "avg_basket_eur": avg_basket,
+            "distinct_categories_12m": categories,
+            "discount_share": np.round(discount, 4),
+            "return_rate": np.round(np.clip(returns, 0.0, 1.0), 4),
+            "support_tickets_12m": np.minimum(tickets, 15).astype(int),
+            "newsletter_opens_12m": np.minimum(opens, 120).astype(int),
+            "web_sessions_12m": np.minimum(sessions, 400).astype(int),
+            "mobile_share": np.round(np.clip(mobile, 0.0, 1.0), 4),
+            "loyalty_tier": self._loyalty_tier(revenue),
+            "acquisition_channel": self._categorical(rng, segment, CHANNELS, CHANNEL_WEIGHTS, CHANNEL_TILT),
+            "region": self._categorical(rng, segment, REGIONS, REGION_WEIGHTS, REGION_TILT),
+            "nps_score": nps_score,
+            "opt_in_marketing": opt_in.astype(int),
+            "churned_next_90d": churned.astype(int),
+        }
+
+    @staticmethod
+    def _loyalty_tier(revenue: np.ndarray) -> np.ndarray:
+        """Derive the loyalty tier from revenue quantiles.
+
+        The tier is computed **by the business** from cumulative spend: it is therefore a circular
+        variable for a segmentation model (using it as a feature mostly rediscovers the business
+        rule). It is kept in the dataset on purpose, so the notebooks can show the trap.
+
+        Args:
+            revenue: 12-month revenue per customer.
+
+        Returns:
+            An array of tier labels (``none``, ``silver``, ``gold``, ``platinum``).
+        """
+        positive = revenue[revenue > 0]
+        if positive.size < 20:
+            return np.full(revenue.shape, LOYALTY_TIERS[0], dtype=object)
+        silver_cut = float(np.quantile(positive, 0.52))
+        gold_cut = float(np.quantile(positive, 0.80))
+        platinum_cut = float(np.quantile(positive, 0.94))
+        tiers = np.where(
+            revenue >= platinum_cut,
+            LOYALTY_TIERS[3],
+            np.where(
+                revenue >= gold_cut,
+                LOYALTY_TIERS[2],
+                np.where(revenue >= silver_cut, LOYALTY_TIERS[1], LOYALTY_TIERS[0]),
+            ),
+        )
+        return np.where(revenue <= 0, LOYALTY_TIERS[0], tiers)
+
+    @staticmethod
+    def _categorical(
+        rng: np.random.Generator,
+        segment: np.ndarray,
+        levels: Sequence[str],
+        weights: Sequence[float],
+        tilt: Mapping[str, Sequence[float]],
+    ) -> np.ndarray:
+        """Draw a categorical column whose mix depends on the latent profile.
+
+        Args:
+            rng: Seeded random generator.
+            segment: Dominant profile of each row.
+            levels: Category levels.
+            weights: Global (population-level) weights.
+            tilt: Per-profile multiplicative tilt applied to the global weights.
+
+        Returns:
+            An array of level names.
+        """
+        base = _normalise(weights)
+        drawn = np.empty(len(segment), dtype=object)
+        for name in np.unique(segment):
+            mask = segment == name
+            probabilities = _normalise(base * np.asarray(tilt[str(name)], dtype="float64"))
+            drawn[mask] = rng.choice(np.asarray(levels), size=int(mask.sum()), p=probabilities)
+        return drawn
+
+    # ------------------------------------------------------------------ perturbations ----
+    def _inject_outliers(self, frame: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+        """Turn a small share of customers into legitimate whales.
+
+        Big spenders are real, not errors: deleting them would impoverish the segmentation (they
+        form a thin but highly valuable group), while keeping them raw drags a centroid. This is
+        precisely why winsorising and a robust reading of the cluster profiles are required.
+
+        Args:
+            frame: Generated data.
+            rng: Seeded random generator.
+
+        Returns:
+            The frame with inflated revenue (and consistent basket / categories).
+        """
+        if self.outlier_rate <= 0:
+            return frame
+        n = len(frame)
+        chosen = rng.random(n) < self.outlier_rate
+        if not chosen.any():
+            return frame
+        multiplier = rng.uniform(3.5, 8.0, size=int(chosen.sum()))
+        updated = frame.copy()
+        revenue = updated.loc[chosen, "revenue_12m_eur"].to_numpy(dtype="float64") * multiplier
+        updated.loc[chosen, "revenue_12m_eur"] = np.round(np.clip(revenue, 0.0, 15000.0), 2)
+        orders = updated.loc[chosen, "orders_12m"].to_numpy(dtype="float64")
+        basket = np.where(
+            orders > 0,
+            updated.loc[chosen, "revenue_12m_eur"].to_numpy(dtype="float64") / np.maximum(orders, 1),
+            np.nan,
+        )
+        updated.loc[chosen, "avg_basket_eur"] = np.round(np.clip(basket, 0.0, 950.0), 2)
+        updated.loc[chosen, "distinct_categories_12m"] = np.minimum(
+            updated.loc[chosen, "distinct_categories_12m"].to_numpy(dtype="int64") + rng.integers(2, 6, size=int(chosen.sum())),
+            MAX_CATEGORIES,
+        )
+        logger.debug("Whales injected: {} rows", int(chosen.sum()))
+        return updated
+
+    def _inject_missing(self, frame: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+        """Hide a share of the NPS answers (non-response bias).
+
+        The missingness is **informative**: dissatisfied customers answer the survey more often,
+        so imputing the median silently flatters the segmentation. The notebooks make this bias
+        explicit and add a missingness indicator.
+
+        Args:
+            frame: Generated data.
+            rng: Seeded random generator.
+
+        Returns:
+            The frame with ``NaN`` in ``nps_score`` for a biased subset of rows.
+        """
+        if self.missing_rate <= 0:
+            return frame
+        updated = frame.copy()
+        nps = updated["nps_score"].to_numpy(dtype="float64")
+        # Les promoteurs (NPS >= 8) répondent moins souvent : le manquant dépend de la valeur.
+        response_penalty = np.where(nps >= 8.0, 1.7, 1.0)
+        hidden = rng.random(len(updated)) < (self.missing_rate * response_penalty)
+        updated.loc[hidden, "nps_score"] = np.nan
+        logger.debug("NPS hidden on {} rows", int(hidden.sum()))
+        return updated
+
+    def _enforce_schema_bounds(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Clip every column to the bounds declared in the Pandera contract.
+
+        Random draws can escape the business bounds (a 750-day recency, a 13th category). Rather
+        than rejecting the rows, the generator clamps them: the contract stays the single source
+        of truth about what the pipeline accepts.
+
+        Args:
+            frame: Generated data.
+
+        Returns:
+            The frame with every column inside its declared bounds.
+        """
+        updated = frame.copy()
+        updated["recency_days"] = np.clip(updated["recency_days"], 1, 730)
+        updated["tenure_months"] = np.clip(updated["tenure_months"], 0, self.tenure_cap_months)
+        updated["orders_12m"] = np.clip(updated["orders_12m"], 0, 60)
+        updated["revenue_12m_eur"] = np.clip(updated["revenue_12m_eur"], 0.0, 15000.0)
+        updated["avg_basket_eur"] = np.clip(updated["avg_basket_eur"], 0.0, 950.0)
+        updated["distinct_categories_12m"] = np.clip(
+            updated["distinct_categories_12m"], 0, MAX_CATEGORIES
+        )
+        updated["discount_share"] = np.clip(updated["discount_share"], 0.0, 1.0)
+        updated["return_rate"] = np.clip(updated["return_rate"], 0.0, 1.0)
+        updated["support_tickets_12m"] = np.clip(updated["support_tickets_12m"], 0, 15)
+        updated["newsletter_opens_12m"] = np.clip(updated["newsletter_opens_12m"], 0, 120)
+        updated["web_sessions_12m"] = np.clip(updated["web_sessions_12m"], 0, 400)
+        updated["mobile_share"] = np.clip(updated["mobile_share"], 0.0, 1.0)
+        updated["nps_score"] = np.where(
+            updated["nps_score"].isna(), np.nan, np.clip(updated["nps_score"], 0, 10)
+        )
+        # Cohérence temporelle : la dernière commande ne peut pas précéder l'inscription.
+        inconsistent = updated["last_order_date"] < updated["signup_date"]
+        if bool(inconsistent.any()):
+            updated.loc[inconsistent, "last_order_date"] = updated.loc[inconsistent, "signup_date"]
+        # Un client sans commande n'a ni panier ni catégorie.
+        no_order = updated["orders_12m"] == 0
+        updated.loc[no_order, "avg_basket_eur"] = np.nan
+        updated.loc[no_order, "distinct_categories_12m"] = 0
+        updated.loc[no_order, "revenue_12m_eur"] = 0.0
+        return updated
+
+    # ------------------------------------------------------------------ export -----------
+    def export(self, frame: pd.DataFrame | None = None) -> dict[str, Path]:
+        """Write the dataset in every configured format.
+
+        Args:
+            frame: Data to write; generated when ``None``.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        data = frame if frame is not None else self.generate()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        base = self.output_dir / self.dataset_name
+        written = write_table_multiple(data, base, formats=self.formats)
+        logger.info("Dataset exported: {}", {fmt: str(path) for fmt, path in written.items()})
+        return written
+
+    def run(self) -> dict[str, Path]:
+        """Generate, export and persist the generation metadata.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        frame = self.generate()
+        written = self.export(frame)
+        payload = self.metadata(frame)
+        payload["files"] = {fmt: str(path) for fmt, path in written.items()}
+        write_json(self.output_dir / "generation_metadata.json", payload)
+        return written
+
+    def sample(self, n_samples: int, *, with_target: bool = False) -> pd.DataFrame:
+        """Draw a small sample, typically used to demo inference.
+
+        Args:
+            n_samples: Number of rows.
+            with_target: Keep the diagnostic metadata (latent segment, churn) or drop it, as a
+                real scoring request would.
+
+        Returns:
+            The sampled frame.
+        """
+        frame = self.generate()
+        sample_frame = frame.head(max(int(n_samples), 1)).copy()
+        if not with_target:
+            hidden = [name for name in ("latent_segment", "churned_next_90d") if name in frame]
+            sample_frame = sample_frame.drop(columns=hidden)
+        return sample_frame
+
+    # ------------------------------------------------------------------ metadata --------
+    def metadata(self, frame: pd.DataFrame) -> dict[str, Any]:
+        """Build the traceability payload of a generation run.
+
+        Args:
+            frame: Generated data.
+
+        Returns:
+            JSON-serialisable metadata (seed, shape, dtypes, segment shares, churn by segment,
+            missing rate).
+        """
+        missing = frame.isna().sum()
+        payload: dict[str, Any] = {
+            "dataset_name": self.dataset_name,
+            "generator": type(self).__name__,
+            "seed": self.seed,
+            "reference_date": str(self.reference_date.date()),
+            "n_samples": int(len(frame)),
+            "n_columns": int(frame.shape[1]),
+            "dtypes": {str(column): str(dtype) for column, dtype in frame.dtypes.items()},
+            "missing_cells": int(missing.sum()),
+            "missing_rate": float(missing.sum()) / float(max(frame.size, 1)),
+            "missing_by_column": {
+                str(column): int(value) for column, value in missing.items() if value > 0
+            },
+            "options": {
+                "segment_blend_rate": self.segment_blend_rate,
+                "missing_rate": self.missing_rate,
+                "outlier_rate": self.outlier_rate,
+                "tenure_cap_months": self.tenure_cap_months,
+            },
+        }
+        if "latent_segment" in frame.columns:
+            shares = frame["latent_segment"].value_counts(normalize=True)
+            payload["latent_segment_shares"] = {
+                str(key): round(float(value), 4) for key, value in shares.items()
+            }
+        if "latent_segment" in frame.columns and "churned_next_90d" in frame.columns:
+            churn = frame.groupby("latent_segment")["churned_next_90d"].mean()
+            payload["churn_rate_by_latent_segment"] = {
+                str(key): round(float(value), 4) for key, value in churn.items()
+            }
+        revenue = frame["revenue_12m_eur"] if "revenue_12m_eur" in frame.columns else None
+        if revenue is not None:
+            payload["revenue"] = {
+                "median": float(revenue.median()),
+                "mean": float(revenue.mean()),
+                "std": float(revenue.std()),
+                "p95": float(revenue.quantile(0.95)),
+                "max": float(revenue.max()),
+                "zero_share": float((revenue <= 0).mean()),
+            }
+        return payload
+
+    @classmethod
+    def from_config(
+        cls, config: Mapping[str, Any], paths: ProjectPaths | None = None
+    ) -> SyntheticDataGenerator:
+        """Build a generator from the ``data`` configuration node.
+
+        Args:
+            config: Root configuration mapping (or the ``data`` node alone).
+            paths: Project layout (defaults to :meth:`ProjectPaths.from_root`).
+
+        Returns:
+            The configured generator.
+        """
+        # Même forme que les autres familles : `dict(...)` borne l'inférence mypy.
+        node = dict(config.get("data", config) or {})
+        layout = paths or ProjectPaths.from_root()
+        options = {
+            key: node[key] for key in cls.SUPPORTED_OPTIONS if key in node and node[key] is not None
+        }
+        return cls(
+            n_samples=int(node.get("n_samples", 6000)),
+            seed=int(config.get("seed", node.get("seed", 42))),
+            dataset_name=str(node.get("dataset_name", DEFAULT_DATASET_NAME)),
+            output_dir=layout.raw_dir,
+            formats=tuple(node.get("formats", ("parquet", "csv"))),
+            **options,
+        )
+
+
+def _normalise(weights: Sequence[float]) -> np.ndarray:
+    """Return a probability vector summing to one.
+
+    Args:
+        weights: Non-negative weights.
+
+    Returns:
+        The normalised weights.
+    """
+    values = np.asarray(weights, dtype="float64")
+    total = float(values.sum())
+    if total <= 0:
+        return np.full(len(values), 1.0 / max(len(values), 1))
+    return values / total
+
+
+__all__ = [
+    "CHANNELS",
+    "DEFAULT_DATASET_NAME",
+    "LOYALTY_TIERS",
+    "REGIONS",
+    "SEGMENTS",
+    "SEGMENT_PROFILES",
+    "SyntheticDataGenerator",
+]

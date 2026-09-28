@@ -1,0 +1,69 @@
+# =================================================================================================
+# Preprocessing & feature engineering
+# -------------------------------------------------------------------------------------------------
+# Décrit le pipeline appliqué aux données (nettoyage, encodage, scaling) ainsi que les features
+# dérivées construites par `src/features/build_features.py`.
+#
+# Règle d'or : tout ce qui est **appris** sur les données (moyennes, médianes, catégories,
+# encodeurs) doit être appris sur le train uniquement, puis appliqué au val/test. C'est le rôle
+# du pipeline scikit-learn encapsulé dans `src/preprocessing/pipelines.py`.
+# =================================================================================================
+
+numeric:
+  imputer: median
+  imputer_fill_value: 0.0
+  clip_outliers: true
+  clip_quantiles:
+  - 0.005
+  - 0.995
+  scaler: standard
+  log1p_columns:
+  - revenue_12m_eur
+  - orders_12m
+  - web_sessions_12m
+  - newsletter_opens_12m
+categorical:
+  imputer: most_frequent
+  imputer_fill_value: unknown
+  encoder: onehot
+  handle_unknown: ignore
+  min_frequency: 0.02
+  max_categories: 10
+features:
+- type: ratio
+  name: revenue_per_order
+  numerator: revenue_12m_eur
+  denominator: orders_12m
+  epsilon: 1.0
+- type: ratio
+  name: sessions_per_order
+  numerator: web_sessions_12m
+  denominator: orders_12m
+  epsilon: 1.0
+- type: bin
+  name: recency_bucket
+  column: recency_days
+  method: quantile
+  bins: 4
+- type: boolean_flag
+  name: is_dormant
+  column: recency_days
+  operator: gt
+  value: 180.0
+- type: boolean_flag
+  name: is_promo_sensitive
+  column: discount_share
+  operator: gt
+  value: 0.5
+- type: boolean_flag
+  name: has_complaints
+  column: support_tickets_12m
+  operator: gt
+  value: 2.0
+columns: {}
+validation:
+  raw: true
+  processed: true
+  inference: true
+  strict: true
+  lazy: false

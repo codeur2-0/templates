@@ -1,0 +1,1038 @@
+{#- Rapport d'évaluation clustering : verdict, profils de segments, validité externe, recommandations. -#}
+"""Report generation for an unsupervised segmentation.
+
+The report is written for a **business reader** (CRM lead) and a **technical reviewer** at the
+same time: every metric is followed by its reading, every cluster by its profile in raw units, and
+every conclusion by the criterion it satisfies or breaks.
+
+Three questions drive the structure:
+
+1. **la structure est-elle réelle ?** — silhouette, Calinski-Harabasz, Davies-Bouldin, comparaison
+   à une affectation aléatoire, choix de k documenté ;
+2. **les groupes sont-ils exploitables ?** — taille minimale, profils en unités brutes, drivers en
+   écarts-types, confiance des affectations ;
+3. **la segmentation sert-elle le métier ?** — validité externe (churn observé à 90 jours),
+   stabilité entre graines, actions CRM associées.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping
+
+import numpy as np
+import pandas as pd
+
+from src.evaluation.evaluator import EvaluationResult
+from src.utils.io import write_json, write_text
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+from src.visualization.plots import ClusteringPlots
+
+logger = get_logger(__name__)
+
+#: Titre du cas d'usage (injecté par le moteur de scaffolding depuis le manifeste).
+USE_CASE_TITLE = "{{ spec.title }}"
+
+#: Jeu de données évalué.
+DATASET_NAME = "{{ spec.data.dataset_name }}"
+
+#: Métrique pilotant la décision.
+PRIMARY_METRIC = "{{ spec.metrics.primary }}"
+
+#: Critères de succès du cas d'usage, injectés depuis `extras.quality` du manifeste et
+#: écrasables à l'exécution par `metrics.thresholds` dans la configuration Hydra.
+DEFAULT_THRESHOLDS: dict[str, float] = {
+    "silhouette_min": {{ extras.get("quality", {}).get("silhouette_min", 0.25) }},
+    "davies_bouldin_max": {{ extras.get("quality", {}).get("davies_bouldin_max", 1.6) }},
+    "calinski_harabasz_min": {{ extras.get("quality", {}).get("calinski_harabasz_min", 900.0) }},
+    "min_cluster_share": {{ extras.get("quality", {}).get("min_cluster_share", 0.03) }},
+    "stability_ari_min": {{ extras.get("quality", {}).get("stability_ari_min", 0.85) }},
+    "ari_latent_min": {{ extras.get("quality", {}).get("ari_latent_min", 0.45) }},
+    "churn_spread_min": {{ extras.get("quality", {}).get("churn_spread_min", 0.2) }},
+}
+
+#: Recommandations métier documentées pour ce cas d'usage (famille `clustering`).
+BUSINESS_RECOMMENDATIONS: tuple[str, ...] = (
+{% if spec.data.recommendations %}
+{{ py_string_tuple(spec.data.recommendations, indent=4, width=96) }}
+{% else %}
+    "Choisir le nombre de groupes par triangulation et tracer ce choix dans le rapport.",
+    "Publier l'affectation avec son niveau de confiance pour router les cas frontières.",
+{% endif %}
+)
+
+#: Nombre de drivers cités par segment dans le rapport.
+N_DRIVERS = 4
+
+#: Colonnes de profil privilégiées (unités brutes, lisibles par le métier).
+PROFILE_COLUMNS: tuple[str, ...] = (
+{% for column in spec.data.features[:8] %}
+    "{{ column.name }}",
+{% endfor %}
+)
+
+#: Marqueurs de colonnes **dérivées** (ratios, paliers calculés) : quand elles dominent un
+#: centroïde, la segmentation redécouvre une identité arithmétique plutôt qu'un comportement.
+DERIVED_MARKERS: tuple[str, ...] = ("per_", "share_of", "ratio", "avg_", "loyalty", "rate_")
+
+
+class ReportBuilder:
+    """Build the Markdown report, its JSON counterpart and the figures."""
+
+    def __init__(
+        self, paths: ProjectPaths | None = None, *, config: Mapping[str, Any] | None = None
+    ) -> None:
+        """Store the output layout and the configuration.
+
+        Args:
+            paths: Project layout (figures and reports directories).
+            config: Root configuration mapping, used to document the run.
+        """
+        self.paths = paths or ProjectPaths.from_root()
+        self.config: dict[str, Any] = dict(config or {})
+        self.plots = ClusteringPlots(self.paths.figures_dir)
+        metrics_node = dict(self.config.get("metrics") or {})
+        overrides = dict(metrics_node.get("thresholds") or {})
+        self.thresholds: dict[str, float] = {
+            **DEFAULT_THRESHOLDS,
+            **{str(key): _float(value) for key, value in overrides.items()},
+        }
+
+    # ------------------------------------------------------------------ public API ------
+    def build(
+        self,
+        result: EvaluationResult,
+        *,
+        model: Any = None,
+        thresholds: pd.DataFrame | None = None,
+        report_name: str | None = None,
+    ) -> dict[str, Path]:
+        """Generate every report artefact.
+
+        Args:
+            result: Evaluation result to document.
+            model: Optional model, used to document its identity.
+            thresholds: Accepted for API symmetry with the classification report; a clustering has
+                no decision threshold, so the argument is ignored.
+            report_name: Output Markdown file name.
+
+        Returns:
+            Mapping of artefact kind (``report``, ``json``, figure names) to path.
+        """
+        del thresholds  # aucune notion de seuil de décision en clustering
+        self.paths.ensure()
+        figures = self.plots.save_all(result)
+        markdown = self.render_markdown(result, figures=figures, model=model)
+
+        default_name = self._config_artifact("report_file", "evaluation_report.md")
+        report_path = self.paths.reports_dir / (report_name or default_name)
+        written: dict[str, Path] = {"report": write_text(report_path, markdown)}
+
+        json_path = self.paths.metrics_dir / "clustering_report.json"
+        written["json"] = write_json(
+            json_path,
+            {
+                **result.to_dict(),
+                "thresholds": self.thresholds,
+                "recommendations": self.recommendations(result),
+                "generated_at": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+                "figures": {
+                    key: str(path.relative_to(self.paths.root)) for key, path in figures.items()
+                },
+            },
+        )
+
+        profiles_path = self.paths.reports_dir / "segment_profiles.csv"
+        if not result.per_segment.empty:
+            result.per_segment.to_csv(profiles_path, index=False)
+            written["profiles"] = profiles_path
+
+        hardest_path = self.paths.reports_dir / "borderline_customers.csv"
+        if not result.errors.empty:
+            result.errors.to_csv(hardest_path, index=False)
+            written["hardest"] = hardest_path
+
+        rows = list(dict(result.curves or {}).get("k_selection", []) or [])
+        if rows:
+            k_path = self.paths.reports_dir / "k_selection.csv"
+            pd.DataFrame(rows).to_csv(k_path, index=False)
+            written["k_selection"] = k_path
+
+        logger.info("Rapport clustering généré : {}", report_path)
+        return written
+
+    def diagnostics(self, result: EvaluationResult) -> list[tuple[str, str]]:
+        """Return the data-driven diagnostics (title, detail) observed on this evaluation.
+
+        Public counterpart of :meth:`_diagnostics`: the notebooks and the report share the exact
+        same findings, so a conclusion printed in a notebook is always traceable to a threshold.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The diagnostics, most severe first (empty when nothing is flagged).
+        """
+        return self._diagnostics(result)
+
+    def recommendations(self, result: EvaluationResult) -> list[str]:
+        """Build the recommendation list: measured findings first, good practices next.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The recommendations, most urgent first.
+        """
+        dynamic = self._dynamic_recommendations(result)
+        return [*dynamic, *BUSINESS_RECOMMENDATIONS]
+
+    # ------------------------------------------------------------------ rendering -------
+    def render_markdown(
+        self,
+        result: EvaluationResult,
+        *,
+        figures: Mapping[str, Path] | None = None,
+        model: Any = None,
+    ) -> str:
+        """Render the Markdown report.
+
+        Args:
+            result: Evaluation result.
+            figures: Figure paths, keyed by figure name.
+            model: Optional model, documented in the header.
+
+        Returns:
+            The Markdown text.
+        """
+        figures = dict(figures or {})
+        generated = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        lines: list[str] = [
+            f"# Rapport de segmentation — {USE_CASE_TITLE}",
+            "",
+            f"*Généré le {generated} • split `{result.split}` • "
+            f"{result.n_samples} clients • jeu `{DATASET_NAME}` • non supervisé*",
+            "",
+        ]
+        lines += self._header_block(result, model)
+        lines += self._verdict_block(result)
+        lines += self._metrics_block(result)
+        lines += self._structure_block(result)
+        lines += self._profiles_block(result)
+        lines += self._drivers_block(result)
+        lines += self._external_block(result)
+        lines += self._hardest_block(result)
+        lines += self._hypotheses_block(result)
+        lines += self._recommendations_block(result)
+        lines += self._figures_block(figures)
+        lines += self._reproducibility_block(result)
+        lines += [
+            "## Limites assumées",
+            "",
+            "- Les données sont **synthétiques** et générées hors ligne : les niveaux de",
+            "  performance illustrent une méthode, pas une base clients réelle.",
+            "- `latent_segment` (structure injectée) et `churned_next_90d` sont des",
+            "  **métadonnées** : exclues des features par `drop_columns`, elles ne servent",
+            "  qu'au diagnostic. En production, aucune des deux n'existe à la segmentation.",
+            "- Une seule passe d'évaluation sur un split unique : la stabilité mesurée porte sur",
+            "  la graine d'initialisation, pas sur la dérive temporelle de la base clients.",
+            "- Le générateur mélange volontairement une partie des clients entre deux profils :",
+            "  une silhouette parfaite signerait une structure artificielle.",
+            "",
+        ]
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ sections --------
+    def _header_block(self, result: EvaluationResult, model: Any) -> list[str]:
+        """Render the model identity header."""
+        extras = dict(result.extras or {})
+        model_summary = str(extras.get("model") or getattr(model, "summary", lambda: "-")())
+        n_features = extras.get("n_features", "n/a")
+        lines = [
+            "## 1. Segmentation évaluée",
+            "",
+            f"- **Modèle** : `{model_summary}`",
+            f"- **Tâche** : `{result.task}` (aucune cible : apprentissage non supervisé)",
+            f"- **Features pré-traitées** : {n_features}",
+            f"- **Groupes produits** : {result.n_clusters}",
+            f"- **Métrique de décision** : `{result.primary_metric or PRIMARY_METRIC}`",
+            f"- **Observations évaluées** : {result.n_samples}",
+            "",
+        ]
+        confidence = dict(extras.get("confidence") or {})
+        if confidence:
+            readable = ", ".join(f"{key} {value:.1%}" for key, value in confidence.items())
+            lines += [f"- **Confiance des affectations** : {readable}", ""]
+        return lines
+
+    def _verdict_block(self, result: EvaluationResult) -> list[str]:
+        """Render the pass/fail verdict against the use-case success criteria."""
+        metrics = dict(result.metrics)
+        rows = [
+            (
+                "Silhouette moyenne",
+                _float(metrics.get("silhouette")),
+                f"≥ {self.thresholds['silhouette_min']:.2f}",
+                _float(metrics.get("silhouette")) >= self.thresholds["silhouette_min"],
+                "structure de groupes réelle (0 = affectation aléatoire)",
+            ),
+            (
+                "Davies-Bouldin",
+                _float(metrics.get("davies_bouldin")),
+                f"≤ {self.thresholds['davies_bouldin_max']:.2f}",
+                _float(metrics.get("davies_bouldin")) <= self.thresholds["davies_bouldin_max"],
+                "compacité / séparation (plus bas = mieux)",
+            ),
+            (
+                "Calinski-Harabasz",
+                _float(metrics.get("calinski_harabasz")),
+                f"≥ {self.thresholds['calinski_harabasz_min']:,.0f}",
+                _float(metrics.get("calinski_harabasz"))
+                >= self.thresholds["calinski_harabasz_min"],
+                "rapport variance inter / intra groupes",
+            ),
+            (
+                "Plus petit segment",
+                result.min_cluster_share * 100.0,
+                f"≥ {self.thresholds['min_cluster_share'] * 100.0:.0f} %",
+                result.min_cluster_share >= self.thresholds["min_cluster_share"],
+                "un micro-groupe n'est pas actionnable par le CRM",
+            ),
+            (
+                "Stabilité (ARI entre graines)",
+                result.stability_ari,
+                f"≥ {self.thresholds['stability_ari_min']:.2f}",
+                result.stability_ari >= self.thresholds["stability_ari_min"],
+                "une segmentation instable ne pilote pas de campagnes",
+            ),
+            (
+                "Accord avec la structure latente (ARI)",
+                result.ari_latent,
+                f"≥ {self.thresholds['ari_latent_min']:.2f}",
+                result.ari_latent >= self.thresholds["ari_latent_min"],
+                "diagnostic pédagogique (indisponible en production)",
+            ),
+            (
+                "Écart de churn entre segments",
+                result.churn_spread * 100.0,
+                f"≥ {self.thresholds['churn_spread_min'] * 100.0:.0f} points",
+                result.churn_spread >= self.thresholds["churn_spread_min"],
+                "validité externe : les groupes séparent-ils un risque réel ?",
+            ),
+        ]
+        passed = sum(1 for row in rows if row[3])
+        if passed == len(rows):
+            verdict = "**conforme**"
+        elif passed >= len(rows) - 2:
+            verdict = "**partiellement conforme**"
+        else:
+            verdict = "**non conforme**"
+        lines = [
+            "## 2. Verdict synthétique",
+            "",
+            f"{passed}/{len(rows)} critères de succès atteints — segmentation {verdict}.",
+            "",
+            "| Critère | Valeur | Seuil | Statut | Lecture |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for label, value, threshold, ok, reading in rows:
+            if ok:
+                status = "✅"
+            elif not np.isfinite(value):
+                status = "⚠️"
+            else:
+                status = "❌"
+            lines.append(f"| {label} | {_format(value)} | {threshold} | {status} | {reading} |")
+        lines.append("")
+        return lines
+
+    def _metrics_block(self, result: EvaluationResult) -> list[str]:
+        """Render the global metric table with a plain-language reading."""
+        metrics = dict(result.metrics)
+        readings = {
+            "silhouette": "part des clients nettement plus proches de leur groupe que d'un autre",
+            "calinski_harabasz": "séparation entre groupes rapportée à leur dispersion interne",
+            "davies_bouldin": "pire rapport dispersion interne / distance aux autres centres",
+            "n_clusters": "nombre de groupes non vides produits par le modèle",
+            "inertia": "somme des carrés des distances aux centres (sens uniquement relatif)",
+        }
+        lines = [
+            "## 3. Métriques globales",
+            "",
+            "| Métrique | Valeur | Lecture |",
+            "| --- | --- | --- |",
+        ]
+        for name, value in metrics.items():
+            lines.append(f"| `{name}` | {_format(value)} | {readings.get(name, '—')} |")
+        extras = dict(result.extras or {})
+        inertia = _float(extras.get("centroid_inertia"))
+        if np.isfinite(inertia):
+            lines.append(
+                f"| `inertie moyenne` | {_format(inertia)} "
+                "| distance quadratique moyenne au centre |"
+            )
+        baseline = {key: value for key, value in extras.items() if str(key).startswith("baseline")}
+        lines.append("")
+        if baseline:
+            readable = ", ".join(
+                f"`{str(key).removeprefix('baseline_')}` = {_format(value)}"
+                for key, value in baseline.items()
+            )
+            lines += [
+                f"**Plancher à battre** (affectation aléatoire de même taille) : {readable}.",
+                "Une silhouette proche de 0 signerait une structure absente : le modèle ne ferait",
+                "que découper du bruit.",
+                "",
+            ]
+        return lines
+
+    def _structure_block(self, result: EvaluationResult) -> list[str]:
+        """Render the k-selection table and the documented choice of k."""
+        rows = list(dict(result.curves or {}).get("k_selection", []) or [])
+        if not rows:
+            return [
+                "## 4. Choix du nombre de groupes",
+                "",
+                "Aucune exploration de k enregistrée.",
+                "",
+            ]
+        table = pd.DataFrame(rows)
+        lines = [
+            "## 4. Choix du nombre de groupes",
+            "",
+            "Le nombre de groupes est un **choix** argumenté, pas un optimum unique : les critères",
+            "statistiques et la lisibilité métier ne convergent pas toujours.",
+            "",
+            "| k | inertie | silhouette | Calinski-Harabasz | Davies-Bouldin | plus petit |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for _, row in table.iterrows():
+            smallest = _float(row.get("min_cluster_share")) * 100.0
+            lines.append(
+                f"| {int(_float(row.get('k')))} | {_format(row.get('inertia'), 0)} "
+                f"| {_format(row.get('silhouette'), 3)} "
+                f"| {_format(row.get('calinski_harabasz'), 0)} "
+                f"| {_format(row.get('davies_bouldin'), 3)} | {_format(smallest, 1)} % |"
+            )
+        lines.append("")
+        if bool(table["silhouette"].notna().any()):
+            best_row = table.loc[table["silhouette"].idxmax()]
+            best_k = int(_float(best_row.get("k")))
+            lines += [
+                f"- **Pic de silhouette** : k = {best_k} "
+                f"(silhouette {_format(best_row.get('silhouette'), 3)}).",
+                f"- **k retenu par le modèle livré** : {result.n_clusters}.",
+            ]
+            if result.n_clusters != best_k:
+                lines.append(
+                    "- L'écart est assumé : au-delà du pic statistique, chaque groupe "
+                    "supplémentaire coûte une campagne CRM et de la lisibilité. Le choix retenu "
+                    "privilégie l'exploitabilité, à silhouette quasi équivalente."
+                )
+            small = table[table["min_cluster_share"] < self.thresholds["min_cluster_share"]]
+            if not small.empty:
+                ks = ", ".join(str(int(_float(value))) for value in small["k"])
+                lines.append(
+                    f"- Les valeurs k = {ks} produisent un groupe sous le seuil "
+                    f"d'exploitabilité ({self.thresholds['min_cluster_share']:.0%}) : à écarter "
+                    "même si la silhouette y est meilleure."
+                )
+        lines.append("")
+        return lines
+
+    def _profiles_block(self, result: EvaluationResult) -> list[str]:
+        """Render the cluster profiles in raw business units."""
+        profiles = result.per_segment
+        if profiles.empty:
+            return ["## 5. Profils des segments", "", "Aucun profil exploitable.", ""]
+        columns = _profile_metric_columns(profiles)
+        lines = [
+            "## 5. Profils des segments",
+            "",
+            "Les valeurs sont en **unités brutes** (euros, jours, commandes), pas dans l'espace",
+            "standardisé du modèle : c'est ce que le CRM doit pouvoir lire.",
+            "",
+        ]
+        header = ["segment", "clients", "part"] + [_column_label(name) for name in columns]
+        if "churn_rate" in profiles.columns:
+            header.append("churn 90 j")
+        if "dominant_latent" in profiles.columns:
+            header.append("profil latent dominant")
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+        for _, row in profiles.iterrows():
+            cells = [
+                f"**{int(_float(row.get('cluster')))}**",
+                f"{int(_float(row.get('size'))):,}".replace(",", " "),
+                f"{_float(row.get('share')) * 100.0:.1f} %",
+            ]
+            cells += [_cell_text(name, row.get(name)) for name in columns]
+            if "churn_rate" in profiles.columns:
+                cells.append(_percent(row.get("churn_rate")))
+            if "dominant_latent" in profiles.columns:
+                purity = _float(row.get("latent_purity"))
+                label = str(row.get("dominant_latent") or "—")
+                cells.append(f"`{label}` ({purity:.0%})" if np.isfinite(purity) else f"`{label}`")
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
+        lines += self._profile_readings(profiles)
+        return lines
+
+    @staticmethod
+    def _profile_readings(profiles: pd.DataFrame) -> list[str]:
+        """Write the plain-language reading of the profile table (data-driven)."""
+        lines = ["**Lecture**", ""]
+        largest = profiles.iloc[0]
+        lines.append(
+            f"- Le segment **{int(_float(largest.get('cluster')))}** concentre "
+            f"{_float(largest.get('share')) * 100.0:.1f} % de la base : c'est le groupe "
+            "« standard », celui qu'une segmentation RFM artisanale produit presque entier."
+        )
+        if "churn_rate" in profiles.columns:
+            ranked = profiles.dropna(subset=["churn_rate"]).sort_values("churn_rate")
+            if len(ranked) >= 2:
+                best = ranked.iloc[0]
+                worst = ranked.iloc[-1]
+                spread = _float(worst.get("churn_rate")) - _float(best.get("churn_rate"))
+                lines.append(
+                    f"- Le churn à 90 jours va de {_float(best.get('churn_rate')) * 100.0:.1f} % "
+                    f"(segment {int(_float(best.get('cluster')))}), le plus sain, à "
+                    f"{_float(worst.get('churn_rate')) * 100.0:.1f} % (segment "
+                    f"{int(_float(worst.get('cluster')))}), le plus à risque : écart de "
+                    f"{spread * 100.0:.1f} points. La segmentation sépare un risque métier réel."
+                )
+        if "mean_silhouette" in profiles.columns:
+            weakest = profiles.sort_values("mean_silhouette").iloc[0]
+            lines.append(
+                f"- Le segment **{int(_float(weakest.get('cluster')))}** a la silhouette moyenne "
+                f"la plus faible ({_format(weakest.get('mean_silhouette'), 3)}) : ses membres "
+                "sont les plus proches d'un autre groupe, candidat naturel à une scission."
+            )
+        if "mean_distance" in profiles.columns:
+            farthest = profiles.sort_values("mean_distance", ascending=False).iloc[0]
+            lines.append(
+                f"- Le segment **{int(_float(farthest.get('cluster')))}** est le plus dispersé "
+                f"(distance moyenne au centre {_format(farthest.get('mean_distance'), 2)} en "
+                "espace standardisé) : groupe hétérogène, à surveiller en priorité."
+            )
+        revenue_column = next(
+            (name for name in profiles.columns if str(name).endswith("revenue_12m_eur")), None
+        )
+        if revenue_column:
+            total = float(profiles[revenue_column].mul(profiles["share"]).sum())
+            if total > 0:
+                ranked = profiles.assign(
+                    contribution=profiles[revenue_column] * profiles["share"] / total
+                ).sort_values("contribution", ascending=False)
+                top = ranked.iloc[0]
+                lines.append(
+                    f"- Concentration de la valeur : le segment "
+                    f"**{int(_float(top.get('cluster')))}** pèse "
+                    f"{_float(top.get('contribution')) * 100.0:.1f} % du chiffre d'affaires "
+                    f"pour {_float(top.get('share')) * 100.0:.1f} % des clients. C'est "
+                    "l'argument de priorisation des investissements CRM."
+                )
+        lines.append("")
+        return lines
+
+    def _drivers_block(self, result: EvaluationResult) -> list[str]:
+        """Render what defines each cluster, in standard deviations from the average customer."""
+        importance = result.feature_importance
+        if not isinstance(importance, pd.DataFrame) or importance.empty:
+            return [
+                "## 6. Ce qui définit chaque segment",
+                "",
+                "Aucun centroïde exploitable (algorithme sans centre, ou features absentes).",
+                "",
+            ]
+        lines = [
+            "## 6. Ce qui définit chaque segment",
+            "",
+            "Les coordonnées sont exprimées en **écarts-types par rapport au client moyen** (les",
+            "features sont standardisées par le pré-traitement) : un `+1,8` sur la part",
+            "promotionnelle signifie « 1,8 écart-type au-dessus de la moyenne », ce qui rend les",
+            "groupes lisibles sans ouvrir de tableur.",
+            "",
+        ]
+        for cluster, group in importance.groupby("cluster", observed=True):
+            top = group.sort_values("rank").head(N_DRIVERS)
+            drivers = ", ".join(
+                f"`{row['feature']}` {row['centroid_z']:+.2f} ET" for _, row in top.iterrows()
+            )
+            lines.append(f"- **Segment {int(_float(cluster))}** — {drivers}")
+        lines.append("")
+        circular = _circular_features(importance)
+        if circular:
+            lines += [
+                f"**Vigilance** : {circular} dominent certains segments alors qu'elles sont "
+                "dérivées d'autres variables (redondance ou règle métier). Une segmentation "
+                "pilotée par ces colonnes redécouvre une règle existante plutôt qu'un "
+                "comportement.",
+                "",
+            ]
+        return lines
+
+    def _external_block(self, result: EvaluationResult) -> list[str]:
+        """Render external validity (latent agreement) and stability."""
+        extras = dict(result.extras or {})
+        external = dict(extras.get("external_validity") or {})
+        stability = dict(extras.get("stability") or {})
+        lines = ["## 7. Validité externe et stabilité", ""]
+
+        ari = _float(external.get("ari_latent"))
+        if np.isfinite(ari):
+            lines += [
+                "**Accord avec la structure latente injectée par le générateur** (diagnostic "
+                "pédagogique — cette colonne n'existe pas en production) :",
+                "",
+                f"- ARI = {_format(ari, 3)} (1 = accord parfait, 0 = hasard), "
+                f"NMI = {_format(external.get('nmi_latent'), 3)}, "
+                f"V-measure = {_format(external.get('v_measure_latent'), 3)}.",
+            ]
+            purity = _mean_purity(result.per_segment)
+            if np.isfinite(purity):
+                lines.append(
+                    f"- Pureté moyenne des segments : {purity:.0%} (part du profil latent "
+                    "dominant dans chaque groupe, pondérée par la taille)."
+                )
+            if ari < self.thresholds["ari_latent_min"]:
+                lines.append(
+                    f"- Sous le seuil du cas d'usage "
+                    f"({self.thresholds['ari_latent_min']:.2f}) : les groupes découverts ne "
+                    "recoupent pas les profils injectés. Causes probables : k mal choisi, "
+                    "échelle des features, ou chevauchement réel."
+                )
+            lines.append("")
+
+        churn = dict(external.get("churn_by_cluster") or {})
+        if churn:
+            readable = ", ".join(
+                f"segment {key} : {_float(value) * 100.0:.1f} %"
+                for key, value in sorted(churn.items())
+            )
+            lines += [
+                "**Churn observé à 90 jours** (généré après l'instantané, jamais utilisé comme "
+                "feature) :",
+                "",
+                f"- {readable}.",
+                "- Écart entre le segment le plus sain et le plus à risque : "
+                f"{_float(external.get('churn_spread')) * 100.0:.1f} points.",
+                "",
+            ]
+
+        if stability:
+            per_seed = dict(stability.get("per_seed") or {})
+            readable = ", ".join(
+                f"graine {seed} : {_format(value, 3)}" for seed, value in per_seed.items()
+            )
+            lines += [
+                "**Stabilité des affectations** (ré-entraînements sur d'autres graines, mesurée "
+                "par l'ARI contre l'affectation de référence) :",
+                "",
+                f"- ARI moyen = {_format(stability.get('mean_ari'), 3)}, "
+                f"minimum = {_format(stability.get('min_ari'), 3)} ({readable}).",
+            ]
+            mean_ari = _float(stability.get("mean_ari"))
+            if np.isfinite(mean_ari) and mean_ari < self.thresholds["stability_ari_min"]:
+                lines.append(
+                    f"- Sous le seuil du cas d'usage "
+                    f"({self.thresholds['stability_ari_min']:.2f}) : les clients changent de "
+                    "groupe d'un entraînement à l'autre. Une campagne CRM pilotée sur cette "
+                    "segmentation enverrait des messages contradictoires."
+                )
+            else:
+                lines.append(
+                    "- Au-dessus du seuil : l'affectation d'un client est reproductible, "
+                    "condition nécessaire pour piloter des campagnes."
+                )
+            lines.append("")
+        return lines
+
+    def _hardest_block(self, result: EvaluationResult) -> list[str]:
+        """Render the least reliable assignments."""
+        errors = result.errors
+        if errors.empty:
+            return [
+                "## 8. Affectations les moins fiables",
+                "",
+                "Aucune affectation enregistrée.",
+                "",
+            ]
+        columns = _hardest_columns(errors)
+        lines = [
+            "## 8. Affectations les moins fiables",
+            "",
+            "Clients dont la silhouette individuelle est la plus faible : ils sont proches de la",
+            "frontière entre deux groupes. En production, ces lignes doivent déclencher une règle",
+            "métier (campagne générique, revue humaine) plutôt qu'un message ciblé.",
+            "",
+            "| " + " | ".join(columns) + " |",
+            "| " + " | ".join(["---"] * len(columns)) + " |",
+        ]
+        for _, row in errors.head(15).iterrows():
+            lines.append("| " + " | ".join(_cell_text(name, row.get(name)) for name in columns) + " |")
+        silhouette = pd.to_numeric(errors["silhouette"], errors="coerce")
+        negative = float((silhouette < 0).mean()) if len(silhouette) else float("nan")
+        lines += [
+            "",
+            f"Parmi ces {len(errors)} clients, {negative:.0%} ont une silhouette négative : leur "
+            "groupe d'affectation n'est pas le plus proche.",
+            "",
+        ]
+        return lines
+
+    def _hypotheses_block(self, result: EvaluationResult) -> list[str]:
+        """Render the causal hypotheses explaining the observed weaknesses."""
+        lines = ["## 9. Hypothèses sur les causes", ""]
+        findings = self._diagnostics(result)
+        if not findings:
+            lines += [
+                "Aucun signal de faiblesse marqué : la structure est nette, les groupes sont",
+                "équilibrés, stables et séparés en validité externe.",
+                "",
+            ]
+            return lines
+        for title, detail in findings:
+            lines.append(f"- **{title}** — {detail}")
+        lines.append("")
+        return lines
+
+    def _diagnostics(self, result: EvaluationResult) -> list[tuple[str, str]]:
+        """Data-driven diagnostics feeding hypotheses and recommendations."""
+        findings: list[tuple[str, str]] = []
+        metrics = dict(result.metrics)
+        extras = dict(result.extras or {})
+        profiles = result.per_segment
+
+        silhouette = _float(metrics.get("silhouette"))
+        if np.isfinite(silhouette) and silhouette < self.thresholds["silhouette_min"]:
+            findings.append(
+                (
+                    "Chevauchement réel des comportements",
+                    f"silhouette {silhouette:.3f} sous le seuil "
+                    f"{self.thresholds['silhouette_min']:.2f}. Les groupes se recouvrent : soit k "
+                    "est trop grand (on découpe un continuum), soit des variables redondantes "
+                    "écrasent la géométrie, soit le bruit individuel domine.",
+                )
+            )
+        degenerate = list(result.degenerate_clusters)
+        if degenerate and not profiles.empty:
+            shares = ", ".join(
+                f"{int(_float(row.get('cluster')))} ({_float(row.get('share')) * 100.0:.1f} %)"
+                for _, row in profiles.iterrows()
+                if int(_float(row.get("cluster"))) in degenerate
+            )
+            findings.append(
+                (
+                    "Groupes dégénérés",
+                    f"le(s) segment(s) {shares} sont sous le seuil "
+                    f"{self.thresholds['min_cluster_share']:.0%}. Cause typique : quelques "
+                    "clients d'exception attirent un centroïde à eux seuls, d'où la nécessité du "
+                    "winsorising et d'une lecture par la médiane.",
+                )
+            )
+        stability_ari = _float(dict(extras.get("stability") or {}).get("mean_ari"))
+        if np.isfinite(stability_ari) and stability_ari < self.thresholds["stability_ari_min"]:
+            findings.append(
+                (
+                    "Instabilité des affectations",
+                    f"ARI moyen {stability_ari:.3f} entre graines. KMeans converge vers des "
+                    "optima locaux différents : augmenter `n_init`, réduire k, ou passer à un "
+                    "modèle moins sensible à l'initialisation (GaussianMixture).",
+                )
+            )
+        external = dict(extras.get("external_validity") or {})
+        churn_spread = _float(external.get("churn_spread"))
+        if np.isfinite(churn_spread) and churn_spread < self.thresholds["churn_spread_min"]:
+            findings.append(
+                (
+                    "Faible validité externe",
+                    f"écart de churn de {churn_spread * 100.0:.1f} points seulement entre "
+                    "segments. La géométrie est peut-être correcte mais elle ne sépare aucun "
+                    "enjeu métier : il manque des variables comportementales (récence fine, "
+                    "pression SAV, sensibilité promotionnelle) ou k est trop petit.",
+                )
+            )
+        ari_latent = _float(external.get("ari_latent"))
+        if np.isfinite(ari_latent) and ari_latent < self.thresholds["ari_latent_min"]:
+            findings.append(
+                (
+                    "Découpage différent de la structure latente",
+                    f"ARI latent {ari_latent:.3f}. Ce n'est pas nécessairement un échec : "
+                    "l'algorithme peut avoir trouvé une autre découpe légitime (par valeur plutôt "
+                    "que par comportement). La comparaison des profils bruts tranche.",
+                )
+            )
+        frame = result.predictions
+        if not frame.empty and "silhouette" in frame.columns:
+            values = pd.to_numeric(frame["silhouette"], errors="coerce")
+            negative = float((values < 0).mean()) if len(values) else 0.0
+            if negative > 0.10:
+                findings.append(
+                    (
+                        "Frontières floues",
+                        f"{negative:.0%} des clients ont une silhouette négative (plus proches "
+                        "d'un autre groupe). C'est la signature d'un mélange réel entre profils : "
+                        "traiter ces clients par une règle métier plutôt que par une campagne.",
+                    )
+                )
+        circular = _circular_features(result.feature_importance)
+        if circular:
+            findings.append(
+                (
+                    "Variables circulaires ou redondantes",
+                    f"{circular} dominent des centroïdes alors qu'elles sont dérivées d'autres "
+                    "colonnes. Elles gonflent artificiellement la séparation : à exclure des "
+                    "features ou à documenter explicitement.",
+                )
+            )
+        return findings
+
+    def _recommendations_block(self, result: EvaluationResult) -> list[str]:
+        """Render the recommendations (data-driven first, then good practices)."""
+        lines = ["## 10. Recommandations", ""]
+        for index, item in enumerate(self.recommendations(result), start=1):
+            lines.append(f"{index}. {item}")
+        lines.append("")
+        return lines
+
+    def _dynamic_recommendations(self, result: EvaluationResult) -> list[str]:
+        """Recommendations triggered by the diagnostics actually observed."""
+        extras = dict(result.extras or {})
+        metrics = dict(result.metrics)
+        items: list[str] = []
+        degenerate = list(result.degenerate_clusters)
+        if degenerate:
+            items.append(
+                f"Fusionner ou retraiter le(s) segment(s) {degenerate} (sous "
+                f"{self.thresholds['min_cluster_share']:.0%} de la base) : winsoriser les "
+                "variables de montant, ou dédier une détection d'anomalies aux clients "
+                "d'exception plutôt qu'un groupe de segmentation."
+            )
+        if _float(metrics.get("silhouette")) < self.thresholds["silhouette_min"]:
+            items.append(
+                "Réduire k ou enrichir l'espace de description (variables comportementales "
+                "manquantes) avant de publier la segmentation : un découpage trop fin sur une "
+                "structure floue produit des groupes non reproductibles."
+            )
+        stability_ari = _float(dict(extras.get("stability") or {}).get("mean_ari"))
+        if stability_ari < self.thresholds["stability_ari_min"]:
+            items.append(
+                "Stabiliser l'entraînement avant mise en production : augmenter `n_init`, fixer "
+                "la graine dans la configuration, et comparer KMeans / GaussianMixture sur l'ARI "
+                "inter-graines plutôt que sur la seule silhouette."
+            )
+        external = dict(extras.get("external_validity") or {})
+        if _float(external.get("churn_spread")) < self.thresholds["churn_spread_min"]:
+            items.append(
+                "Re-jouer la segmentation avec des variables prédictives du churn (récence fine, "
+                "tendance de fréquence sur 3 mois, pression SAV) : la validité externe est le "
+                "critère que le CRM regarde en premier."
+            )
+        frame = result.predictions
+        if not frame.empty and "confidence" in frame.columns:
+            weak = float((frame["confidence"] == "faible").mean())
+            if weak > 0.10:
+                items.append(
+                    f"Router les {weak:.0%} de clients à confiance faible vers une campagne "
+                    "générique (ou une revue manuelle) : une affectation fragile coûte plus en "
+                    "expérience client qu'elle ne rapporte en ciblage."
+                )
+        return items
+
+    def _figures_block(self, figures: Mapping[str, Path]) -> list[str]:
+        """Render the figure gallery."""
+        if not figures:
+            return ["## 11. Figures", "", "Aucune figure générée.", ""]
+        captions = {
+            "cluster_map": "Carte ACP des clients, colorée par segment (chevauchements visibles).",
+            "k_selection": (
+                "Choix de k : silhouette, Davies-Bouldin, coude d'inertie et taille du plus "
+                "petit groupe."
+            ),
+            "silhouette_distribution": (
+                "Silhouette individuelle : part des clients plus proches d'un autre groupe."
+            ),
+            "cluster_sizes": "Taille des segments et seuil d'exploitabilité.",
+            "profile_heatmap": (
+                "Profil des segments en écarts-types (ce qui définit chaque groupe)."
+            ),
+            "churn_by_cluster": "Validité externe : churn à 90 jours par segment.",
+            "confidence_breakdown": (
+                "Confiance des affectations et distribution des distances au centre."
+            ),
+        }
+        lines = ["## 11. Figures", ""]
+        for name, path in figures.items():
+            relative = path.relative_to(self.paths.root) if path.is_absolute() else path
+            lines += [f"![{name}]({relative.as_posix()})", "", f"*{captions.get(name, name)}*", ""]
+        return lines
+
+    def _reproducibility_block(self, result: EvaluationResult) -> list[str]:
+        """Render the reproducibility footer."""
+        extras = dict(result.extras or {})
+        model_node = dict(self.config.get("model") or {})
+        data_node = dict(self.config.get("data") or {})
+        stability = dict(extras.get("stability") or {})
+        seeds = sorted(int(value) for value in dict(stability.get("per_seed") or {}))
+        preprocessing_node = dict(self.config.get("preprocessing") or {})
+        lines = [
+            "## 12. Reproductibilité",
+            "",
+            f"- Algorithme : `{model_node.get('algorithm', 'n/a')}` "
+            f"(paramètres : `{model_node.get('params', {})}`).",
+            f"- Graine du modèle : `{self.config.get('seed', 'n/a')}` ; "
+            f"graines de stabilité : `{seeds}`.",
+            f"- Jeu de données : `{data_node.get('dataset_name', DATASET_NAME)}` "
+            f"({data_node.get('n_samples', 'n/a')} lignes, seed {data_node.get('seed', 'n/a')}).",
+            f"- Split évalué : `{result.split}` ({result.n_samples} clients).",
+            f"- Pré-traitement : `{preprocessing_node.get('numeric', {})}`.",
+            "- Commande de reproduction : `python -m src.main mode=all`.",
+            "",
+        ]
+        return lines
+
+    # ------------------------------------------------------------------ helpers ---------
+    def _config_artifact(self, key: str, default: str) -> str:
+        """Read an artefact file name from the configuration, with a documented default."""
+        artifacts = dict((self.config.get("train") or {}).get("artifacts") or {})
+        return str(artifacts.get(key, default))
+
+
+def _profile_metric_columns(profiles: pd.DataFrame) -> list[str]:
+    """Select the raw-unit columns worth displaying in the profile table."""
+    candidates = [f"mean_{name}" for name in PROFILE_COLUMNS]
+    selected = [name for name in candidates if name in profiles.columns]
+    if len(selected) >= 5:
+        return selected[:8]
+    # Repli : toutes les moyennes numériques disponibles, dans l'ordre de la table.
+    numeric = [
+        str(name)
+        for name in profiles.columns
+        if str(name).startswith("mean_") and pd.api.types.is_numeric_dtype(profiles[name])
+    ]
+    return numeric[:8]
+
+
+def _column_label(name: str) -> str:
+    """Human-readable column label (``mean_revenue_12m_eur`` -> ``revenue 12m eur``)."""
+    return str(name).removeprefix("mean_").replace("_", " ")
+
+
+def _circular_features(importance: Any) -> str:
+    """Detect derived/redundant features dominating the centroids.
+
+    A feature whose name is built from another one (``revenue_per_order``, ``avg_basket_eur``,
+    ``loyalty_tier``) is derived: when it tops a centroid, the segmentation is partly
+    rediscovering an arithmetic identity or a business rule instead of a behaviour.
+
+    Args:
+        importance: Centroid table produced by the evaluator.
+
+    Returns:
+        A readable list of the offending features (empty string when none).
+    """
+    if not isinstance(importance, pd.DataFrame) or importance.empty:
+        return ""
+    if not {"feature", "rank"}.issubset(importance.columns):
+        return ""
+    ranks = pd.to_numeric(importance["rank"], errors="coerce")
+    top = importance[ranks <= 2]
+    offenders = sorted(
+        {
+            str(name)
+            for name in top["feature"]
+            if any(marker in str(name) for marker in DERIVED_MARKERS)
+        }
+    )
+    return ", ".join(f"`{name}`" for name in offenders[:4])
+
+
+def _mean_purity(profiles: pd.DataFrame) -> float:
+    """Size-weighted mean purity of the clusters against the latent profile."""
+    if profiles.empty or "latent_purity" not in profiles.columns:
+        return float("nan")
+    purity = pd.to_numeric(profiles["latent_purity"], errors="coerce")
+    sizes = pd.to_numeric(profiles["size"], errors="coerce")
+    mask = purity.notna() & sizes.notna()
+    total = float(sizes[mask].sum())
+    if total <= 0:
+        return float("nan")
+    return float((purity[mask] * sizes[mask]).sum() / total)
+
+
+def _hardest_columns(errors: pd.DataFrame) -> list[str]:
+    """Columns displayed for the least reliable assignments."""
+    preferred = ("cluster", "silhouette", "distance_to_centroid", "margin", "confidence")
+    selected = [name for name in preferred if name in errors.columns]
+    for name in errors.columns:
+        if len(selected) >= 8:
+            break
+        if name not in selected and not str(name).startswith("second_best"):
+            selected.append(str(name))
+    return selected
+
+
+def _cell_text(column: str, value: Any) -> str:
+    """Format a profile/error cell according to its column semantics."""
+    name = str(column)
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return "—"
+    if isinstance(value, (bool, np.bool_)):
+        return "oui" if bool(value) else "non"
+    if name == "silhouette":
+        return f"{_float(value):+.3f}"
+    if name in {"distance_to_centroid", "margin", "centroid_z", "mean_distance"}:
+        return f"{_float(value):.3f}"
+    if name in {"share", "churn_rate", "latent_purity", "membership"}:
+        return f"{_float(value) * 100.0:.1f} %"
+    if name.startswith("mean_"):
+        return _amount_or_count(name.removeprefix("mean_"), _float(value))
+    if isinstance(value, (int, np.integer)):
+        return f"{int(value):,}".replace(",", " ")
+    if isinstance(value, (float, np.floating)):
+        return _format(value, 2)
+    return str(value)
+
+
+def _amount_or_count(name: str, value: float) -> str:
+    """Format a raw-unit mean (euros, days, counts) with the right precision."""
+    if not np.isfinite(value):
+        return "—"
+    if name.endswith("_eur"):
+        return f"{value:,.0f} €".replace(",", " ")
+    if "rate" in name or "share" in name:
+        return f"{value * 100.0:.1f} %"
+    if "days" in name or name.endswith("_months"):
+        return f"{value:,.0f}".replace(",", " ")
+    return f"{value:,.2f}".replace(",", " ")
+
+
+def _percent(value: Any) -> str:
+    """Format a 0-1 ratio as a percentage."""
+    number = _float(value)
+    return "—" if not np.isfinite(number) else f"{number * 100.0:.1f} %"
+
+
+def _float(value: Any) -> float:
+    """Coerce a value to ``float`` (``NaN`` when not numeric)."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _format(value: Any, digits: int = 3) -> str:
+    """Format a metric value with a fixed precision (``—`` when undefined)."""
+    number = _float(value)
+    if not np.isfinite(number):
+        return "—"
+    if digits == 0:
+        return f"{number:,.0f}".replace(",", " ")
+    return f"{number:,.{digits}f}".replace(",", " ")
+
+
+__all__ = ["DEFAULT_THRESHOLDS", "ReportBuilder"]

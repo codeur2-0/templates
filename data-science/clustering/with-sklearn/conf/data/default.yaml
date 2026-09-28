@@ -1,0 +1,47 @@
+# =================================================================================================
+# Données : Base clients e-commerce et comportement d'achat sur 12 mois
+# -------------------------------------------------------------------------------------------------
+# Population de clients d'un e-commerçant (mode et maison) avec leurs agrégats comportementaux sur
+# douze mois glissants. Les données sont générées à partir de **six profils latents** (VIP fidèle,
+# chasseur de promotions, acheteur occasionnel, dormeur, nouveau curieux, client insatisfait) :
+# chaque profil définit des distributions propres (fréquence, panier, part promotionnelle, taux de
+# retour, engagement), puis un bruit individuel et des chevauchements volontaires sont injectés.
+# La structure est donc réelle mais **non triviale** : les groupes se recouvrent partiellement, ce
+# qui rend le choix du nombre de clusters et la lecture de la silhouette authentiquement
+# difficiles. Deux colonnes de métadonnées (segment latent et churn observé à 90 jours) permettent
+# de mesurer la qualité de la segmentation sans jamais entrer dans les features.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: retail_customer_base
+n_samples: 6000
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: null              # apprentissage non supervisé : pas de cible
+id_column: customer_id
+time_column: signup_date
+group_column: acquisition_channel
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['customer_id', 'signup_date', 'last_order_date', 'latent_segment', 'churned_next_90d']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)

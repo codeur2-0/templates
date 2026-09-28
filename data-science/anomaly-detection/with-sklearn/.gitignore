@@ -1,0 +1,55 @@
+# ==============================================================================================
+# payment-fraud-detection-sklearn — ignore rules
+# ==============================================================================================
+
+# --- Python -----------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# --- Environnements virtuels ------------------------------------------------------------------
+.venv/
+venv/
+env/
+
+# --- Caches d'outillage -----------------------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- Sorties Hydra ----------------------------------------------------------------------------
+outputs/
+multirun/
+*.log
+
+# --- Données générées (reproductibles via `make data`) ----------------------------------------
+data/raw/*
+data/processed/*
+data/external/*
+!data/**/.gitkeep
+!data/README.md
+
+# --- Artefacts générés (reproductibles via `make train` / `make evaluate`) --------------------
+artifacts/models/*
+artifacts/reports/*
+artifacts/figures/*
+artifacts/metrics/*
+!artifacts/**/.gitkeep
+*.joblib
+*.pkl
+*.pt
+*.pth
+*.keras
+*.h5
+
+# --- Secrets ----------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example

@@ -1,0 +1,146 @@
+# ==============================================================================================
+# data-science / anomaly-detection / with-sklearn
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/anomaly_detection.yaml` (fraude sur transactions de
+# paiement d'un PSP français). Ce manifeste ne décrit QUE ce qui change avec la stack : identité du
+# projet, modèle et point de fonctionnement.
+# ==============================================================================================
+
+key: ds-anomaly-sklearn
+title: "Détection de fraude sur transactions de paiement avec scikit-learn"
+summary: >-
+  Pipeline tabulaire de bout en bout (flux de paiements synthétique -> contrats Pandera -> feature
+  engineering de vélocité et de contexte -> forêt d'isolation entraînée SANS étiquette -> PR AUC,
+  lift et rappel au budget d'investigation, couverture par mode opératoire, scoring des nouvelles
+  transactions avec décision, niveau de risque et raisons) pour une équipe Risques & Fraude,
+  entièrement piloté par Hydra et structuré en objets testables. Les étiquettes de fraude
+  (`is_fraud`, `fraud_scheme`) sont des métadonnées : elles servent à mesurer, jamais à entraîner.
+
+family: anomaly_detection
+domain: data-science
+problem: anomaly-detection
+stack: sklearn
+project_slug: payment-fraud-detection-sklearn
+package_name: fraud_sklearn
+
+model:
+  display_name: "Forêt d'isolation (Isolation Forest)"
+  algorithm: isolation_forest
+  rationale: >-
+    La forêt d'isolation est le détecteur de référence pour un premier système de scoring de
+    fraude : elle ne fait **aucune hypothèse de distribution**, produit un score continu et
+    ordonnable (indispensable pour piloter au budget), passe à l'échelle (entraînement linéaire,
+    inférence en quelques millisecondes par transaction) et reste déterministe à graine fixée.
+    Son principe — une anomalie est plus facile à isoler par des coupes aléatoires — correspond
+    exactement à la structure de la fraude bancaire : vélocité explosive, empreinte d'appareil
+    neuve, géographie incohérente sont des points peu denses. Ce projet documente aussi ses
+    limites : elle est aveugle à la **fraude amicale** (transaction légitime dans sa forme) et
+    sensible aux variables non pertinentes quand `max_features` est trop élevé. La comparaison
+    avec un one-class SVM et un Elliptic Envelope, au notebook 04, montre ce que l'on gagne
+    (robustesse, coût) et ce que l'on perd (frontière de densité explicite).
+  alternatives:
+    - "one_class_svm : frontière de densité explicite et noyau RBF, mais coût quadratique — inutilisable sur des millions de transactions sans échantillonnage"
+    - "elliptic_envelope : robuste et très rapide, mais suppose une distribution gaussienne multivariée, ce que des montants log-normaux et des vélocités de Poisson violent"
+    - "local_outlier_factor : capture les anomalies relatives à un voisinage (utile pour la prise de compte), mais ne se généralise pas à de nouvelles transactions sans `novelty=True`"
+    - "auto-encodeur (voir `data-science/anomaly-detection/with-pytorch`) : apprend une variété normale et score l'erreur de reconstruction, plus expressif sur des interactions non linéaires"
+  params:
+    # 500 arbres plutôt que 300 : à `max_features` égal, l'écart-type de la PR AUC entre 5 graines
+    # passe de 0,023 à 0,003 (mesuré sur la validation). On paie 0,014 de PR AUC moyenne pour un
+    # classement reproductible — c'est ce qui permet de défendre la file d'alertes devant le métier.
+    n_estimators: 500
+    # Sous-échantillonnage : c'est le cœur de la méthode (l'isolation se mesure sur des
+    # échantillons de taille fixe, pas sur le flux complet). 0.8 plutôt que 0.5 : à `max_features`
+    # égal et sur 5 graines, la PR AUC moyenne est identique (0,6485 contre 0,6495 — écart 30 fois
+    # plus petit que la dispersion) mais l'écart-type passe de 0,011 à 0,003. On achète la
+    # stabilité de la file d'alertes, pas un dixième de point de PR AUC.
+    max_samples: 0.8
+    # Part d'anomalies supposée a priori : elle déplace le seuil interne, pas le classement.
+    # Alignée sur le budget d'investigation réel (2 % du flux), pas sur la prévalence inconnue.
+    contamination: 0.02
+    # Nombre de variables tirées **par coupe**. La matrice livrée compte 51 colonnes, dont une
+    # quarantaine de modalités one-hot peu informatives prises une à une : couper sur 2 variables
+    # force la forêt à combiner des signaux (vélocité x empreinte d'appareil, montant x pays) au
+    # lieu de se reposer sur la seule vélocité. Sélection sur la validation, 5 graines :
+    # PR AUC 0,649 à 2 features, 0,632 à 3, 0,625 à 4, 0,619 à 10 % (≈5), 0,487 à 20 % (≈10).
+    # La valeur est un ENTIER (pas une fraction) : le réglage reste identique si le preprocessing
+    # change le nombre de colonnes, ce qu'une fraction silencieuse ne garantirait pas.
+    max_features: 2
+    n_jobs: -1
+    random_state: 42
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 2 min).
+  notebook_param_grid:
+    n_estimators: [200, 500]
+    max_samples: [0.5, 0.8]
+    # Autour du réglage retenu (2) : assez bas pour montrer le gain, assez haut pour montrer la
+    # dégradation quand la forêt se repose sur les modalités one-hot les plus bruyantes.
+    max_features: [2, 5, 12]
+  # Taille des fixtures pytest (petit dataset = suite rapide, mais assez de lignes pour que le
+  # split de test contienne quelques fraudes : les métriques de rang doivent rester calculables).
+  test_n_samples: 3000
+  # Date de début de la fenêtre d'observation du flux (90 jours glissants).
+  reference_date: "2025-01-06"
+  # Options du générateur synthétique, exposées dans `conf/data/default.yaml` et transmises par
+  # `_generator_options` du pipeline de données (aucune valeur codée en dur dans le code).
+  data_conf:
+    fraud_rate: 0.018
+    window_days: 90
+    legit_outlier_rate: 0.025
+    missing_device_rate: 0.04
+    missing_session_rate: 0.06
+    missing_distance_rate: 0.05
+  # Critères de succès du cas d'usage, lus par le rapport d'évaluation.
+  #
+  # Calibration : avec une prévalence de 1,8 %, le plancher d'une PR AUC est 0,018 (score
+  # aléatoire). Les seuils ci-dessous sont calibrés sur les mesures réelles de ce générateur
+  # (forêt d'isolation, 12 000 transactions, seed 42) : PR AUC 0,67, ROC AUC 0,95, rappel au
+  # budget 0,61, précision au budget 0,71, lift 30x. Le générateur injecte volontairement du
+  # bruit irréductible (fraudes sans signature) et des outliers légitimes (luxe, voyageurs,
+  # paiements d'entreprise) : une PR AUC de 0,9 signerait une fuite, pas une performance. Une
+  # marge d'environ 0,10 de PR AUC et 0,07 de rappel est laissée sous la mesure pour absorber la
+  # dispersion entre graines (~0,02 de PR AUC) et la petite taille des splits (56 fraudes en test).
+  # Le critère de couverture porte sur le NOMBRE de schémas au-dessus du plancher (3 sur 4) : la
+  # fraude amicale est le plafond structurel d'un détecteur transactionnel (voir rapport, §7).
+  quality:
+    pr_auc_min: 0.42
+    roc_auc_min: 0.90
+    recall_at_budget_min: 0.45
+    precision_at_budget_min: 0.50
+    lift_at_budget_min: 20.0
+    scheme_recall_floor: 0.30
+    covered_schemes_min: 3
+  model_conf:
+    # Aucune cible : la validation croisée supervisée n'a pas de sens ici. La robustesse se mesure
+    # autrement (stabilité du classement entre graines, hold-out de test, arbitrage au budget).
+    cross_validation:
+      enabled: false
+      folds: 3
+      strategy: kfold
+  root_conf:
+    fraud_detection:
+      # Point de fonctionnement du détecteur, consommé par `src/inference/predictor.py`.
+      # Le seuil n'est pas figé ici : à défaut, il est relu depuis l'artefact d'évaluation
+      # (`artifacts/metrics/evaluation_metrics.json`), sinon recalibré sur un échantillon de
+      # référence au budget déclaré. Renseigner `threshold` fige explicitement le point choisi.
+      threshold: null
+      # Part du flux que les analystes peuvent investiguer (contrainte de capacité, ~900 dossiers
+      # par jour pour ~1,2 million de transactions).
+      budget_rate: 0.02
+      # Niveau de risque à partir duquel la transaction est routée vers une revue manuelle
+      # plutôt que vers une décision automatique.
+      review_risk_level: modéré
+
+learning_objectives:
+  - "Comprendre pourquoi la fraude se détecte sans supervision : étiquette tardive (chargeback à J+30), partielle et biaisée par les règles existantes."
+  - "Construire un pipeline sans fuite : `is_fraud` et `fraud_scheme` sont des métadonnées exclues des features par configuration."
+  - "Lire les bonnes métriques en forte imbalance : PR AUC et lift plutôt qu'accuracy et ROC AUC, et toujours relativement au plancher (= prévalence)."
+  - "Piloter au **budget** d'investigation plutôt qu'au seuil arbitraire : table d'arbitrage volume d'alertes -> rappel / précision / lift."
+  - "Comprendre que la « contamination » déplace le seuil interne sans changer le classement produit par le score."
+  - "Distinguer anomalie et outlier légitime : ne PAS rogner les valeurs extrêmes, construire une liste blanche métier."
+  - "Gérer les manquants informatifs (empreinte bloquée, paiement one-click, retrait magasin) sans imputation silencieuse."
+  - "Comparer les détecteurs de la stack (forêt d'isolation, one-class SVM, enveloppe elliptique) à protocole et budget égaux."
+  - "Mesurer la stabilité du classement entre graines : une file d'alertes qui change chaque jour n'est pas exploitable."
+  - "Ventiler la performance par mode opératoire : un rappel global correct peut masquer un schéma en croissance non couvert."
+  - "Expliquer une alerte (facteurs contributifs par permutation, schéma probable) pour satisfaire l'exigence LCB-FT."
+  - "Industrialiser l'ensemble : configuration Hydra, artefacts traçables, tests pytest, rapports générés, scoring batch et unitaire."

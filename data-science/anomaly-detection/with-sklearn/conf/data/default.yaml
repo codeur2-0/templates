@@ -1,0 +1,57 @@
+# =================================================================================================
+# Données : Transactions de paiement et fraude observée
+# -------------------------------------------------------------------------------------------------
+# Flux de transactions d'un PSP français sur 90 jours, avec le contexte marchand, porteur et
+# technique de chaque paiement. Les données sont générées par un modèle latent : chaque
+# transaction légitime suit des distributions réalistes par catégorie et par canal, tandis que
+# quatre **modes opératoires** de fraude (card-not-present, prise de compte, identité synthétique,
+# fraude amicale) déforment des sous-ensembles précis de variables (vélocité, montant, empreinte
+# d'appareil, authentification, géographie). Du bruit irréductible, des valeurs manquantes et des
+# outliers **légitimes** (achats de luxe, paiements professionnels) sont injectés : un détecteur
+# qui ne fait que repérer les gros montants se fait piéger. Deux colonnes de métadonnées
+# (`is_fraud`, `fraud_scheme`) permettent de mesurer la performance sans jamais entrer dans les
+# features.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: payment_transactions
+n_samples: 12000
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: null              # apprentissage non supervisé : pas de cible
+id_column: transaction_id
+time_column: occurred_at
+group_column: merchant_category
+positive_rate: 0.018
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['transaction_id', 'occurred_at', 'is_fraud', 'fraud_scheme']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+fraud_rate: 0.018
+window_days: 90
+legit_outlier_rate: 0.025
+missing_device_rate: 0.04
+missing_session_rate: 0.06
+missing_distance_rate: 0.05

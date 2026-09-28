@@ -1,0 +1,1712 @@
+{#- Rapport d'évaluation Markdown + figures (famille recommendation / tâche ranking). -#}
+"""Evaluation reports: turn an :class:`EvaluationResult` into readable artefacts.
+
+Two artefacts are produced:
+
+* ``artifacts/reports/evaluation_report.md`` — the document a recommendation reviewer reads,
+* ``artifacts/metrics/ranking_report.json`` — its machine readable counterpart.
+
+A ranking report is not a classification report with different words. It must answer five
+questions, in this order, because that is the order in which a reviewer loses confidence:
+
+1. **does it beat the free engine?** — sorting by popularity costs nothing, is explainable and is
+   robust; a model that merely matches it has no operational value, whatever its NDCG says;
+2. **is the published list any good, and how good can it possibly be?** — the generator publishes
+   the reachable ceiling, so the honest reading is a share of that ceiling, not an absolute number;
+3. **how many slots should be published?** — precision falls and recall rises with K, and the
+   report must show the trade-off instead of hiding it behind a single configured value;
+4. **does the engine destroy the catalogue, or serve new users badly?** — coverage, concentration,
+   cold-start recall and out-of-stock slots are objectives, not decorations;
+5. **where exactly does it misrank?** — buried relevant items and published noise have different
+   causes and different fixes.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping
+
+import numpy as np
+import pandas as pd
+
+from src.evaluation.evaluator import EvaluationResult
+from src.utils.io import write_json, write_text
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+from src.visualization.plots import RankingPlots
+
+logger = get_logger(__name__)
+
+#: Titre du cas d'usage (injecté par le moteur de scaffolding depuis le manifeste).
+USE_CASE_TITLE = "{{ spec.title }}"
+
+#: Jeu de données évalué.
+DATASET_NAME = "{{ spec.data.dataset_name }}"
+
+#: Cible métier : la pertinence observée d'un couple (utilisateur, article candidat).
+TARGET_NAME = "{{ spec.data.target or 'relevance' }}"
+
+#: Métrique pilotant la décision.
+PRIMARY_METRIC = "{{ spec.metrics.primary }}"
+
+#: Identifiant de l'unité d'évaluation — l'utilisateur, jamais la ligne.
+GROUP_LABEL = "utilisateur"
+
+#: Critères de succès du cas d'usage, injectés depuis `extras.quality` du manifeste. Les valeurs
+#: de NDCG, précision, rappel et couverture sont des fractions comprises entre 0 et 1 ; les gains
+#: relatifs et les parts en pourcentage sont exprimés en pourcents, comme dans le registre partagé.
+DEFAULT_THRESHOLDS: dict[str, float] = {
+    "ndcg_min": {{ extras.get("quality", {}).get("ndcg_min", 0.45) }},
+    "precision_min": {{ extras.get("quality", {}).get("precision_min", 0.22) }},
+    "recall_min": {{ extras.get("quality", {}).get("recall_min", 0.55) }},
+    "improvement_vs_popularity_min": {{ extras.get("quality", {}).get("improvement_vs_popularity_min", 25.0) }},
+    "coverage_min": {{ extras.get("quality", {}).get("coverage_min", 0.25) }},
+    "cold_start_ratio_min": {{ extras.get("quality", {}).get("cold_start_ratio_min", 0.60) }},
+    "out_of_stock_max": {{ extras.get("quality", {}).get("out_of_stock_max", 0.15) }},
+    "backtest_spread_max": {{ extras.get("quality", {}).get("backtest_spread_max", 0.05) }},
+}
+
+#: Recommandations métier documentées pour ce cas d'usage (famille `recommendation`).
+BUSINESS_RECOMMENDATIONS: tuple[str, ...] = (
+{% if spec.data.recommendations %}
+{{ py_string_tuple(spec.data.recommendations, indent=4, width=96) }}
+{% else %}
+    "Toujours comparer le modèle au tri par popularité avant de publier un classement.",
+    "Surveiller la couverture catalogue en production : un NDCG qui monte pendant que la "
+    "couverture chute est un signal de fermeture du moteur, pas une amélioration.",
+{% endif %}
+)
+
+#: Nombre de mauvais classements cités dans le rapport.
+TOP_ERRORS = 10
+
+#: Nombre de variables explicatives citées dans le rapport.
+TOP_DRIVERS = 10
+
+#: Nombre d'articles les plus publiés cités dans l'analyse de concentration.
+TOP_PUBLISHED = 10
+
+#: Libellé français des familles d'erreur, aligné sur l'évaluateur.
+LABEL_FORGET = "oubli"
+LABEL_FALSE_PROMISE = "fausse promesse"
+
+#: Seuil sous lequel un segment est considéré comme dégradé par rapport à la moyenne globale.
+SEGMENT_WATCH_RATIO = 0.90
+
+
+def _float(value: Any, default: float = float("nan")) -> float:
+    """Coerce ``value`` to ``float`` without raising.
+
+    Args:
+        value: Value to coerce.
+        default: Value returned when the coercion fails or yields NaN.
+
+    Returns:
+        The coerced float.
+    """
+    try:
+        converted = float(value)
+    except (TypeError, ValueError):
+        return default
+    return default if np.isnan(converted) else converted
+
+
+def _pct(value: Any, digits: int = 1) -> str:
+    """Format a fraction as a percentage string, or ``n/d`` when unavailable.
+
+    Args:
+        value: Fraction between 0 and 1.
+        digits: Number of decimals.
+
+    Returns:
+        The formatted string.
+    """
+    number = _float(value)
+    return "n/d" if np.isnan(number) else f"{number * 100:.{digits}f} %"
+
+
+def _num(value: Any, digits: int = 3) -> str:
+    """Format a number, or ``n/d`` when unavailable.
+
+    Args:
+        value: Value to format.
+        digits: Number of decimals.
+
+    Returns:
+        The formatted string.
+    """
+    number = _float(value)
+    return "n/d" if np.isnan(number) else f"{number:.{digits}f}"
+
+
+def _signed(value: Any, digits: int = 1, suffix: str = " %") -> str:
+    """Format a signed gain.
+
+    Args:
+        value: Gain value.
+        digits: Number of decimals.
+        suffix: Unit appended to the value.
+
+    Returns:
+        The formatted string, with an explicit sign.
+    """
+    number = _float(value)
+    return "n/d" if np.isnan(number) else f"{number:+.{digits}f}{suffix}"
+
+
+def _resolve_thresholds(config: Mapping[str, Any]) -> dict[str, float]:
+    """Merge the documented thresholds with an optional runtime override.
+
+    Args:
+        config: Root configuration mapping.
+
+    Returns:
+        The thresholds to apply.
+    """
+    thresholds = dict(DEFAULT_THRESHOLDS)
+    override = (config.get("metrics") or {}).get("thresholds") or {}
+    for key, value in dict(override).items():
+        if key not in thresholds:
+            logger.warning("Seuil inconnu ignoré : '{}'", key)
+            continue
+        try:
+            thresholds[key] = float(value)
+        except (TypeError, ValueError):
+            logger.warning("Seuil '{}' non numérique ignoré : {!r}", key, value)
+    return thresholds
+
+
+class ReportBuilder:
+    """Build the Markdown report, its JSON counterpart and the figures."""
+
+    def __init__(
+        self, paths: ProjectPaths | None = None, *, config: Mapping[str, Any] | None = None
+    ) -> None:
+        """Store the output layout and the configuration.
+
+        Args:
+            paths: Project layout (figures and reports directories).
+            config: Root configuration mapping, used to document the run and to override the
+                quality thresholds through ``metrics.thresholds``.
+        """
+        self.paths = paths or ProjectPaths.from_root()
+        self.config: dict[str, Any] = dict(config or {})
+        self.plots = RankingPlots(self.paths.figures_dir)
+        self.thresholds: dict[str, float] = _resolve_thresholds(self.config)
+        family = dict(self.config.get("recommendation") or {})
+        self.top_k: int = int(family.get("top_k") or 10)
+        self.cutoffs: tuple[int, ...] = tuple(
+            int(value) for value in (family.get("cutoffs") or ()) if value
+        ) or (5, self.top_k, 20)
+        self.group_column: str = str(family.get("group_column") or "user_id")
+        self.item_column: str = str(family.get("item_column") or "item_id")
+        self.coverage_min: float = _float(
+            family.get("coverage_min"), self.thresholds["coverage_min"]
+        )
+
+    # ------------------------------------------------------------------ public API ------
+    def build(
+        self,
+        result: EvaluationResult,
+        *,
+        model: Any = None,
+        thresholds: pd.DataFrame | None = None,
+        report_name: str | None = None,
+    ) -> dict[str, Path]:
+        """Generate every report artefact.
+
+        Args:
+            result: Evaluation result to document.
+            model: Optional model, used to document its identity.
+            thresholds: Accepted for API symmetry with the classification report; a ranking model
+                publishes a top-K rather than a decision threshold, so the argument is ignored.
+            report_name: Output Markdown file name.
+
+        Returns:
+            Mapping of artefact kind (``report``, ``json``, tables, figure names) to path.
+        """
+        del thresholds  # aucune notion de seuil de décision en classement
+        self.paths.ensure()
+        figures = self.plots.save_all(result)
+        markdown = self.render_markdown(result, figures=figures, model=model)
+
+        report_path = self.paths.reports_dir / (
+            report_name or str(self._config_artifact("report_file", "evaluation_report.md"))
+        )
+        written: dict[str, Path] = {"report": write_text(report_path, markdown)}
+
+        json_path = self.paths.metrics_dir / "ranking_report.json"
+        written["json"] = write_json(
+            json_path,
+            {
+                **result.to_dict(),
+                "verdict": self.verdict_rows(result),
+                "recommendations": self.recommendations(result),
+                "thresholds": self.thresholds,
+                "generated_at": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+                "figures": {
+                    name: str(path.relative_to(self.paths.root)) for name, path in figures.items()
+                },
+            },
+        )
+
+        for kind, table in (
+            ("errors", result.errors),
+            ("per_cutoff", result.per_horizon),
+            ("baselines", result.baselines),
+            ("backtest", result.backtest),
+            ("segments", result.per_segment),
+            ("published", result.predictions),
+        ):
+            if isinstance(table, pd.DataFrame) and not table.empty:
+                destination = self.paths.reports_dir / f"{kind}.csv"
+                table.to_csv(destination, index=False)
+                written[kind] = destination
+
+        written.update(figures)
+        logger.info("Rapport de classement généré : {}", written["report"])
+        return written
+
+    def recommendations(self, result: EvaluationResult) -> list[str]:
+        """Return the recommendations: dynamic (metrics-driven) then business (documented).
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The ordered recommendation list.
+        """
+        return [*self._dynamic_recommendations(result), *BUSINESS_RECOMMENDATIONS]
+
+    def verdict_rows(self, result: EvaluationResult) -> list[dict[str, Any]]:
+        """Evaluate every success criterion of the use case.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            One dict per criterion (``name``, ``value``, ``target``, ``passed``, ``reading``).
+        """
+        metrics = dict(result.metrics)
+        extras = dict(result.extras or {})
+        cutoff = int(extras.get("top_k", self.top_k))
+        ndcg = _float(metrics.get(f"ndcg_at_{cutoff}"))
+        precision = _float(metrics.get(f"precision_at_{cutoff}"))
+        recall = _float(metrics.get(f"recall_at_{cutoff}"))
+        gain = self._popularity_gain(result)
+        coverage = _float(extras.get("catalog_coverage"))
+        cold_ratio = _float(extras.get("cold_start_recall_ratio"))
+        out_of_stock = _float(extras.get("out_of_stock_published_share"))
+        spread = _float(dict(extras.get("dispersion_backtest") or {}).get("amplitude"))
+
+        rows: list[dict[str, Any]] = [
+            {
+                "name": f"NDCG@{cutoff} au-dessus du seuil",
+                "value": ndcg,
+                "target": f">= {self.thresholds['ndcg_min']:.2f}",
+                "passed": bool(ndcg >= self.thresholds["ndcg_min"]),
+                "reading": (
+                    "Le classement publié est suffisamment proche de l'ordre idéal pour être "
+                    "diffusé tel quel."
+                    if ndcg >= self.thresholds["ndcg_min"]
+                    else "Le classement publié s'écarte trop de l'ordre idéal : revoir les "
+                    "features d'intention avant de diffuser."
+                ),
+            },
+            {
+                "name": f"Precision@{cutoff} au-dessus du seuil",
+                "value": precision,
+                "target": f">= {self.thresholds['precision_min']:.2f}",
+                "passed": bool(precision >= self.thresholds["precision_min"]),
+                "reading": (
+                    "Au moins un emplacement publié sur cinq correspond à une intention réelle."
+                    if precision >= self.thresholds["precision_min"]
+                    else "Trop d'emplacements publiés à tort : le moteur occupe de la place rare "
+                    "avec du bruit."
+                ),
+            },
+            {
+                "name": f"Recall@{cutoff} au-dessus du seuil",
+                "value": recall,
+                "target": f">= {self.thresholds['recall_min']:.2f}",
+                "passed": bool(recall >= self.thresholds["recall_min"]),
+                "reading": (
+                    "La majorité de la pertinence disponible est capturée dans la liste publiée."
+                    if recall >= self.thresholds["recall_min"]
+                    else "Une part importante des intentions réelles reste hors de la liste "
+                    "publiée."
+                ),
+            },
+            {
+                "name": "Gain de NDCG sur le tri par popularité",
+                "value": gain,
+                "target": f">= {self.thresholds['improvement_vs_popularity_min']:.0f} %",
+                "passed": bool(gain >= self.thresholds["improvement_vs_popularity_min"]),
+                "reading": (
+                    "Le modèle justifie son coût de maintenance face au moteur gratuit."
+                    if gain >= self.thresholds["improvement_vs_popularity_min"]
+                    else "Le gain sur le tri par popularité est insuffisant pour justifier la "
+                    "complexité ajoutée."
+                ),
+            },
+            {
+                "name": "Couverture du catalogue",
+                "value": coverage,
+                "target": f">= {self.coverage_min:.2f}",
+                "passed": bool(coverage >= self.coverage_min),
+                "reading": (
+                    "Le moteur expose une part suffisante du catalogue : la longue traîne vit."
+                    if coverage >= self.coverage_min
+                    else "Le moteur se referme sur une poignée de références : risque "
+                    "d'appauvrissement du catalogue à moyen terme."
+                ),
+            },
+            {
+                "name": "Rappel utilisateurs froids / global",
+                "value": cold_ratio,
+                "target": f">= {self.thresholds['cold_start_ratio_min']:.2f}",
+                "passed": bool(cold_ratio >= self.thresholds["cold_start_ratio_min"]),
+                "reading": (
+                    "Les nouveaux venus sont servis presque aussi bien que les clients établis."
+                    if cold_ratio >= self.thresholds["cold_start_ratio_min"]
+                    else "Le moteur dépend trop de l'historique : les nouveaux utilisateurs sont "
+                    "servis au rabais."
+                ),
+            },
+            {
+                "name": "Emplacements publiés en rupture de stock",
+                "value": out_of_stock,
+                "target": f"<= {self.thresholds['out_of_stock_max']:.2f}",
+                "passed": bool(out_of_stock <= self.thresholds["out_of_stock_max"]),
+                "reading": (
+                    "Le filtre de disponibilité joue son rôle : peu de places perdues."
+                    if out_of_stock <= self.thresholds["out_of_stock_max"]
+                    else "Trop d'articles indisponibles sont publiés : chaque emplacement perdu "
+                    "coûte une place rare et une déception."
+                ),
+            },
+            {
+                "name": "Amplitude du NDCG entre plis chronologiques",
+                "value": spread,
+                "target": f"<= {self.thresholds['backtest_spread_max']:.3f}",
+                "passed": bool(spread <= self.thresholds["backtest_spread_max"]),
+                "reading": (
+                    "La qualité est stable d'une période à l'autre."
+                    if spread <= self.thresholds["backtest_spread_max"]
+                    else "La qualité varie fortement selon la période : prévoir un recalibrage "
+                    "saisonnier."
+                ),
+            },
+        ]
+        for row in rows:
+            row["value"] = None if np.isnan(_float(row["value"])) else round(_float(row["value"]), 4)
+        return rows
+
+    def _popularity_gain(self, result: EvaluationResult) -> float:
+        """Return the relative NDCG gain of the model over the popularity baseline.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The gain in percent, or NaN when the popularity reference is unavailable.
+        """
+        table = getattr(result, "baselines", None)
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            return float("nan")
+        if "gain_relatif_pct" in table.columns:
+            values = pd.to_numeric(table["gain_relatif_pct"], errors="coerce").dropna()
+            if not values.empty:
+                return float(values.iloc[0])
+        return float("nan")
+
+    # ------------------------------------------------------------------ markdown --------
+    def render_markdown(
+        self,
+        result: EvaluationResult,
+        *,
+        figures: Mapping[str, Path] | None = None,
+        model: Any = None,
+    ) -> str:
+        """Render the full Markdown evaluation report.
+
+        Args:
+            result: Evaluation result to document.
+            figures: Figure name to path mapping, embedded at the end of the document.
+            model: Optional model, documented in the context block.
+
+        Returns:
+            The Markdown document.
+        """
+        sections: list[str] = [
+            f"# Rapport d'évaluation — {USE_CASE_TITLE}",
+            "",
+            f"**Jeu de données** : `{DATASET_NAME}` · **cible** : `{TARGET_NAME}` · "
+            f"**métrique de décision** : `{PRIMARY_METRIC}` · **split** : `{result.split}`",
+            "",
+        ]
+        sections += self._context_block(result, model)
+        sections += self._verdict_block(result)
+        sections += self._metrics_block(result)
+        sections += self._baseline_block(result)
+        sections += self._cutoff_block(result)
+        sections += self._coverage_block(result)
+        sections += self._segment_block(result)
+        sections += self._availability_block(result)
+        sections += self._backtest_block(result)
+        sections += self._errors_block(result)
+        sections += self._drivers_block(result)
+        sections += self._hypotheses_block(result)
+        sections += self._recommendations_block(result)
+        sections += self._figures_block(figures or {})
+        sections += self._reproducibility_block(result, model)
+        sections += self._limits_block(result)
+        return "\n".join(sections).rstrip() + "\n"
+
+    def _context_block(self, result: EvaluationResult, model: Any) -> list[str]:
+        """Document what was evaluated, on which slice, with which model.
+
+        Args:
+            result: Evaluation result.
+            model: Optional model.
+
+        Returns:
+            The Markdown lines.
+        """
+        extras = dict(result.extras or {})
+        cutoff = int(extras.get("top_k", self.top_k))
+        cutoffs = ", ".join(str(value) for value in extras.get("cutoffs", ()))
+        users = int(_float(extras.get("users_evaluated"), 0))
+        total_users = int(_float(extras.get("users_total"), users))
+        lines = [
+            "## 1. Contexte de l'évaluation",
+            "",
+            "| Élément | Valeur |",
+            "| --- | --- |",
+            f"| Candidats évalués | {result.n_samples:,} |".replace(",", " "),
+            f"| {GROUP_LABEL.capitalize()}s avec au moins un candidat pertinent | "
+            f"{users:,} / {total_users:,}".replace(",", " "),
+            f"| Candidats par {GROUP_LABEL} | {_num(extras.get('candidates_per_user'), 1)} |",
+            f"| Prévalence de la pertinence | {_pct(extras.get('prevalence'), 2)} |",
+            f"| Emplacements publiés par {GROUP_LABEL} (K) | {cutoff} |",
+            f"| Coupures évaluées | {cutoffs} |",
+            f"| Colonne de regroupement | `{self.group_column}` |",
+            f"| Colonne d'article | `{self.item_column}` |",
+        ]
+        if model is not None:
+            summary = str(getattr(model, "summary", lambda: model)())
+            lines.append(f"| Modèle | `{summary}` |")
+        lines += [
+            "",
+            "L'unité d'évaluation est l'utilisateur, jamais la ligne : chaque métrique est "
+            "calculée par utilisateur puis moyennée, ce qui donne le même poids à un client très "
+            "actif et à un nouveau venu. Les utilisateurs sans aucun candidat pertinent sont "
+            "exclus du calcul, car aucun classement ne peut les satisfaire et les inclure "
+            "récompenserait artificiellement un moteur qui publie peu.",
+            "",
+        ]
+        return lines
+
+    def _verdict_block(self, result: EvaluationResult) -> list[str]:
+        """State the overall verdict before any number, so the reader knows where to look.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        rows = self.verdict_rows(result)
+        respected = sum(1 for row in rows if row["passed"])
+        measurable = [row for row in rows if row["value"] is not None]
+        status = (
+            "**conforme**"
+            if measurable and respected == len(measurable)
+            else ("**partiellement conforme**" if respected else "**non conforme**")
+        )
+        lines = [
+            "## 2. Verdict sur les objectifs",
+            "",
+            f"Statut global : {status} — {respected} objectif(s) respecté(s) sur "
+            f"{len(measurable)} mesurable(s) ({len(rows)} déclarés).",
+            "",
+            "| Critère | Mesuré | Cible | Verdict | Lecture |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for row in rows:
+            value = row["value"]
+            rendered = "n/d" if value is None else f"{value:.4f}".rstrip("0").rstrip(".")
+            verdict = "n/d" if value is None else ("✅" if row["passed"] else "❌")
+            lines.append(f"| {row['name']} | {rendered} | {row['target']} | {verdict} | {row['reading']} |")
+        lines += [
+            "",
+            "Les trois premiers critères mesurent la pertinence, les cinq suivants mesurent ce que "
+            "la pertinence seule ne voit pas : l'apport réel face au moteur gratuit, la santé du "
+            "catalogue, l'équité envers les nouveaux utilisateurs, la disponibilité des articles "
+            "publiés et la stabilité dans le temps. Un moteur peut satisfaire les trois premiers "
+            "et échouer aux autres — c'est précisément le cas qu'on découvre trop tard, en "
+            "production.",
+            "",
+        ]
+        return lines
+
+    def _metrics_block(self, result: EvaluationResult) -> list[str]:
+        """Detail the ranking metrics and place them against the reachable ceiling.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        extras = dict(result.extras or {})
+        cutoff = int(extras.get("top_k", self.top_k))
+        reference = dict(extras.get("generation_reference") or {})
+        lines = [
+            "## 3. Métriques de classement",
+            "",
+            "| Métrique | Valeur | Seuil | Écart |",
+            "| --- | --- | --- | --- |",
+        ]
+        rows = (
+            (f"NDCG@{cutoff}", f"ndcg_at_{cutoff}", self.thresholds["ndcg_min"]),
+            (f"Precision@{cutoff}", f"precision_at_{cutoff}", self.thresholds["precision_min"]),
+            (f"Recall@{cutoff}", f"recall_at_{cutoff}", self.thresholds["recall_min"]),
+            (f"MAP@{cutoff}", f"map_at_{cutoff}", None),
+            (f"Hit-rate@{cutoff}", f"hit_rate_at_{cutoff}", None),
+        )
+        for label, key, threshold in rows:
+            value = _float(result.metrics.get(key))
+            if np.isnan(value):
+                continue
+            target = "—" if threshold is None else f">= {threshold:.2f}"
+            gap = "—" if threshold is None else _signed(value - threshold, 3, "")
+            lines.append(f"| {label} | {_num(value, 4)} | {target} | {gap} |")
+
+        ceiling = _float(reference.get("ndcg_ceiling_oracle"))
+        published_popularity = _float(reference.get("ndcg_baseline_popularity"))
+        published_random = _float(reference.get("ndcg_baseline_random"))
+        headroom = _float(reference.get("ndcg_headroom"))
+        share = _float(extras.get("ceiling_share"))
+        lines += [""]
+        if not np.isnan(ceiling):
+            lines += [
+                f"**Plafond atteignable** : le générateur publie un NDCG@{cutoff} oracle de "
+                f"{_num(ceiling, 4)}, obtenu en classant par la probabilité de pertinence avant "
+                f"bruit — c'est-à-dire en utilisant une information qu'aucun modèle réel ne "
+                f"possède. Le modèle capture {_pct(share, 1)} de ce plafond. La distance restante "
+                "n'est pas une marge de progression : c'est du bruit irréductible, puisqu'aucun "
+                "modèle ne peut deviner une intention qui n'était pas observable.",
+                "",
+                "Les références publiées par le générateur sur l'ensemble du jeu sont "
+                f"aléatoire {_num(published_random, 4)}, "
+                f"popularité {_num(published_popularity, 4)} "
+                f"et plafond {_num(ceiling, 4)}, soit une marge de progression totale "
+                f"({_num(headroom, 4)}) entre le tirage aléatoire et l'oracle. Les valeurs "
+                "mesurées sur le split de test (section suivante) en diffèrent légèrement, ce qui "
+                "est normal : le test est une fenêtre plus courte, plus tardive et moins dense en "
+                "pertinence que le jeu complet. Un écart important signalerait en revanche un "
+                "problème de split ou une fuite.",
+                "",
+            ]
+        else:
+            lines += [
+                "**Plafond atteignable** : non publié pour ce jeu de données (les métadonnées de "
+                "génération sont absentes, ce qui est le cas normal sur données réelles). Les "
+                "valeurs ci-dessus doivent alors être lues relativement aux références de la "
+                "section suivante, jamais dans l'absolu.",
+                "",
+            ]
+        hit = _float(result.metrics.get(f"hit_rate_at_{cutoff}"))
+        if not np.isnan(hit):
+            lines += [
+                f"Le hit-rate de {_pct(hit, 1)} signifie que {_pct(hit, 0)} des utilisateurs "
+                "reçoivent au moins un article pertinent dans leur liste. C'est la métrique la "
+                "plus proche de l'expérience vécue — et la plus trompeuse isolément, car elle "
+                "reste haute même quand les neuf autres emplacements sont du bruit.",
+                "",
+            ]
+        return lines
+
+    def _baseline_block(self, result: EvaluationResult) -> list[str]:
+        """Compare the model with the references and say what the gap is worth.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        table = getattr(result, "baselines", None)
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            return [
+                "## 4. Comparaison aux moteurs de référence",
+                "",
+                "Aucune référence n'a pu être calculée sur ce split.",
+                "",
+            ]
+        cutoff = int(dict(result.extras or {}).get("top_k", self.top_k))
+        lines = [
+            f"## 4. Comparaison aux moteurs de référence (top-{cutoff})",
+            "",
+            "| Moteur | NDCG | Precision | Recall | MAP | Hit-rate | Couverture | Herfindahl |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for row in table.itertuples():
+            lines.append(
+                f"| {row.scorer} | {_num(row.ndcg, 4)} | {_num(row.precision, 4)} | "
+                f"{_num(row.recall, 4)} | {_num(row.map, 4)} | {_num(row.hit_rate, 4)} | "
+                f"{_pct(row.catalog_coverage)} | {_num(row.herfindahl, 4)} |"
+            )
+        gain = self._popularity_gain(result)
+        absolute = _float(table.get("gain_vs_popularite", pd.Series([np.nan])).iloc[0])
+        lines += [""]
+        if not np.isnan(gain):
+            lines += [
+                f"**Lecture** : le modèle apporte {_signed(gain)} de NDCG sur le tri par "
+                f"popularité ({_signed(absolute, 4, '')} en absolu). C'est le seul chiffre qui "
+                "justifie l'existence du modèle : trier par audience est gratuit, explicable et "
+                "robuste, et un moteur qui ne fait pas nettement mieux ne vaut pas son coût de "
+                "maintenance.",
+                "",
+            ]
+        if "intention_recente" in set(table["scorer"]):
+            reference = table.set_index("scorer")
+            intent = _float(reference.loc["intention_recente", "ndcg"])
+            model_ndcg = _float(reference.loc["modele", "ndcg"]) if "modele" in reference.index else np.nan
+            if not np.isnan(intent) and not np.isnan(model_ndcg):
+                intent_gain = (model_ndcg - intent) / intent * 100.0 if intent else float("nan")
+                lines += [
+                    f"La recommandation d'intention récente — ne montrer que ce que "
+                    f"l'{GROUP_LABEL} a déjà consulté — atteint {_num(intent, 4)} de NDCG. C'est "
+                    "l'exploitation pure : elle ramène les visiteurs sans rien découvrir. Le "
+                    f"modèle fait {_num(model_ndcg, 4)}, soit "
+                    f"{_signed(intent_gain)} "
+                    "de NDCG : l'écart mesure la part de découverte que le modèle ajoute à "
+                    "l'exploitation.",
+                    "",
+                ]
+        coverage_row = table.set_index("scorer") if "scorer" in table.columns else None
+        if coverage_row is not None and "popularite" in coverage_row.index and "modele" in coverage_row.index:
+            popularity_coverage = _float(coverage_row.loc["popularite", "catalog_coverage"])
+            model_coverage = _float(coverage_row.loc["modele", "catalog_coverage"])
+            if not np.isnan(popularity_coverage) and not np.isnan(model_coverage):
+                lines += [
+                    f"La popularité n'expose que {_pct(popularity_coverage)} du catalogue contre "
+                    f"{_pct(model_coverage)} pour le modèle : le gain n'est pas seulement de "
+                    "pertinence, il est aussi de diversité, ce que le NDCG seul ne montre pas.",
+                    "",
+                ]
+        return lines
+
+    def _cutoff_block(self, result: EvaluationResult) -> list[str]:
+        """Show how quality moves with K and justify the configured cutoff.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        table = getattr(result, "per_horizon", None)
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            return []
+        cutoff = int(dict(result.extras or {}).get("top_k", self.top_k))
+        lines = [
+            "## 5. Choix du nombre d'emplacements publiés",
+            "",
+            "| K publié | NDCG | Precision | Recall | MAP | Hit-rate | Couverture | Herfindahl |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for row in table.itertuples():
+            marker = " **(retenu)**" if bool(getattr(row, "is_configured", False)) else ""
+            lines.append(
+                f"| {int(row.top_k)}{marker} | {_num(row.ndcg, 4)} | {_num(row.precision, 4)} | "
+                f"{_num(row.recall, 4)} | {_num(row.map, 4)} | {_num(row.hit_rate, 4)} | "
+                f"{_pct(row.catalog_coverage)} | {_num(row.herfindahl, 4)} |"
+            )
+        precision_column = pd.to_numeric(table["precision"], errors="coerce")
+        recall_column = pd.to_numeric(table["recall"], errors="coerce")
+        lines += [
+            "",
+            f"La précision passe de {_num(precision_column.iloc[0], 3)} à "
+            f"{_num(precision_column.iloc[-1], 3)} quand K grandit, tandis que le rappel passe de "
+            f"{_num(recall_column.iloc[0], 3)} à {_num(recall_column.iloc[-1], 3)} : c'est le "
+            "compromis structurel du classement, et il n'existe aucun K qui améliore les deux à la "
+            f"fois. Le K retenu ({cutoff}) est celui déclaré dans la configuration, pas celui qui "
+            "flatte une métrique : le changer est une décision produit qui se prend avec la "
+            "surface d'affichage disponible, pas avec un tableau de NDCG.",
+            "",
+        ]
+        return lines
+
+    def _coverage_block(self, result: EvaluationResult) -> list[str]:
+        """Report catalogue coverage, concentration and popularity bias.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        extras = dict(result.extras or {})
+        coverage = _float(extras.get("catalog_coverage"))
+        concentration = _float(extras.get("herfindahl_top_k"))
+        bias = _float(extras.get("popularity_bias_share"))
+        lines = [
+            "## 6. Santé du catalogue : couverture et concentration",
+            "",
+            "| Indicateur | Valeur | Seuil | Verdict |",
+            "| --- | --- | --- | --- |",
+            f"| Part du catalogue exposée | {_pct(coverage)} | >= {_pct(self.coverage_min)} | "
+            f"{'✅' if coverage >= self.coverage_min else '❌'} |",
+            f"| Concentration des emplacements (Herfindahl) | {_num(concentration, 4)} | — | — |",
+            f"| Part des emplacements prise par le décile le plus vu | {_pct(bias)} | — | — |",
+            "",
+        ]
+        if not np.isnan(coverage) and not np.isnan(concentration):
+            reading = (
+                "Le moteur diversifie réellement : la couverture reste au-dessus du seuil et la "
+                "concentration est basse, donc aucun article ne capte une part disproportionnée "
+                "des emplacements."
+                if coverage >= self.coverage_min
+                else "Le moteur se referme : la couverture passe sous le seuil, ce qui signifie "
+                "qu'une part du catalogue n'est jamais exposée. À court terme le NDCG peut "
+                "continuer de monter, à moyen terme le catalogue s'appauvrit et les ventes "
+                "suivent."
+            )
+            lines += [
+                f"**Lecture** : {reading} L'indice de Herfindahl vaut {_num(concentration, 4)} "
+                "(1,0 signifierait qu'un seul article occupe tous les emplacements, 0 une "
+                "exposition parfaitement uniforme).",
+                "",
+            ]
+        if not np.isnan(bias):
+            lines += [
+                f"Le premier décile d'audience capte {_pct(bias)} des emplacements publiés, là où "
+                "une exposition neutre en donnerait environ 10 %. Une part élevée n'est pas une "
+                "anomalie en soi — les articles populaires sont populaires parce qu'ils plaisent "
+                "largement — mais elle borne l'effet de feedback : plus un article est exposé, "
+                "plus il est vu, plus il sera exposé. Surveiller cette dérive fait partie de "
+                "l'exploitation du moteur.",
+                "",
+            ]
+        return lines
+
+    def _segment_block(self, result: EvaluationResult) -> list[str]:
+        """Break the quality down by business segment, with the cold-start reading first.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        extras = dict(result.extras or {})
+        table = getattr(result, "per_segment", None)
+        cold_ratio = _float(extras.get("cold_start_recall_ratio"))
+        lines = ["## 7. Qualité par segment", ""]
+        if not np.isnan(cold_ratio):
+            verdict = (
+                "✅" if cold_ratio >= self.thresholds["cold_start_ratio_min"] else "❌"
+            )
+            lines += [
+                f"**Démarrage à froid** {verdict} : le rappel des {GROUP_LABEL}s sans historique "
+                f"vaut {_pct(cold_ratio)} du rappel global (seuil "
+                f"{_pct(self.thresholds['cold_start_ratio_min'], 0)}). ",
+                "",
+                "C'est le test le plus sévère d'un moteur de recommandation : un nouveau venu ne "
+                "peut être servi que par les attributs du catalogue, puisque son historique est "
+                "vide. Un ratio proche de 1 signifie que le modèle ne dépend pas de l'historique "
+                "et accueille correctement les nouveaux clients ; un ratio bas signifie qu'il les "
+                "exclut de fait, ce qui est un problème d'acquisition avant d'être un problème de "
+                "précision — et le problème que la moyenne globale masque le mieux.",
+                "",
+            ]
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            lines += ["Aucun axe de segmentation n'était disponible sur ce split.", ""]
+            return lines
+
+        lines += [
+            "| Axe | Segment | Lignes | Utilis. | NDCG | Précision | Rappel | Ratio | Verdict |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for row in table.itertuples():
+            lines.append(
+                f"| {row.axe} | {row.segment} | {int(row.n_lignes):,} | "
+                f"{int(row.n_utilisateurs):,} | {_num(row.ndcg, 4)} | {_num(row.precision, 4)} | "
+                f"{_num(row.recall, 4)} | {_num(getattr(row, 'ratio_ndcg_global', np.nan), 3)} | "
+                f"{getattr(row, 'verdict', '—')} |".replace(",", " ")
+            )
+        watched = table[table["verdict"] == "à surveiller"] if "verdict" in table.columns else table.iloc[0:0]
+        lines += [""]
+        if not watched.empty:
+            details = ", ".join(
+                f"{row.axe}={row.segment} ({_num(row.ndcg, 3)})" for row in watched.itertuples()
+            )
+            lines += [
+                f"**Segments sous {int(SEGMENT_WATCH_RATIO * 100)} % de la moyenne globale** : "
+                f"{details}. Ce sont les poches où le moteur rend un service dégradé, et elles ne "
+                "se voient pas dans la moyenne : c'est tout l'intérêt de la ventilation.",
+                "",
+            ]
+        else:
+            lines += [
+                f"Aucun segment ne passe sous {int(SEGMENT_WATCH_RATIO * 100)} % de la moyenne "
+                "globale : la qualité est homogène sur tous les axes disponibles.",
+                "",
+            ]
+        return lines
+
+    def _availability_block(self, result: EvaluationResult) -> list[str]:
+        """Report what is actually published: availability and the margin trade-off.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        extras = dict(result.extras or {})
+        published = getattr(result, "predictions", None)
+        out_of_stock = _float(extras.get("out_of_stock_published_share"))
+        trade_off = dict(extras.get("margin_trade_off") or {})
+        lines = ["## 8. Ce qui est réellement publié : disponibilité et marge", ""]
+        if not np.isnan(out_of_stock):
+            verdict = "✅" if out_of_stock <= self.thresholds["out_of_stock_max"] else "❌"
+            lines += [
+                f"**Emplacements perdus en rupture** {verdict} : {_pct(out_of_stock)} des "
+                f"emplacements publiés pointent vers un article indisponible (seuil "
+                f"{_pct(self.thresholds['out_of_stock_max'], 0)}). Chaque emplacement perdu coûte "
+                "deux fois : la place rare gaspillée, et la déception d'un client à qui l'on "
+                "montre ce qu'il ne peut pas acheter.",
+                "",
+            ]
+        if trade_off:
+            lines += [
+                "| Politique de classement | NDCG | Marge moyenne publiée |",
+                "| --- | --- | --- |",
+                f"| Par pertinence seule | {_num(trade_off.get('ndcg_pertinence'), 4)} | "
+                f"{_pct(trade_off.get('marge_moyenne_publiee'))} |",
+                f"| Pondérée par la marge | {_num(trade_off.get('ndcg_pondere_marge'), 4)} | "
+                f"{_pct(trade_off.get('marge_moyenne_ponderee'))} |",
+                "",
+            ]
+            relevance = _float(trade_off.get("ndcg_pertinence"))
+            weighted = _float(trade_off.get("ndcg_pondere_marge"))
+            if not np.isnan(relevance) and not np.isnan(weighted):
+                delta = weighted - relevance
+                margin_gain = (
+                    _float(trade_off.get("marge_moyenne_ponderee"))
+                    - _float(trade_off.get("marge_moyenne_publiee"))
+                ) * 100.0
+                lines += [
+                    f"**Arbitrage** : pondérer le score par la marge coûte {_num(abs(delta), 4)} "
+                    f"de NDCG ({_signed(delta, 4, '')}) et rapporte "
+                    f"{_signed(margin_gain, 1, ' point')} "
+                    "de marge moyenne publiée. Le choix ne se déduit pas des chiffres : il se "
+                    "prend en comité, en mettant face à face la dégradation d'expérience et le "
+                    "revenu additionnel. Le rapport fournit les deux, chiffrés, pour que la "
+                    "décision soit explicite plutôt qu'implicite dans le code.",
+                    "",
+                ]
+        if isinstance(published, pd.DataFrame) and not published.empty:
+            lines += [
+                f"Le fichier `artifacts/reports/published.csv` contient les "
+                f"{len(published):,} emplacements réellement publiés (rang, score, pertinence "
+                "observée, disponibilité, marge). C'est la seule table que le produit consomme : "
+                "les autres sont des diagnostics. Elle permet d'auditer ligne à ligne ce que le "
+                "moteur montre, sans passer par le modèle.".replace(",", " "),
+                "",
+            ]
+        return lines
+
+    def _backtest_block(self, result: EvaluationResult) -> list[str]:
+        """Report the stability of the ranking quality across chronological folds.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        table = getattr(result, "backtest", None)
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            return [
+                "## 9. Stabilité temporelle",
+                "",
+                "Le backtest n'a pas pu être calculé sur ce split (contexte temporel indisponible "
+                "ou volume insuffisant).",
+                "",
+            ]
+        dispersion = dict(dict(result.extras or {}).get("dispersion_backtest") or {})
+        amplitude = _float(dispersion.get("amplitude"))
+        lines = [
+            "## 9. Stabilité temporelle",
+            "",
+            "| Pli | Période | Lignes | Utilis. | Préval. | NDCG ± ET | Préc. | Rapp. | Couv. |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for row in table.itertuples():
+            error = _float(getattr(row, "ndcg_erreur_type", np.nan))
+            lines.append(
+                f"| {int(row.pli)} | {getattr(row, 'periode_debut', 'n/d')} → "
+                f"{getattr(row, 'periode_fin', 'n/d')} | {int(row.n_lignes):,} | "
+                f"{int(row.n_utilisateurs):,} | {_pct(row.prevalence, 2)} | "
+                f"{_num(row.ndcg, 4)} ± {_num(error, 4)} | "
+                f"{_num(row.precision, 4)} | {_num(row.recall, 4)} | "
+                f"{_pct(row.catalog_coverage)} |".replace(",", " ")
+            )
+        lines += [
+            "",
+            f"NDCG moyen {_num(dispersion.get('ndcg_moyen'), 4)} · écart-type "
+            f"{_num(dispersion.get('ndcg_ecart_type'), 4)} · amplitude "
+            f"{_num(dispersion.get('amplitude'), 4)} (seuil "
+            f"{self.thresholds['backtest_spread_max']:.3f}) · "
+            f"{'✅' if amplitude <= self.thresholds['backtest_spread_max'] else '❌'}",
+            "",
+        ]
+        fold_error = _float(dispersion.get("ndcg_erreur_type_pli"))
+        if not np.isnan(fold_error) and not np.isnan(amplitude):
+            ratio = amplitude / fold_error if fold_error else float("nan")
+            lines += [
+                f"**Plancher de bruit** : l'erreur-type moyenne d'un pli est de "
+                f"{_num(fold_error, 4)}, donc l'amplitude observée vaut {_num(ratio, 1)} fois "
+                "cette erreur-type. ",
+                "",
+                "C'est la seule lecture honnête d'une amplitude : avec quelques dizaines "
+                "d'utilisateurs par pli, deux périodes tirées au hasard dans un moteur "
+                "parfaitement stable donnent déjà une amplitude non nulle. Un seuil placé sous ce "
+                "plancher ne mesurerait que le hasard et produirait des alertes décoratives. "
+                + (
+                    "Ici l'amplitude reste dans l'ordre de grandeur du bruit : aucune instabilité "
+                    "temporelle détectable à cette résolution, et la différence entre plis ne "
+                    "justifie pas de recalibrage saisonnier."
+                    if ratio <= 2.5
+                    else "Ici l'amplitude dépasse nettement le bruit : la variation entre périodes "
+                    "est réelle et doit être traitée, pas mise sur le compte de l'échantillonnage."
+                ),
+                "",
+            ]
+        if not np.isnan(amplitude):
+            if amplitude <= self.thresholds["backtest_spread_max"]:
+                lines += [
+                    "**Lecture** : la qualité varie peu d'une période à l'autre. Le moteur tient "
+                    "aussi bien en régime creux qu'en pic, ce qui autorise une publication sans "
+                    "recalibrage saisonnier.",
+                    "",
+                ]
+            else:
+                lines += [
+                    "**Lecture** : la qualité varie fortement selon la période. Un NDCG moyen "
+                    "correct peut masquer un moteur qui s'effondre pendant les pics, quand le "
+                    "catalogue et les intentions changent le plus vite. Deux leviers : des "
+                    "features de saisonnalité et de fraîcheur du catalogue, et un recalibrage "
+                    "programmé plutôt qu'un réentraînement déclenché par une dérive globale.",
+                    "",
+                ]
+        worst = table.loc[pd.to_numeric(table["ndcg"], errors="coerce").idxmin()] if "ndcg" in table else None
+        if worst is not None:
+            lines += [
+                f"Le pli le plus faible est le n°{int(worst['pli'])} "
+                f"({worst['periode_debut']} → {worst['periode_fin']}, NDCG "
+                f"{_num(worst['ndcg'], 4)}, prévalence {_pct(worst['prevalence'], 2)}). C'est sur "
+                "cette fenêtre qu'il faut concentrer l'analyse d'erreurs : c'est là que le moteur "
+                "coûte le plus cher.",
+                "",
+            ]
+        return lines
+
+    def _errors_block(self, result: EvaluationResult) -> list[str]:
+        """List the most costly misrankings, split by error family.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        table = getattr(result, "errors", None)
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            return [
+                "## 10. Analyse des erreurs de classement",
+                "",
+                "Aucun mauvais classement significatif n'a été isolé sur ce split.",
+                "",
+            ]
+        displayed = table.head(TOP_ERRORS)
+        lines = [
+            "## 10. Analyse des erreurs de classement",
+            "",
+            "Deux familles, deux causes, deux correctifs. Un **oubli** est un article pertinent "
+            "relégué au-delà de la coupure : le moteur n'a pas su lire l'intention. Une **fausse "
+            "promesse** est un article non pertinent publié dans le top-K : le score est trop "
+            "confiant. Le coût NDCG mesure la contribution perdue (oubli) ou gaspillée (fausse "
+            "promesse) à cet emplacement, ce qui permet de traiter d'abord ce qui coûte vraiment "
+            "plutôt ce qui se voit le plus.",
+            "",
+            "| Type | Utilisateur | Article | Rang | Score | Pertinence | Coût | Stock | Vues 7j |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+        for row in displayed.itertuples():
+            user = getattr(row, self.group_column, getattr(row, "user_id", "n/d"))
+            item = getattr(row, self.item_column, getattr(row, "item_id", "n/d"))
+            kind = str(getattr(row, "type_erreur", "n/d"))
+            lines.append(
+                f"| {kind} | {user} | {item} | {int(getattr(row, 'rang', 0))} | "
+                f"{_num(getattr(row, 'score', np.nan), 4)} | "
+                f"{_num(getattr(row, 'pertinence', np.nan), 1)} | "
+                f"{_num(getattr(row, 'cout_ndcg', np.nan), 4)} | "
+                f"{'oui' if bool(getattr(row, 'en_stock', False)) else 'non'} | "
+                f"{_num(getattr(row, 'vues_7j', np.nan), 0)} |"
+            )
+        if "type_erreur" in table.columns:
+            counts = table["type_erreur"].value_counts()
+            forget = int(counts.get(LABEL_FORGET, counts.get("oubli", 0)))
+            promise = int(counts.get("fausse_promesse", 0))
+            lines += [
+                "",
+                f"Sur les {len(table)} mauvais classements isolés : {forget} oubli(s) et "
+                f"{promise} fausse(s) promesse(s). ",
+                "",
+            ]
+            if forget > promise:
+                lines += [
+                    "Les oublis dominent : le moteur manque des intentions réelles. Le levier "
+                    "prioritaire est l'enrichissement du signal d'intention — historique de "
+                    "consultation plus long, affinité par catégorie et par marque, signaux "
+                    "implicites (temps passé, ajouts au panier) — plutôt qu'un réglage de "
+                    "modèle, car le problème vient de ce que le modèle voit, pas de la façon dont "
+                    "il classe.",
+                    "",
+                ]
+            elif promise > forget:
+                lines += [
+                    "Les fausses promesses dominent : le moteur publie du bruit avec assurance. "
+                    "Le levier prioritaire est le calibrage du score — un modèle sur-confiant sur "
+                    "les articles très vus publiera des best-sellers non pertinents pour cet "
+                    "utilisateur — et la réduction du poids de la popularité brute au profit de "
+                    "l'affinité individualisée.",
+                    "",
+                ]
+            else:
+                lines += [
+                    "Les deux familles sont équilibrées : aucun levier unique ne résoudra "
+                    "l'ensemble, il faut traiter le signal d'intention et le calibrage du score "
+                    "en parallèle.",
+                    "",
+                ]
+        lines += [
+            f"Le détail complet est dans `artifacts/reports/errors.csv` "
+            f"({len(table)} lignes).",
+            "",
+        ]
+        return lines
+
+    def _drivers_block(self, result: EvaluationResult) -> list[str]:
+        """Report what the ranking actually depends on.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        table = getattr(result, "feature_importance", None)
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            return [
+                "## 11. Déterminants du classement",
+                "",
+                "Aucune importance n'a pu être calculée (features ou groupes indisponibles).",
+                "",
+            ]
+        cutoff = int(dict(result.extras or {}).get("top_k", self.top_k))
+        lines = [
+            "## 11. Déterminants du classement",
+            "",
+            f"Importance par permutation mesurée sur le NDCG@{cutoff} : chaque colonne est "
+            "mélangée, le classement est recalculé utilisateur par utilisateur, et la chute de "
+            "NDCG mesure la dépendance réelle du moteur à cette colonne. Ce n'est pas "
+            "l'importance native d'un arbre, qui mesure une réduction d'impureté sans rapport "
+            "avec la qualité d'un classement.",
+            "",
+            "| Rang | Feature | Perte de NDCG | Lecture |",
+            "| --- | --- | --- | --- |",
+        ]
+        method = str(table.get("method", pd.Series(["permutation_ndcg"])).iloc[0])
+        for position, row in enumerate(table.head(TOP_DRIVERS).itertuples(), start=1):
+            value = _float(row.importance)
+            lines.append(
+                f"| {position} | `{row.feature}` | {_num(value, 4)} | "
+                f"{self._driver_reading(str(row.feature), value)} |"
+            )
+        lines += [
+            "",
+            f"Méthode : `{method}`. Une importance négative signifie que mélanger la colonne "
+            "*améliore* le classement : la feature est alors du bruit actif, et la retirer est un "
+            "gain, pas une perte.",
+            "",
+        ]
+        return lines
+
+    @staticmethod
+    def _driver_reading(feature: str, importance: float) -> str:
+        """Return a one-line reading of a feature's contribution to the ranking.
+
+        Args:
+            feature: Feature name.
+            importance: Measured NDCG drop.
+
+        Returns:
+            The reading.
+        """
+        if importance < 0:
+            return "bruit actif : la retirer améliorerait le classement"
+        lowered = feature.lower()
+        if importance < 0.002:
+            return "contribution marginale"
+        if "affinity" in lowered or "match" in lowered:
+            return "affinité individualisée : le cœur du moteur"
+        if "views" in lowered or "popular" in lowered:
+            return "signal d'audience : rapproche le modèle du tri par popularité"
+        if "collab" in lowered or "similar" in lowered or "co_" in lowered:
+            return "signal collaboratif : la part de découverte du moteur"
+        if "intent" in lowered or "cart" in lowered or "search" in lowered:
+            return "intention récente : le signal le plus frais, et le plus volatil"
+        if "price" in lowered or "margin" in lowered or "promo" in lowered:
+            return "levier économique : influence le classement au-delà de la pertinence"
+        if "rating" in lowered or "review" in lowered:
+            return "preuve sociale : rassure sans personnaliser"
+        if "stock" in lowered or "avail" in lowered:
+            return "contrainte de disponibilité"
+        if "cold" in lowered or "new" in lowered or "age" in lowered:
+            return "fraîcheur : capacité à servir les nouveaux venus et le nouveau catalogue"
+        if any(part in lowered for part in ("weekend", "season", "dayof", "month", "hour", "date")):
+            return "saisonnalité : adapte le classement au moment"
+        return "contribution mesurée, à interpréter avec le métier"
+
+    def _hypotheses_block(self, result: EvaluationResult) -> list[str]:
+        """Turn the measured diagnostics into ranked, testable hypotheses.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        lines = ["## 12. Hypothèses de progression", ""]
+        lines += self._error_hypotheses(result)
+        lines += [
+            "Chaque hypothèse est formulée pour être réfutable par une mesure précise, pas par une "
+            "opinion : c'est ce qui distingue une piste de travail d'une intuition.",
+            "",
+        ]
+        return lines
+
+    def _error_hypotheses(self, result: EvaluationResult) -> list[str]:
+        """Derive the hypotheses from the measured diagnostics.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines, one bullet per hypothesis.
+        """
+        extras = dict(result.extras or {})
+        cutoff = int(extras.get("top_k", self.top_k))
+        hypotheses: list[tuple[float, str, str]] = []
+
+        gain = self._popularity_gain(result)
+        if not np.isnan(gain) and gain < self.thresholds["improvement_vs_popularity_min"]:
+            hypotheses.append(
+                (
+                    self.thresholds["improvement_vs_popularity_min"] - gain,
+                    "Le moteur n'apporte pas assez face au tri par popularité",
+                    f"Le gain mesuré est de {_signed(gain)} pour un seuil de "
+                    f"{self.thresholds['improvement_vs_popularity_min']:.0f} %. **Test** : "
+                    "entraîner une version sans aucune feature d'audience brute et comparer son "
+                    "NDCG. Si l'écart se réduit, le modèle sur-apprend la popularité ; s'il "
+                    "s'effondre, c'est l'affinité individualisée qui manque de signal.",
+                )
+            )
+
+        coverage = _float(extras.get("catalog_coverage"))
+        if not np.isnan(coverage) and coverage < self.coverage_min:
+            hypotheses.append(
+                (
+                    (self.coverage_min - coverage) * 100.0,
+                    "Le moteur appauvrit le catalogue",
+                    f"Couverture mesurée {_pct(coverage)} pour un seuil de "
+                    f"{_pct(self.coverage_min)}. **Test** : ajouter une pénalité de redondance par "
+                    "catégorie et par marque au moment de la publication, puis mesurer le NDCG "
+                    "perdu contre la couverture gagnée. Si le NDCG chute de moins d'un point pour "
+                    "dix points de couverture, l'arbitrage est favorable.",
+                )
+            )
+
+        cold_ratio = _float(extras.get("cold_start_recall_ratio"))
+        if not np.isnan(cold_ratio) and cold_ratio < self.thresholds["cold_start_ratio_min"]:
+            hypotheses.append(
+                (
+                    (self.thresholds["cold_start_ratio_min"] - cold_ratio) * 100.0,
+                    "Les nouveaux utilisateurs sont servis au rabais",
+                    f"Rappel froid à {_pct(cold_ratio)} du global pour un seuil de "
+                    f"{_pct(self.thresholds['cold_start_ratio_min'], 0)}. **Test** : entraîner un "
+                    "modèle distinct sur la population froide uniquement, avec les seules features "
+                    "de catalogue, et comparer son rappel à celui du modèle global sur ce segment. "
+                    "Un modèle dédié meilleur de plus de cinq points justifie une branche "
+                    "dédiée en production.",
+                )
+            )
+
+        out_of_stock = _float(extras.get("out_of_stock_published_share"))
+        if not np.isnan(out_of_stock) and out_of_stock > self.thresholds["out_of_stock_max"]:
+            hypotheses.append(
+                (
+                    (out_of_stock - self.thresholds["out_of_stock_max"]) * 100.0,
+                    "Des articles indisponibles occupent des emplacements rares",
+                    f"{_pct(out_of_stock)} des emplacements publiés sont perdus pour un seuil de "
+                    f"{_pct(self.thresholds['out_of_stock_max'], 0)}. **Test** : appliquer un "
+                    "filtre de disponibilité *après* le classement plutôt que de laisser le modèle "
+                    "l'apprendre, puis mesurer le NDCG sur les emplacements réellement publiables. "
+                    "Un filtre post-classement est gratuit et supprime mécaniquement ces pertes.",
+                )
+            )
+
+        table = getattr(result, "errors", None)
+        if isinstance(table, pd.DataFrame) and not table.empty and "type_erreur" in table.columns:
+            counts = table["type_erreur"].value_counts()
+            forget = int(counts.get("oubli", 0))
+            promise = int(counts.get("fausse_promesse", 0))
+            if forget > promise * 1.5:
+                hypotheses.append(
+                    (
+                        float(forget - promise),
+                        "Les intentions réelles sont manquées plutôt que mal classées",
+                        f"{forget} oublis contre {promise} fausses promesses sur les erreurs les "
+                        "plus coûteuses. **Test** : allonger la fenêtre d'historique de "
+                        "consultation et ajouter les signaux implicites (temps passé, ajouts au "
+                        "panier), puis mesurer le rappel. Si le rappel monte sans que la précision "
+                        "baisse, le signal manquait bien en amont du modèle.",
+                    )
+                )
+            elif promise > forget * 1.5:
+                hypotheses.append(
+                    (
+                        float(promise - forget),
+                        "Le score est trop confiant sur des articles non pertinents",
+                        f"{promise} fausses promesses contre {forget} oublis. **Test** : calibrer "
+                        "les probabilités (isotonique ou Platt) et mesurer la précision à K "
+                        "constant. Un modèle calibré ne change pas l'ordre des scores, il change "
+                        "la confiance avec laquelle on publie — et permet d'ajouter un seuil de "
+                        "publication qui retire les emplacements douteux.",
+                    )
+                )
+
+        importance = getattr(result, "feature_importance", None)
+        if isinstance(importance, pd.DataFrame) and not importance.empty:
+            negatives = importance[pd.to_numeric(importance["importance"], errors="coerce") < 0]
+            if not negatives.empty:
+                listed = ", ".join(f"`{name}`" for name in negatives["feature"].head(4))
+                hypotheses.append(
+                    (
+                        float(len(negatives)),
+                        "Des features dégradent activement le classement",
+                        f"{len(negatives)} colonne(s) ont une importance par permutation "
+                        f"négative ({listed}). "
+                        "**Test** : les retirer et réentraîner. Une importance négative signifie "
+                        "que le bruit qu'elles apportent coûte plus que l'information qu'elles "
+                        "portent.",
+                    )
+                )
+
+        dispersion = dict(extras.get("dispersion_backtest") or {})
+        amplitude = _float(dispersion.get("amplitude"))
+        if not np.isnan(amplitude) and amplitude > self.thresholds["backtest_spread_max"]:
+            hypotheses.append(
+                (
+                    amplitude * 100.0,
+                    "La qualité dépend de la période",
+                    f"Amplitude de NDCG de {_num(amplitude, 4)} entre plis chronologiques pour un "
+                    f"seuil de {self.thresholds['backtest_spread_max']:.3f}. **Test** : ajouter "
+                    "des features de saisonnalité et de fraîcheur du catalogue, puis mesurer "
+                    "l'amplitude. Si elle se réduit sans toucher au NDCG moyen, le moteur est "
+                    "devenu plus robuste sans devenir meilleur — ce qui est exactement l'objectif "
+                    "d'une publication en continu.",
+                )
+            )
+
+        precision = _float(result.metrics.get(f"precision_at_{cutoff}"))
+        recall = _float(result.metrics.get(f"recall_at_{cutoff}"))
+        if not np.isnan(precision) and not np.isnan(recall) and recall - precision > 0.45:
+            hypotheses.append(
+                (
+                    (recall - precision) * 100.0,
+                    "Le moteur est généreux mais bruyant",
+                    f"Rappel {_num(recall, 3)} contre précision {_num(precision, 3)} : l'écart de "
+                    f"{_num(recall - precision, 3)} indique que la liste publiée capture bien les "
+                    "intentions, mais au prix de nombreux emplacements perdus. **Test** : réduire "
+                    "K d'un cran et mesurer le couple précision/rappel. Si le NDCG ne baisse pas, "
+                    "les derniers emplacements ne servaient à rien.",
+                )
+            )
+
+        if not hypotheses:
+            return [
+                "- **Aucune hypothèse prioritaire ne se dégage des diagnostics** : tous les "
+                "objectifs sont respectés et aucune famille d'erreur ne domine. La progression "
+                "passerait par des changements de périmètre (nouveau catalogue, nouveaux signaux) "
+                "plutôt que par du réglage.",
+                "",
+            ]
+        hypotheses.sort(key=lambda item: item[0], reverse=True)
+        lines: list[str] = []
+        for _, title, body in hypotheses[:6]:
+            lines.append(f"- **{title}** — {body}")
+        lines.append("")
+        return lines
+
+    def _recommendations_block(self, result: EvaluationResult) -> list[str]:
+        """List the actionable recommendations, dynamic ones first.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        items = self.recommendations(result)
+        lines = ["## 13. Recommandations", ""]
+        for position, item in enumerate(items, start=1):
+            lines.append(f"{position}. {item}")
+        lines += [""]
+        return lines
+
+    def _dynamic_recommendations(self, result: EvaluationResult) -> list[str]:
+        """Derive recommendations from the measured diagnostics.
+
+        Les recommandations ne sont pas une liste générique : chacune est déclenchée par un
+        chiffre mesuré sur ce split précis, et cite ce chiffre. Un rapport dont les
+        recommandations seraient vraies pour n'importe quel projet ne vaudrait pas d'être lu.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The ordered recommendation list.
+        """
+        extras = dict(result.extras or {})
+        cutoff = int(extras.get("top_k", self.top_k))
+        items: list[tuple[float, str]] = []
+
+        gain = self._popularity_gain(result)
+        if not np.isnan(gain):
+            if gain < self.thresholds["improvement_vs_popularity_min"]:
+                items.append(
+                    (
+                        100.0 - min(gain, 100.0),
+                        f"Le gain sur le tri par popularité est de {_signed(gain)}, sous le seuil "
+                        f"de {self.thresholds['improvement_vs_popularity_min']:.0f} % : enrichir "
+                        "le signal d'affinité individualisée (catégorie, marque, prix) avant "
+                        "d'ajouter de la complexité au modèle.",
+                    )
+                )
+            else:
+                items.append(
+                    (
+                        min(gain, 100.0) / 4.0,
+                        f"Le gain sur le tri par popularité ({_signed(gain)} de NDCG@{cutoff}) "
+                        "justifie le modèle : le publier en A/B test contre le moteur existant "
+                        "pour mesurer le gain réel sur le taux de conversion, seule métrique que "
+                        "le NDCG approxime.",
+                    )
+                )
+
+        coverage = _float(extras.get("catalog_coverage"))
+        if not np.isnan(coverage):
+            if coverage < self.coverage_min:
+                items.append(
+                    (
+                        80.0,
+                        f"Couvrir {_pct(coverage)} du catalogue est sous le seuil de "
+                        f"{_pct(self.coverage_min)} : ajouter une pénalité de redondance par "
+                        "catégorie à la publication et surveiller la couverture comme une "
+                        "métrique de production, au même titre que le NDCG.",
+                    )
+                )
+            else:
+                items.append(
+                    (
+                        30.0,
+                        f"La couverture catalogue ({_pct(coverage)}) est au-dessus du seuil : "
+                        "l'intégrer au tableau de bord de production avec une alerte, car c'est "
+                        "le premier indicateur à se dégrader quand un moteur commence à se "
+                        "refermer sur ses best-sellers.",
+                    )
+                )
+
+        cold_ratio = _float(extras.get("cold_start_recall_ratio"))
+        if not np.isnan(cold_ratio) and cold_ratio < self.thresholds["cold_start_ratio_min"]:
+            items.append(
+                (
+                    75.0,
+                    f"Le rappel des nouveaux utilisateurs vaut {_pct(cold_ratio)} du rappel "
+                    f"global, sous le seuil de "
+                    f"{_pct(self.thresholds['cold_start_ratio_min'], 0)} : prévoir une branche "
+                    "dédiée au démarrage à froid, basée sur les attributs du catalogue et les "
+                    "préférences déclarées à l'inscription.",
+                )
+            )
+
+        out_of_stock = _float(extras.get("out_of_stock_published_share"))
+        if not np.isnan(out_of_stock) and out_of_stock > self.thresholds["out_of_stock_max"]:
+            items.append(
+                (
+                    70.0,
+                    f"{_pct(out_of_stock)} des emplacements publiés pointent vers un article "
+                    "indisponible : appliquer le filtre de stock après le classement plutôt que "
+                    "de laisser le modèle l'apprendre, ce qui supprime mécaniquement ces pertes.",
+                )
+            )
+
+        concentration = _float(extras.get("herfindahl_top_k"))
+        bias = _float(extras.get("popularity_bias_share"))
+        if not np.isnan(bias) and bias > 0.40:
+            items.append(
+                (
+                    60.0,
+                    f"Le premier décile d'audience capte {_pct(bias)} des emplacements "
+                    f"(Herfindahl {_num(concentration, 3)}) : mettre en place une exploration "
+                    "volontaire (epsilon-greedy ou ré-échantillonnage) sur une fraction du trafic "
+                    "pour casser la boucle de rétroaction avant qu'elle ne fige le catalogue.",
+                )
+            )
+
+        dispersion = dict(extras.get("dispersion_backtest") or {})
+        amplitude = _float(dispersion.get("amplitude"))
+        if not np.isnan(amplitude) and amplitude > self.thresholds["backtest_spread_max"]:
+            items.append(
+                (
+                    65.0,
+                    f"L'amplitude de NDCG entre périodes atteint {_num(amplitude, 4)} : prévoir "
+                    "un recalibrage saisonnier et des features de fraîcheur du catalogue, plutôt "
+                    "qu'un réentraînement déclenché par une dérive globale qui arriverait trop "
+                    "tard.",
+                )
+            )
+
+        importance = getattr(result, "feature_importance", None)
+        if isinstance(importance, pd.DataFrame) and not importance.empty:
+            negatives = importance[pd.to_numeric(importance["importance"], errors="coerce") < 0]
+            if not negatives.empty:
+                listed = ", ".join(f"`{name}`" for name in negatives["feature"].head(3))
+                items.append(
+                    (
+                        55.0,
+                        f"Retirer {len(negatives)} colonne(s) dont l'importance par permutation "
+                        f"est négative ({listed}) : elles dégradent le classement au lieu de "
+                        "l'aider.",
+                    )
+                )
+
+        errors = getattr(result, "errors", None)
+        if isinstance(errors, pd.DataFrame) and not errors.empty and "type_erreur" in errors.columns:
+            counts = errors["type_erreur"].value_counts()
+            forget = int(counts.get("oubli", 0))
+            promise = int(counts.get("fausse_promesse", 0))
+            if forget > promise:
+                items.append(
+                    (
+                        50.0,
+                        f"Les oublis dominent ({forget} contre {promise} fausses promesses) : "
+                        "allonger la fenêtre d'historique et ajouter les signaux implicites "
+                        "(temps passé, ajouts au panier) avant de toucher au modèle.",
+                    )
+                )
+            elif promise > forget:
+                items.append(
+                    (
+                        50.0,
+                        f"Les fausses promesses dominent ({promise} contre {forget} oublis) : "
+                        "calibrer les probabilités et introduire un seuil de publication qui "
+                        "retire les emplacements dont le score est trop faible.",
+                    )
+                )
+
+        trade_off = dict(extras.get("margin_trade_off") or {})
+        relevance = _float(trade_off.get("ndcg_pertinence"))
+        weighted = _float(trade_off.get("ndcg_pondere_marge"))
+        if not np.isnan(relevance) and not np.isnan(weighted):
+            items.append(
+                (
+                    40.0,
+                    f"Arbitrer explicitement entre pertinence (NDCG {_num(relevance, 3)}) et "
+                    f"classement pondéré par la marge (NDCG {_num(weighted, 3)}) : la différence "
+                    f"de {_num(abs(weighted - relevance), 4)} de NDCG doit être confrontée au "
+                    "revenu additionnel attendu, en comité, plutôt que laissée implicite dans le "
+                    "code de publication.",
+                )
+            )
+
+        items.sort(key=lambda item: item[0], reverse=True)
+        return [text for _, text in items]
+
+    def _figures_block(self, figures: Mapping[str, Path]) -> list[str]:
+        """Embed every generated figure.
+
+        Args:
+            figures: Figure name to path mapping.
+
+        Returns:
+            The Markdown lines.
+        """
+        if not figures:
+            return []
+        titles = {
+            "metrics_bar": "Qualité du classement publié contre les seuils",
+            "ceiling_position": "Position du modèle entre l'aléatoire et le plafond atteignable",
+            "baselines_comparison": "Modèle contre moteurs de référence",
+            "quality_vs_cutoff": "Qualité en fonction du nombre d'emplacements publiés",
+            "coverage_vs_cutoff": "Couverture et concentration en fonction de K",
+            "segment_breakdown": "NDCG par segment métier",
+            "stock_and_margin": "Audit des emplacements publiés : disponibilité et marge",
+            "backtest_stability": "Stabilité temporelle du NDCG",
+            "worst_misrankings": "Les mauvais classements les plus coûteux",
+            "feature_importance": "Importance par permutation sur le NDCG",
+        }
+        lines = ["## 14. Figures", ""]
+        for name, path in figures.items():
+            try:
+                relative = path.relative_to(self.paths.root)
+            except ValueError:
+                relative = path
+            lines += [f"### {titles.get(name, name.replace('_', ' ').capitalize())}", "", f"![{name}]({relative.as_posix()})", ""]
+        return lines
+
+    def _reproducibility_block(self, result: EvaluationResult, model: Any) -> list[str]:
+        """Document how to reproduce the evaluation exactly.
+
+        Args:
+            result: Evaluation result.
+            model: Optional model.
+
+        Returns:
+            The Markdown lines.
+        """
+        extras = dict(result.extras or {})
+        cutoffs = ", ".join(str(value) for value in extras.get("cutoffs", ()))
+        lines = [
+            "## 15. Reproductibilité",
+            "",
+            "| Élément | Valeur |",
+            "| --- | --- |",
+            f"| Split évalué | `{result.split}` |",
+            f"| Candidats | {result.n_samples:,} |".replace(",", " "),
+            f"| Utilisateurs | {int(_float(extras.get('users_total'), 0)):,} |".replace(",", " "),
+            f"| Prévalence de la pertinence | {_pct(extras.get('prevalence'), 2)} |",
+        ]
+        if model is not None:
+            lines.append(f"| Modèle | `{getattr(model, 'summary', lambda: model)()}` |")
+            lines.append(
+                f"| Tâche déclarée | `{getattr(model, 'task', result.task)}` |"
+            )
+        lines += [
+            f"| Métrique de décision | `{result.primary_metric}` |",
+            f"| Coupures évaluées | {cutoffs} |",
+            f"| Générateur de figures | `RankingPlots` |",
+            f"| Rapport machine | `artifacts/metrics/ranking_report.json` |",
+            "",
+            "Commandes de reproduction :",
+            "",
+            "```bash",
+            "make data          # génère le jeu de candidats (graine fixée par la configuration)",
+            "make train         # entraîne le modèle de classement",
+            "make evaluate      # produit ce rapport, les figures et les tables CSV",
+            "```",
+            "",
+            "La graine du tirage aléatoire de référence est celle de la configuration "
+            "(`seed`), si bien que la comparaison aux références est reproductible au bit près : "
+            "deux exécutions successives produisent les mêmes NDCG, y compris celui du moteur "
+            "aléatoire.",
+            "",
+        ]
+        return lines
+
+    def _limits_block(self, result: EvaluationResult) -> list[str]:
+        """State what this evaluation does not prove.
+
+        Args:
+            result: Evaluation result.
+
+        Returns:
+            The Markdown lines.
+        """
+        extras = dict(result.extras or {})
+        cutoff = int(extras.get("top_k", self.top_k))
+        reference = dict(extras.get("generation_reference") or {})
+        lines = [
+            "## 16. Limites de l'évaluation",
+            "",
+            "- **Les données sont synthétiques.** La pertinence observée est produite par un "
+            "générateur dont la structure est connue, y compris le bruit. Sur données réelles, le "
+            "bruit est corrélé à des causes non observées (stock réel, promotions concurrentes, "
+            "saisonnalité locale) et les valeurs absolues du NDCG ne sont pas transférables : "
+            "seules les comparaisons relatives (modèle contre popularité, segment contre segment) "
+            "le restent.",
+            "- **La pertinence est binaire et observée, pas révélée.** Le générateur marque un "
+            "candidat comme pertinent selon une probabilité latente ; en production, la vérité "
+            "vient d'un clic ou d'un achat, donc d'un biais d'exposition : on ne sait pas si un "
+            "article non cliqué était non pertinent ou simplement mal placé. Le NDCG mesuré ici "
+            "est donc un plafond optimiste par rapport à ce qu'on pourrait mesurer en ligne.",
+            "- **Aucune boucle de rétroaction n'est simulée.** Le jeu de candidats est figé : "
+            "publier un article n'augmente pas son audience future. En production, cette boucle "
+            "existe et tend à concentrer l'exposition sur ce qui est déjà populaire — d'où la "
+            "surveillance de l'indice de Herfindahl et de la part du décile le plus vu, mesurées "
+            "ici mais non projetées.",
+            f"- **Le classement est évalué hors ligne, à K fixé ({cutoff}).** La surface "
+            "d'affichage réelle, l'ordre de présentation et le contexte (recherche, page "
+            "d'accueil, e-mail) modifient l'expérience et ne sont pas modélisés. Un A/B test reste "
+            "la seule validation du gain business.",
+        ]
+        if not reference:
+            lines += [
+                "- **Aucun plafond atteignable n'est publié.** Sans métadonnées de génération, "
+                "les valeurs du NDCG doivent être lues uniquement en comparaison des références, "
+                "jamais dans l'absolu.",
+            ]
+        lines += [
+            "- **Le backtest est à volume constant.** Les plis chronologiques découpent la période "
+            "évaluée sans simuler l'arrivée de nouveaux utilisateurs ni le renouvellement du "
+            "catalogue, deux phénomènes qui dégradent un moteur réel plus vite que la dérive "
+            "statistique mesurée ici.",
+            "",
+        ]
+        return lines
+
+    # ------------------------------------------------------------------ helpers ---------
+    def _config_artifact(self, key: str, default: str) -> str:
+        """Read an artefact file name from the configuration.
+
+        Args:
+            key: Key inside the ``train.artifacts`` node.
+            default: Value used when the key is absent.
+
+        Returns:
+            The resolved file name.
+        """
+        artifacts = (self.config.get("train") or {}).get("artifacts") or {}
+        return str(artifacts.get(key) or default)
+
+
+__all__ = [
+    "BUSINESS_RECOMMENDATIONS",
+    "DATASET_NAME",
+    "DEFAULT_THRESHOLDS",
+    "PRIMARY_METRIC",
+    "ReportBuilder",
+    "TARGET_NAME",
+    "TOP_DRIVERS",
+    "TOP_ERRORS",
+    "USE_CASE_TITLE",
+]

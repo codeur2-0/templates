@@ -1,0 +1,44 @@
+# =================================================================================================
+# Modèle : Réseau TensorFlow subclassé (GradientTape)
+# -------------------------------------------------------------------------------------------------
+# Cette stack descend au niveau le plus bas du trio deep learning du dépôt : le réseau est
+# **subclassé** (`keras.Model` + `call`), les couches sont écrites à la main (`DenseBlock`,
+# `ResidualBlock`), le pipeline d'entrée est un `tf.data.Dataset` (shuffle semé, batch, prefetch)
+# et chaque pas d'optimisation passe par `tf.GradientTape` puis `optimizer.apply_gradients`, le
+# tout compilé en graphe par `tf.function`. On y voit ce que Keras masque : l'ajout des pertes de
+# régularisation, l'écrêtage du gradient (indispensable sur une cible en euros avant normalisation
+# interne), l'instantané des meilleurs poids.
+#
+# Alternatives considérées : linear : modèle linéaire entraîné par gradient — baseline interprétable, même contrat, residual_mlp : MLP à blocs résiduels écrits comme des couches personnalisées, autoencoder : reconstruction non supervisée, réservé à la détection d'anomalies.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.hidden_layers=...
+# =================================================================================================
+
+name: "Réseau TensorFlow subclassé (GradientTape)"
+algorithm: mlp
+class: TensorFlowModel
+task: regression
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `TensorFlowModel(params=...)` (voir src/models/model.py).
+params:
+  hidden_layers:
+  - 128
+  - 64
+  dropout: 0.2
+  activation: relu
+  batch_norm: true
+  optimizer: adamw
+  scheduler: cosine
+  clip_norm: 5.0
+
+# --- options spécifiques à la stack `tensorflow` ---------------------------------------
+deterministic: true
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold

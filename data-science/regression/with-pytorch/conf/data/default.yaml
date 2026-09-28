@@ -1,0 +1,45 @@
+# =================================================================================================
+# Données : Biens immobiliers résidentiels et prix de vente
+# -------------------------------------------------------------------------------------------------
+# Population de biens résidentiels mis en annonce sur une métropole française, avec leurs
+# caractéristiques physiques, énergétiques, géographiques et administratives, et le prix de vente
+# net vendeur observé. Les données sont générées par un modèle multiplicatif en log-prix : chaque
+# caractéristique contribue par un facteur explicite (prime de quartier, effet surface en log,
+# malus énergétique, effet étage), puis un bruit log-normal irréductible (sigma = 7 %) est ajouté.
+# Le signal est réaliste — hétéroscédastique, non linéaire, avec colinéarités — et plafonne la
+# performance atteignable.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: real_estate_prices
+n_samples: 8000
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: price_eur
+id_column: property_id
+time_column: null
+group_column: district
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['property_id', 'listing_date']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)

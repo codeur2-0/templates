@@ -1,0 +1,11 @@
+# ==============================================================================================
+# {{ spec.title }} — dépendances de développement
+# ------------------------------------------------------------------------------------------------
+# Installation : `pip install -r requirements-dev.txt`  (ou `make install-dev`)
+# ==============================================================================================
+-r requirements.txt
+
+# Qualité du code
+{% for dep in dev_dependencies if dep not in dependencies %}
+{{ dep }}
+{% endfor %}

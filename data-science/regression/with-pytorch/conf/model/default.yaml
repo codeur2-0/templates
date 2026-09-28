@@ -1,0 +1,44 @@
+# =================================================================================================
+# Modèle : Réseau de neurones PyTorch (MLP)
+# -------------------------------------------------------------------------------------------------
+# Un perceptron multicouche montre ce que les boosters masquent : la boucle d'entraînement (lots,
+# forward, perte, rétropropagation, pas d'optimiseur), la normalisation interne de la cible
+# continue (indispensable quand on optimise un MSE sur des montants en euros), la régularisation
+# par dropout et poids décroissant, l'ordonnancement du taux d'apprentissage et l'arrêt anticipé
+# avec restauration du meilleur état. Sur des données tabulaires, le réseau n'est généralement pas
+# le modèle le plus précis — c'est justement l'intérêt pédagogique : la comparaison avec scikit-
+# learn, XGBoost et LightGBM sur les mêmes données et les mêmes métriques montre quand le deep
+# learning est (et n'est pas) le bon choix.
+#
+# Alternatives considérées : linear : régression linéaire entraînée par gradient — baseline interprétable, même contrat, residual_mlp : MLP à connexions résiduelles, utile quand on empile les couches, autoencoder : reconstruction non supervisée, réservé à la détection d'anomalies.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.hidden_layers=...
+# =================================================================================================
+
+name: "Réseau de neurones PyTorch (MLP)"
+algorithm: mlp
+class: PyTorchModel
+task: regression
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `PyTorchModel(params=...)` (voir src/models/model.py).
+params:
+  hidden_layers:
+  - 128
+  - 64
+  dropout: 0.2
+  activation: relu
+  batch_norm: true
+  optimizer: adamw
+  scheduler: cosine
+
+# --- options spécifiques à la stack `pytorch` ---------------------------------------
+device: cpu
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold
