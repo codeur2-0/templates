@@ -1,0 +1,677 @@
+"""Synthetic data generator — Alarmes machine et mode de défaillance diagnostiqué.
+
+Business scenario
+        Chaque alarme automate arrête la machine et déclenche une intervention. Aujourd'hui,
+    l'équipe envoyée est choisie d'après le code d'alarme émis par l'automate, calculé par des
+    règles à seuil fixes qui ignorent la gamme de produit et les zones de bordure : une fois sur
+    deux environ, la mauvaise spécialité se déplace, la machine reste arrêtée pendant qu'on
+    envoie la bonne, et une panne réelle classée « fausse alarme » est acquittée alors que la
+    machine continue de se dégrader.
+
+How the data is built
+    Every row is one machine alarm. The generator never draws the label first and the sensors
+    afterwards: it reproduces the physics of a milling line and lets the failure mode follow.
+
+    1. **Operating conditions.** Each alarm is raised either in normal conditions or while the
+       machine is stressed along one hidden axis (cooling, electrical power, tool wear, cutting
+       strain), with a random severity. Borderline severities are what make the task realistic.
+    2. **Failure mode.** The class is drawn from a softmax over *physical* logits computed from
+       the observable sensors only: tool wear above ~200 min, a process-air temperature gap
+       below ~8.6 K at low speed, a mechanical power outside [3 500, 9 000] W, a wear x torque
+       strain above a threshold that depends on the product quality. The intercepts are
+       calibrated so that the class shares match the configuration. ``random_failure`` has no
+       physical logit at all: nothing observable announces it, which sets a structural ceiling.
+    3. **PLC alarm code.** ``alarm_code`` is what the controller emits today, from crude
+       threshold rules on the same sensors, with a share of corrupted codes. It is therefore a
+       noisy summary of the sensors and carries **no** information on the failure mode beyond
+       them — which keeps the published oracle a true ceiling.
+
+What is published
+    ``generation_metadata.json`` holds the class shares and three references computed on the
+    generated rows: the **oracle** (argmax of the true probabilities — the best any model can
+    do), the **majority class** floor and the current **PLC routing** (``alarm_code`` mapped to
+    a failure mode). The true probabilities themselves never leave the generator.
+
+Determinism
+    ``generate()`` is a pure function of ``(n_samples, seed, options)``: two runs produce the
+    same bytes, which is what makes stack-to-stack comparisons meaningful.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, ClassVar, Mapping, Sequence
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import accuracy_score, f1_score, recall_score
+
+from src.data.schemas import RawDataSchema
+from src.utils.io import write_json, write_table_multiple
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+
+logger = get_logger(__name__)
+
+#: Default dataset name (overridable through the constructor / Hydra config).
+DEFAULT_DATASET_NAME = "machine_failure_diagnosis"
+
+#: Target column.
+TARGET_COLUMN = "failure_mode"
+
+#: Failure modes, in canonical order (the first one is "no failure").
+FAILURE_MODES: tuple[str, ...] = (
+    "false_alarm",
+    "tool_wear",
+    "heat_dissipation",
+    "power_failure",
+    "overstrain",
+    "random_failure",
+)
+
+#: Target share of each failure mode (the logit intercepts are calibrated to reach them).
+DEFAULT_CLASS_SHARES: dict[str, float] = {
+    "false_alarm": 0.30,
+    "tool_wear": 0.20,
+    "heat_dissipation": 0.18,
+    "power_failure": 0.14,
+    "overstrain": 0.12,
+    "random_failure": 0.06,
+}
+
+#: Product quality variants and their share of the production.
+PRODUCT_QUALITIES: tuple[str, ...] = ("L", "M", "H")
+QUALITY_SHARES: tuple[float, ...] = (0.50, 0.30, 0.20)
+
+#: Overstrain threshold (tool wear x torque, in min.Nm) by product quality: a high-grade part
+#: is machined with a sturdier tool, so it tolerates more strain before breaking.
+OVERSTRAIN_THRESHOLDS: dict[str, float] = {"L": 11000.0, "M": 12000.0, "H": 13000.0}
+
+#: Production lines. ``line_d`` is the oldest one: its cooling circuit delivers less flow.
+PRODUCTION_LINES: tuple[str, ...] = ("line_a", "line_b", "line_c", "line_d")
+LINE_SHARES: tuple[float, ...] = (0.30, 0.28, 0.24, 0.18)
+
+#: Shifts and their share of the alarms (and the hours they cover).
+SHIFTS: tuple[str, ...] = ("day", "evening", "night")
+SHIFT_SHARES: tuple[float, ...] = (0.45, 0.32, 0.23)
+SHIFT_START_HOUR: dict[str, int] = {"day": 6, "evening": 14, "night": 22}
+
+#: Alarm codes emitted by the PLC.
+ALARM_CODES: tuple[str, ...] = ("E101", "E102", "E201", "E202", "E301", "E302", "E901")
+
+#: Current routing rule: PLC alarm code -> diagnosed failure mode.
+ALARM_CODE_RULE: dict[str, str] = {
+    "E101": "heat_dissipation",
+    "E102": "heat_dissipation",
+    "E201": "power_failure",
+    "E202": "power_failure",
+    "E301": "overstrain",
+    "E302": "tool_wear",
+    "E901": "false_alarm",
+}
+
+#: Hidden stress axes of the operating conditions.
+STRESS_AXES: tuple[str, ...] = ("thermal", "power", "wear", "strain")
+STRESS_SHARES: tuple[float, ...] = (0.28, 0.24, 0.27, 0.21)
+
+#: Physical limits of the failure zones (documented in data/README.md).
+TOOL_WEAR_LIMIT_MIN = 200.0
+TEMPERATURE_GAP_LIMIT_K = 8.6
+LOW_SPEED_LIMIT_RPM = 1380.0
+POWER_RANGE_W: tuple[float, float] = (3500.0, 9000.0)
+
+#: Columns holding missing values on purpose (sensor not fitted on every machine).
+MISSING_COLUMNS: tuple[str, ...] = ("vibration_mm_s",)
+
+
+class SyntheticDataGenerator:
+    """Deterministic generator of the machine failure diagnosis dataset.
+
+    Example:
+        >>> generator = SyntheticDataGenerator(n_samples=200, seed=42)
+        >>> frame = generator.generate()
+        >>> frame.shape[0]
+        200
+        >>> set(frame["failure_mode"]) <= set(FAILURE_MODES)
+        True
+    """
+
+    #: Options accepted from ``conf/data/default.yaml`` (extra keys of the data node).
+    SUPPORTED_OPTIONS: ClassVar[tuple[str, ...]] = (
+        "class_shares",
+        "stressed_share",
+        "signal_strength",
+        "alarm_code_noise",
+        "missing_rate",
+        "reference_date",
+        "window_days",
+    )
+
+    def __init__(
+        self,
+        *,
+        n_samples: int = 6000,
+        seed: int = 42,
+        dataset_name: str | None = None,
+        output_dir: Path | str | None = None,
+        formats: Sequence[str] = ("parquet", "csv"),
+        class_shares: Mapping[str, float] | None = None,
+        stressed_share: float = 0.80,
+        signal_strength: float = 9.0,
+        alarm_code_noise: float = 0.30,
+        missing_rate: float = 0.04,
+        reference_date: str = "2024-01-08",
+        window_days: int = 540,
+    ) -> None:
+        """Store the generation parameters.
+
+        Args:
+            n_samples: Number of alarms to generate.
+            seed: Random seed (fully determines the output).
+            dataset_name: Base file name (defaults to :data:`DEFAULT_DATASET_NAME`).
+            output_dir: Directory receiving the files (defaults to ``data/raw``).
+            formats: Formats to write (``parquet`` and/or ``csv``).
+            class_shares: Target share of each failure mode (defaults to
+                :data:`DEFAULT_CLASS_SHARES`); must cover every mode and sum to 1.
+            stressed_share: Share of alarms raised while the machine is stressed along a
+                hidden axis (the others are raised in normal operating conditions).
+            signal_strength: Logit jump inside a failure zone. It sets how separable the modes
+                are, hence the oracle ceiling: lower it and the task gets noisier.
+            alarm_code_noise: Share of PLC alarm codes replaced by a random code.
+            missing_rate: Share of rows without a vibration sensor.
+            reference_date: First day of the observation window (ISO date).
+            window_days: Length of the observation window, in days.
+
+        Raises:
+            ValueError: When a parameter is out of its valid range.
+        """
+        if n_samples < 50:
+            msg = f"n_samples must be >= 50 to keep the dataset meaningful, got {n_samples}"
+            raise ValueError(msg)
+        if not 0.0 <= stressed_share <= 1.0:
+            msg = f"stressed_share must be in [0, 1], got {stressed_share}"
+            raise ValueError(msg)
+        if signal_strength <= 0.0:
+            msg = f"signal_strength must be > 0, got {signal_strength}"
+            raise ValueError(msg)
+        if not 0.0 <= alarm_code_noise <= 1.0:
+            msg = f"alarm_code_noise must be in [0, 1], got {alarm_code_noise}"
+            raise ValueError(msg)
+        if not 0.0 <= missing_rate <= 0.5:
+            msg = f"missing_rate must be in [0, 0.5], got {missing_rate}"
+            raise ValueError(msg)
+        if window_days < 1:
+            msg = f"window_days must be >= 1, got {window_days}"
+            raise ValueError(msg)
+
+        self.n_samples = int(n_samples)
+        self.seed = int(seed)
+        self.dataset_name = dataset_name or DEFAULT_DATASET_NAME
+        self.output_dir = Path(output_dir) if output_dir is not None else ProjectPaths.from_root().raw_dir
+        self.formats = tuple(formats)
+        self.class_shares = _validated_shares(class_shares or DEFAULT_CLASS_SHARES)
+        self.stressed_share = float(stressed_share)
+        self.signal_strength = float(signal_strength)
+        self.alarm_code_noise = float(alarm_code_noise)
+        self.missing_rate = float(missing_rate)
+        self.reference_date = pd.Timestamp(reference_date)
+        self.window_days = int(window_days)
+        #: True class probabilities of the last generation (never exported with the data).
+        self._probabilities: np.ndarray | None = None
+        #: Calibrated logit intercepts of the last generation.
+        self._intercepts: np.ndarray | None = None
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], paths: ProjectPaths | None = None) -> SyntheticDataGenerator:
+        """Build the generator from a Hydra configuration mapping.
+
+        Args:
+            config: Root configuration (``data`` node) or the ``data`` node itself.
+            paths: Optional project paths.
+
+        Returns:
+            The configured generator.
+        """
+        data_node = dict(config.get("data", config) or {})
+        layout = paths or ProjectPaths.from_config(config)
+        options = {key: data_node[key] for key in cls.SUPPORTED_OPTIONS if key in data_node}
+        if "class_shares" in options and options["class_shares"] is not None:
+            options["class_shares"] = {str(key): float(value) for key, value in dict(options["class_shares"]).items()}
+        return cls(
+            n_samples=int(data_node.get("n_samples", 6000)),
+            seed=int(config.get("seed", data_node.get("seed", 42))),
+            dataset_name=str(data_node.get("dataset_name", DEFAULT_DATASET_NAME)),
+            output_dir=layout.raw_dir,
+            formats=tuple(data_node.get("formats", ("parquet", "csv"))),
+            **options,
+        )
+
+    # ------------------------------------------------------------------ generation ------
+    def generate(self) -> pd.DataFrame:
+        """Generate the dataset.
+
+        Returns:
+            A validated ``DataFrame`` with the columns declared in ``RawDataSchema``.
+        """
+        rng = np.random.default_rng(self.seed)
+        n = self.n_samples
+        logger.info(
+            "Generating {} alarms | seed={} stressed_share={} signal_strength={}",
+            n,
+            self.seed,
+            self.stressed_share,
+            self.signal_strength,
+        )
+
+        quality = rng.choice(PRODUCT_QUALITIES, size=n, p=QUALITY_SHARES)
+        line = rng.choice(PRODUCTION_LINES, size=n, p=LINE_SHARES)
+        shift = rng.choice(SHIFTS, size=n, p=SHIFT_SHARES)
+        stamps = self._timestamps(rng, shift)
+        sensors = self._operating_conditions(rng, line)
+        self._apply_stress(rng, sensors)
+        sensors = _clip_sensors(sensors)
+
+        probabilities = self._class_probabilities(sensors, quality, shift)
+        labels = _draw_labels(rng, probabilities)
+        alarm_code = self._alarm_codes(rng, sensors)
+
+        frame = pd.DataFrame(
+            {
+                "alarm_id": [f"ALM-{index:05d}" for index in range(1, n + 1)],
+                "alarm_timestamp": stamps,
+                "product_quality": quality.astype(str),
+                "production_line": line.astype(str),
+                "shift": shift.astype(str),
+                "alarm_code": alarm_code.astype(str),
+                "air_temperature_k": sensors["air"].round(2),
+                "process_temperature_k": sensors["process"].round(2),
+                "rotational_speed_rpm": sensors["speed"].round(1),
+                "torque_nm": sensors["torque"].round(2),
+                "tool_wear_min": sensors["wear"].round().astype("int64"),
+                "coolant_flow_l_min": sensors["coolant"].round(2),
+                "vibration_mm_s": sensors["vibration"].round(3),
+                "hours_since_maintenance": sensors["hours"].round(1),
+                TARGET_COLUMN: np.asarray(FAILURE_MODES)[labels],
+            }
+        )
+        frame = self._inject_missing(frame, rng)
+        self._probabilities = probabilities
+
+        validated = RawDataSchema.validate(frame)
+        shares = validated[TARGET_COLUMN].value_counts(normalize=True)
+        logger.info(
+            "Dataset generated | rows={} cols={} shares={} missing_cells={}",
+            len(validated),
+            validated.shape[1],
+            {str(key): round(float(value), 3) for key, value in shares.items()},
+            int(validated.isna().to_numpy().sum()),
+        )
+        return validated
+
+    def _timestamps(self, rng: np.random.Generator, shift: np.ndarray) -> pd.Series:
+        """Draw alarm timestamps consistent with the shift of each alarm."""
+        n = len(shift)
+        day_offset = rng.integers(0, self.window_days, size=n)
+        start_hour = np.asarray([SHIFT_START_HOUR[str(value)] for value in shift], dtype="int64")
+        hour_offset = rng.integers(0, 8, size=n)
+        minutes = rng.integers(0, 60, size=n)
+        offsets = pd.to_timedelta(day_offset, unit="D") + pd.to_timedelta(
+            start_hour + hour_offset, unit="h"
+        ) + pd.to_timedelta(minutes, unit="m")
+        return pd.Series(self.reference_date + offsets, name="alarm_timestamp")
+
+    def _operating_conditions(self, rng: np.random.Generator, line: np.ndarray) -> dict[str, np.ndarray]:
+        """Draw the operating point of every machine at alarm time (normal conditions)."""
+        n = len(line)
+        air = rng.normal(300.0, 1.8, size=n)
+        process = air + 10.0 + rng.normal(0.0, 0.9, size=n)
+        speed = rng.normal(1540.0, 150.0, size=n)
+        # Couple et vitesse sont anti-corrélés : à puissance de coupe donnée, une broche plus
+        # rapide travaille avec un effort plus faible.
+        torque = 40.0 - 0.028 * (speed - 1540.0) + rng.normal(0.0, 7.5, size=n)
+        wear = rng.uniform(0.0, 205.0, size=n)
+        coolant = rng.normal(12.5, 1.8, size=n) - 0.8 * (line == "line_d")
+        hours = rng.gamma(shape=2.0, scale=160.0, size=n)
+        return {
+            "air": air,
+            "process": process,
+            "speed": speed,
+            "torque": torque,
+            "wear": wear,
+            "coolant": coolant,
+            "hours": hours,
+        }
+
+    def _apply_stress(self, rng: np.random.Generator, sensors: dict[str, np.ndarray]) -> None:
+        """Push a share of the alarms towards one hidden failure zone, with a random severity.
+
+        Les axes de stress ne sont **pas** les classes : ils déplacent les capteurs vers une zone
+        de défaillance, et c'est la physique (les logits) qui décide ensuite du mode. Une sévérité
+        faible laisse la machine en bordure de zone, là où deux modes voisins se confondent.
+        """
+        n = len(sensors["air"])
+        stressed = rng.random(n) < self.stressed_share
+        axis = rng.choice(len(STRESS_AXES), size=n, p=STRESS_SHARES)
+        # Sévérité en racine d'un uniforme : l'automate alarme surtout quand le stress est déjà
+        # marqué, si bien que la majorité des alarmes sous stress tombent dans leur zone de
+        # défaillance — sans cela, le bruit de fond l'emporterait sur la physique.
+        severity = np.sqrt(rng.uniform(0.0, 1.0, size=n))
+
+        thermal = stressed & (axis == 0)
+        sensors["process"] = sensors["process"] - thermal * severity * 3.2
+        sensors["speed"] = sensors["speed"] - thermal * severity * 260.0
+        sensors["coolant"] = sensors["coolant"] - thermal * severity * 5.5
+
+        power = stressed & (axis == 1)
+        high_power = rng.random(n) < 0.55
+        up = power & high_power
+        down = power & ~high_power
+        sensors["torque"] = sensors["torque"] + up * severity * 24.0 - down * severity * 27.0
+        sensors["speed"] = sensors["speed"] + up * severity * 120.0 - down * severity * 170.0
+
+        wear = stressed & (axis == 2)
+        sensors["wear"] = np.where(wear, 175.0 + severity * 65.0 + rng.normal(0.0, 6.0, size=n), sensors["wear"])
+
+        strain = stressed & (axis == 3)
+        sensors["torque"] = sensors["torque"] + strain * (8.0 + severity * 18.0)
+        sensors["wear"] = np.where(strain, 110.0 + severity * 110.0, sensors["wear"])
+
+        # La vibration monte avec l'usure et l'effort : signal faible, mais réel.
+        base = rng.gamma(shape=4.0, scale=0.9, size=n)
+        sensors["vibration"] = (
+            base
+            + 0.012 * np.clip(sensors["wear"] - 150.0, 0.0, None)
+            + 0.05 * np.clip(sensors["torque"] - 50.0, 0.0, None)
+        )
+        sensors["hours"] = sensors["hours"] + stressed * rng.gamma(shape=1.5, scale=40.0, size=n)
+
+    def _class_probabilities(
+        self, sensors: Mapping[str, np.ndarray], quality: np.ndarray, shift: np.ndarray
+    ) -> np.ndarray:
+        """Compute the true class probabilities from the observable sensors only."""
+        strength = self.signal_strength
+        gap = sensors["process"] - sensors["air"]
+        power = sensors["torque"] * sensors["speed"] * 2.0 * np.pi / 60.0
+        strain = sensors["wear"] * sensors["torque"]
+        threshold = np.asarray([OVERSTRAIN_THRESHOLDS[str(value)] for value in quality])
+        vibration = (sensors["vibration"] - 4.0) / 2.0
+
+        scores = np.zeros((len(gap), len(FAILURE_MODES)), dtype="float64")
+        scores[:, 1] = strength * _sigmoid((sensors["wear"] - TOOL_WEAR_LIMIT_MIN) / 7.0) + 0.35 * vibration
+        scores[:, 2] = strength * _sigmoid((TEMPERATURE_GAP_LIMIT_K - gap) / 0.35) * _sigmoid(
+            (LOW_SPEED_LIMIT_RPM - sensors["speed"]) / 35.0
+        ) + 1.2 * _sigmoid((8.0 - sensors["coolant"]) / 0.8)
+        scores[:, 3] = strength * np.maximum(
+            _sigmoid((POWER_RANGE_W[0] - power) / 220.0), _sigmoid((power - POWER_RANGE_W[1]) / 260.0)
+        )
+        scores[:, 4] = strength * _sigmoid((strain - threshold) / 450.0) + 0.35 * vibration
+        # Les équipes de nuit acquittent plus souvent des alarmes intempestives (réglages de
+        # capteurs faits en journée) : effet faible, mais lisible dans l'EDA.
+        scores[:, 0] = 0.25 * (shift == "night")
+        # `random_failure` (colonne 5) n'a aucun terme : rien d'observable ne l'annonce.
+
+        targets = np.asarray([self.class_shares[mode] for mode in FAILURE_MODES], dtype="float64")
+        intercepts = _calibrate_intercepts(scores, targets)
+        self._intercepts = intercepts
+        return _softmax(scores + intercepts)
+
+    def _alarm_codes(self, rng: np.random.Generator, sensors: Mapping[str, np.ndarray]) -> np.ndarray:
+        """Emit the PLC alarm code from crude threshold rules on the sensors, plus corruption.
+
+        L'automate applique des règles à seuil fixes, dans un ordre de priorité (thermique, puis
+        électrique, puis effort, puis usure). Elles ignorent la gamme de produit et les zones de
+        bordure : c'est précisément ce que le modèle doit apprendre à mieux faire.
+        """
+        gap = sensors["process"] - sensors["air"]
+        power = sensors["torque"] * sensors["speed"] * 2.0 * np.pi / 60.0
+        codes = np.full(len(gap), "E901", dtype=object)
+        codes[sensors["wear"] > 190.0] = "E302"
+        codes[sensors["torque"] > 58.0] = "E301"
+        codes[power < 3800.0] = "E202"
+        codes[power > 8800.0] = "E201"
+        thermal = gap < 8.8
+        codes[thermal] = "E102"
+        codes[thermal & (sensors["speed"] < 1400.0)] = "E101"
+        corrupted = rng.random(len(codes)) < self.alarm_code_noise
+        codes[corrupted] = rng.choice(ALARM_CODES, size=int(corrupted.sum()))
+        return np.asarray(codes, dtype=str)
+
+    def _inject_missing(self, frame: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+        """Blank the vibration sensor on machines that are not equipped with one."""
+        output = frame.copy()
+        for column in MISSING_COLUMNS:
+            mask = rng.random(len(output)) < self.missing_rate
+            output.loc[mask, column] = np.nan
+            logger.debug("Column '{}' | {:.2%} missing values", column, float(mask.mean()))
+        return output
+
+    # ------------------------------------------------------------------ export ----------
+    def export(self, frame: pd.DataFrame | None = None) -> dict[str, Path]:
+        """Write the dataset in every configured format.
+
+        Args:
+            frame: Data to write; generated when ``None``.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        data = frame if frame is not None else self.generate()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        base = self.output_dir / self.dataset_name
+        written = write_table_multiple(data, base, formats=self.formats)
+        logger.info("Dataset exported: {}", {fmt: str(path) for fmt, path in written.items()})
+        return written
+
+    def run(self) -> dict[str, Path]:
+        """Generate, export and persist the generation metadata.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        frame = self.generate()
+        written = self.export(frame)
+        payload = self.metadata(frame)
+        payload["files"] = {fmt: str(path) for fmt, path in written.items()}
+        write_json(self.output_dir / "generation_metadata.json", payload)
+        return written
+
+    def sample(self, n_samples: int, *, with_target: bool = False) -> pd.DataFrame:
+        """Draw a small sample, typically used to demo inference.
+
+        Args:
+            n_samples: Number of rows.
+            with_target: Keep the target column (evaluation) or drop it (real inference).
+
+        Returns:
+            The sampled frame.
+        """
+        frame = self.generate()
+        sample_frame = frame.head(max(int(n_samples), 1)).copy()
+        if not with_target and TARGET_COLUMN in sample_frame.columns:
+            sample_frame = sample_frame.drop(columns=[TARGET_COLUMN])
+        return sample_frame
+
+    # ------------------------------------------------------------------ metadata --------
+    def references(self, frame: pd.DataFrame) -> dict[str, Any]:
+        """Score the three references a diagnosis model must be read against.
+
+        * **oracle** — argmax of the true probabilities: the reachable ceiling. It never
+          predicts ``random_failure`` (no observable signal), so its macro-F1 stays below 1;
+        * **majority** — always answer the most frequent mode: the floor;
+        * **alarm_code** — the current PLC routing: the business reference to beat.
+
+        Args:
+            frame: Frame produced by the **last** :meth:`generate` call.
+
+        Returns:
+            Mapping of reference metrics (flat keys, JSON friendly).
+
+        Raises:
+            RuntimeError: When no generation has run yet.
+        """
+        if self._probabilities is None or len(self._probabilities) != len(frame):
+            msg = "references() needs the frame produced by the last generate() call"
+            raise RuntimeError(msg)
+        truth = frame[TARGET_COLUMN].astype(str).to_numpy()
+        labels = list(FAILURE_MODES)
+        oracle = np.asarray(FAILURE_MODES)[self._probabilities.argmax(axis=1)]
+        majority_mode = str(pd.Series(truth).value_counts().idxmax())
+        majority = np.full(len(truth), majority_mode)
+        rule = frame["alarm_code"].astype(str).map(ALARM_CODE_RULE).fillna("false_alarm").to_numpy()
+        index = {mode: position for position, mode in enumerate(FAILURE_MODES)}
+        true_probability = self._probabilities[np.arange(len(truth)), [index[value] for value in truth]]
+
+        payload: dict[str, Any] = {"majority_class": majority_mode}
+        for name, predicted in (("oracle", oracle), ("majority", majority), ("alarm_code", rule)):
+            prefix = "ceiling" if name == "oracle" else "baseline"
+            payload[f"accuracy_{prefix}_{name}"] = round(float(accuracy_score(truth, predicted)), 4)
+            payload[f"f1_macro_{prefix}_{name}"] = round(
+                float(f1_score(truth, predicted, labels=labels, average="macro", zero_division=0)), 4
+            )
+        payload["log_loss_ceiling_oracle"] = round(float(-np.mean(np.log(np.clip(true_probability, 1e-12, 1.0)))), 4)
+        payload["expected_accuracy_ceiling_oracle"] = round(float(self._probabilities.max(axis=1).mean()), 4)
+        payload["recall_per_class_oracle"] = {
+            mode: round(float(value), 4)
+            for mode, value in zip(
+                labels, recall_score(truth, oracle, labels=labels, average=None, zero_division=0), strict=True
+            )
+        }
+        return payload
+
+    def metadata(self, frame: pd.DataFrame) -> dict[str, Any]:
+        """Build the traceability payload of a generation run.
+
+        The references (oracle, majority, PLC routing) are published at the root of the payload,
+        which is where the evaluator reads them.
+
+        Args:
+            frame: Generated data (the output of the last :meth:`generate` call).
+
+        Returns:
+            JSON-serialisable metadata (seed, shape, dtypes, class shares, references).
+        """
+        missing = frame.isna().sum()
+        target = frame[TARGET_COLUMN] if TARGET_COLUMN in frame.columns else None
+        payload: dict[str, Any] = {
+            "dataset_name": self.dataset_name,
+            "generator": type(self).__name__,
+            "seed": self.seed,
+            "n_samples": int(len(frame)),
+            "n_columns": int(frame.shape[1]),
+            "columns": list(frame.columns),
+            "dtypes": {column: str(dtype) for column, dtype in frame.dtypes.items()},
+            "missing_cells": int(missing.sum()),
+            "missing_rate_by_column": {
+                str(column): round(float(value) / max(len(frame), 1), 4)
+                for column, value in missing[missing > 0].items()
+            },
+            "options": {
+                "class_shares": dict(self.class_shares),
+                "stressed_share": self.stressed_share,
+                "signal_strength": self.signal_strength,
+                "alarm_code_noise": self.alarm_code_noise,
+                "missing_rate": self.missing_rate,
+            },
+            "intercepts": None
+            if self._intercepts is None
+            else {mode: round(float(value), 4) for mode, value in zip(FAILURE_MODES, self._intercepts, strict=True)},
+            "target": None
+            if target is None
+            else {
+                "column": TARGET_COLUMN,
+                "shares": {str(key): round(float(value), 4) for key, value in target.value_counts(normalize=True).items()},
+                "counts": {str(key): int(value) for key, value in target.value_counts().items()},
+            },
+            "numeric_summary": {
+                column: {
+                    "mean": round(float(frame[column].mean()), 4),
+                    "std": round(float(frame[column].std()), 4),
+                    "min": round(float(frame[column].min()), 4),
+                    "max": round(float(frame[column].max()), 4),
+                }
+                for column in frame.select_dtypes(include=[np.number]).columns
+            },
+        }
+        if target is not None and self._probabilities is not None and len(self._probabilities) == len(frame):
+            payload.update(self.references(frame))
+        return payload
+
+
+def _validated_shares(shares: Mapping[str, float]) -> dict[str, float]:
+    """Check that the class shares cover every failure mode and sum to one."""
+    unknown = sorted(set(shares) - set(FAILURE_MODES))
+    missing = sorted(set(FAILURE_MODES) - set(shares))
+    if unknown or missing:
+        msg = f"class_shares must cover exactly {FAILURE_MODES} (unknown={unknown}, missing={missing})"
+        raise ValueError(msg)
+    values = {mode: float(shares[mode]) for mode in FAILURE_MODES}
+    if any(value <= 0.0 for value in values.values()):
+        msg = f"class_shares must be strictly positive, got {values}"
+        raise ValueError(msg)
+    total = sum(values.values())
+    if abs(total - 1.0) > 1e-6:
+        msg = f"class_shares must sum to 1, got {total:.6f}"
+        raise ValueError(msg)
+    return values
+
+
+def _clip_sensors(sensors: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Clip every sensor inside the bounds declared by ``RawDataSchema``."""
+    bounds = {
+        "air": (290.0, 310.0),
+        "process": (295.0, 322.0),
+        "speed": (900.0, 2600.0),
+        "torque": (2.0, 90.0),
+        "wear": (0.0, 260.0),
+        "coolant": (1.0, 22.0),
+        "vibration": (0.0, 30.0),
+        "hours": (0.0, 3000.0),
+    }
+    return {name: np.clip(values, *bounds[name]) if name in bounds else values for name, values in sensors.items()}
+
+
+def _sigmoid(values: np.ndarray) -> np.ndarray:
+    """Numerically safe logistic function."""
+    return 1.0 / (1.0 + np.exp(-np.clip(values, -40.0, 40.0)))
+
+
+def _softmax(logits: np.ndarray) -> np.ndarray:
+    """Row-wise softmax."""
+    shifted = logits - logits.max(axis=1, keepdims=True)
+    exponentials = np.exp(shifted)
+    return exponentials / exponentials.sum(axis=1, keepdims=True)
+
+
+def _calibrate_intercepts(scores: np.ndarray, targets: np.ndarray, *, iterations: int = 300) -> np.ndarray:
+    """Find the intercepts whose softmax reproduces the target class shares.
+
+    Chaque itération corrige l'ordonnée de chaque classe du log-rapport entre la part visée et la
+    part obtenue : c'est un ajustement proportionnel itératif, qui converge en quelques dizaines
+    de pas et **préserve l'ordre** des probabilités à l'intérieur de chaque classe. Seul le point
+    de fonctionnement bouge, jamais le signal.
+
+    Args:
+        scores: Physical logits, one column per failure mode.
+        targets: Target share of each failure mode.
+        iterations: Maximum number of correction steps.
+
+    Returns:
+        The intercepts, the first mode (``false_alarm``) being the reference at 0.
+    """
+    intercepts = np.log(targets)
+    for _ in range(iterations):
+        shares = _softmax(scores + intercepts).mean(axis=0)
+        step = np.log(targets / np.clip(shares, 1e-12, None))
+        intercepts = intercepts + step
+        intercepts = intercepts - intercepts[0]
+        if float(np.abs(step).max()) < 1e-9:
+            break
+    return intercepts
+
+
+def _draw_labels(rng: np.random.Generator, probabilities: np.ndarray) -> np.ndarray:
+    """Draw one class index per row from its probability vector (inverse CDF)."""
+    cumulative = probabilities.cumsum(axis=1)
+    draws = rng.random((probabilities.shape[0], 1))
+    labels = (draws > cumulative).sum(axis=1)
+    return np.minimum(labels, probabilities.shape[1] - 1)

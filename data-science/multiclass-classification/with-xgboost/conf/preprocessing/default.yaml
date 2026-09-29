@@ -1,0 +1,47 @@
+# =================================================================================================
+# Preprocessing & feature engineering
+# -------------------------------------------------------------------------------------------------
+# Décrit le pipeline appliqué aux données (nettoyage, encodage, scaling) ainsi que les features
+# dérivées construites par `src/features/build_features.py`.
+#
+# Règle d'or : tout ce qui est **appris** sur les données (moyennes, médianes, catégories,
+# encodeurs) doit être appris sur le train uniquement, puis appliqué au val/test. C'est le rôle
+# du pipeline scikit-learn encapsulé dans `src/preprocessing/pipelines.py`.
+# =================================================================================================
+
+numeric:
+  imputer: median
+  imputer_fill_value: 0.0
+  clip_outliers: true
+  clip_quantiles:
+  - 0.005
+  - 0.995
+  scaler: standard
+  log1p_columns: []
+categorical:
+  imputer: most_frequent
+  imputer_fill_value: unknown
+  encoder: onehot
+  handle_unknown: ignore
+  min_frequency: 0.01
+  max_categories: 12
+features:
+- type: difference
+  name: temperature_gap_k
+  left: process_temperature_k
+  right: air_temperature_k
+- type: product
+  name: power_proxy
+  a: torque_nm
+  b: rotational_speed_rpm
+- type: product
+  name: wear_torque
+  a: tool_wear_min
+  b: torque_nm
+columns: {}
+validation:
+  raw: true
+  processed: true
+  inference: true
+  strict: true
+  lazy: false

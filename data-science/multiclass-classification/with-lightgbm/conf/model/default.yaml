@@ -1,0 +1,49 @@
+# =================================================================================================
+# Modèle : Gradient boosting LightGBM (multi-classes)
+# -------------------------------------------------------------------------------------------------
+# LightGBM construit un arbre par classe et par itération (objectif softmax), en croissance leaf-
+# wise : il capte les seuils physiques qui séparent les modes et leurs interactions avec la gamme,
+# gère les manquants nativement et s'arrête seul grâce à l'early stopping sur la log loss multi-
+# classes de validation. Les arbres sont volontairement petits (15 feuilles) : le signal tient en
+# quelques seuils, et un ensemble profond deviendrait sur-confiant alors que la décision à coût
+# minimal a besoin de probabilités fidèles. Aucune pondération de classes : l'asymétrie des
+# erreurs est portée par la matrice de coûts.
+#
+# Alternatives considérées : lightgbm_dart : dropout sur les arbres, régularise les gros ensembles (early stopping indisponible), lightgbm_goss : échantillonnage par gradient, plus rapide sur de très gros volumes, logistic_regression : baseline linéaire et bien calibrée, aveugle aux seuils sans features physiques.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_estimators=...
+# =================================================================================================
+
+name: "Gradient boosting LightGBM (multi-classes)"
+algorithm: lightgbm
+class: LightGBMModel
+task: multiclass
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `LightGBMModel(params=...)` (voir src/models/model.py).
+params:
+  n_estimators: 400
+  num_leaves: 15
+  max_depth: -1
+  learning_rate: 0.06
+  min_child_samples: 40
+  subsample: 0.9
+  subsample_freq: 1
+  colsample_bytree: 0.8
+  reg_lambda: 1.0
+  reg_alpha: 0.0
+  min_split_gain: 0.0
+  importance_type: gain
+
+# --- options spécifiques à la stack `lightgbm` ---------------------------------------
+early_stopping_rounds: 30
+eval_metric: multi_logloss
+native_categorical: true
+cross_validation:
+  enabled: true
+  folds: 5
+  strategy: stratified

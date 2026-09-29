@@ -138,12 +138,58 @@ def _pr_auc(inputs: MetricInputs) -> float:
 
 def _log_loss(inputs: MetricInputs) -> float:
     """Cross-entropy loss (requires probabilities)."""
-    probabilities = inputs.y_proba
-    if probabilities is None:
+    if inputs.y_proba is None:
         logger.warning("log_loss requires probabilities; returning NaN")
         return float("nan")
-    labels = np.unique(np.asarray(inputs.y_true))
+    probabilities, labels = _sorted_probabilities(inputs)
     return float(sk_metrics.log_loss(inputs.y_true, probabilities, labels=labels))
+
+
+def _roc_auc_ovr(inputs: MetricInputs) -> float:
+    """Macro-averaged one-vs-rest ROC AUC of a multiclass model."""
+    if inputs.y_proba is None:
+        logger.warning("roc_auc_ovr requires probabilities; returning NaN")
+        return float("nan")
+    if len(np.unique(np.asarray(inputs.y_true))) < 2:
+        logger.warning("roc_auc_ovr undefined: a single class is present in the evaluation split")
+        return float("nan")
+    probabilities, labels = _sorted_probabilities(inputs)
+    return float(
+        sk_metrics.roc_auc_score(
+            inputs.y_true, probabilities, multi_class="ovr", average="macro", labels=labels
+        )
+    )
+
+
+def _class_labels(inputs: MetricInputs) -> np.ndarray:
+    """Return the class labels matching the probability columns.
+
+    The model's ``classes_`` (passed as ``extra["classes"]``) is the only reliable source: a split
+    that misses one class would otherwise shift every probability column onto the wrong label,
+    and scikit-learn refuses a label list shorter than the probability matrix.
+    """
+    classes = (inputs.extra or {}).get("classes")
+    if classes is not None and len(classes) > 0:
+        return np.asarray(classes)
+    return np.unique(np.asarray(inputs.y_true))
+
+
+def _sorted_probabilities(inputs: MetricInputs) -> tuple[np.ndarray, np.ndarray]:
+    """Return the probability matrix and its labels, both in sorted label order.
+
+    Piège de scikit-learn : ``log_loss`` trie ``labels`` en interne (``LabelBinarizer``) et lit
+    les colonnes de probabilités dans cet ordre trié, tandis que ``roc_auc_score`` refuse des
+    labels non triés. Des colonnes rangées dans un ordre métier seraient donc lues de travers —
+    sans la moindre erreur pour ``log_loss``. On réaligne colonnes et labels sur l'ordre trié
+    (tri natif : des entiers restent triés numériquement). En binaire, les labels issus de
+    ``np.unique`` sont déjà triés et rien ne change.
+    """
+    labels = _class_labels(inputs)
+    matrix = np.asarray(inputs.y_proba)
+    if matrix.ndim == 2 and matrix.shape[1] == len(labels):
+        order = np.argsort(labels, kind="stable")
+        return matrix[:, order], labels[order]
+    return matrix, labels
 
 
 def _mcc(inputs: MetricInputs) -> float:
@@ -514,6 +560,13 @@ METRICS: dict[str, MetricDefinition] = {
     "mcc": MetricDefinition(
         "mcc", _mcc, tasks=_CLASSIFICATION_TASKS, description="Corrélation de Matthews"
     ),
+    "roc_auc_ovr": MetricDefinition(
+        "roc_auc_ovr",
+        _roc_auc_ovr,
+        requires=frozenset({"y_true", "y_proba"}),
+        tasks=frozenset({"multiclass"}),
+        description="Aire sous la courbe ROC, un-contre-tous, moyenne macro",
+    ),
     # regression / forecasting
     "rmse": MetricDefinition(
         "rmse",
@@ -667,6 +720,8 @@ METRICS_BY_TASK: dict[str, list[str]] = {
         "precision_macro",
         "recall_macro",
         "log_loss",
+        "mcc",
+        "roc_auc_ovr",
     ],
     "regression": ["rmse", "mae", "r2", "mape", "smape", "max_error"],
     "forecasting": ["mae", "rmse", "mape", "smape", "mase", "r2"],

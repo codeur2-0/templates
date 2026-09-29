@@ -1,0 +1,43 @@
+# =================================================================================================
+# Modèle : Réseau de neurones Keras (API fonctionnelle, softmax)
+# -------------------------------------------------------------------------------------------------
+# L'API fonctionnelle déclare le graphe (entrées -> couches denses -> softmax), le compile avec
+# une entropie croisée catégorielle creuse et laisse `fit` piloter l'entraînement avec des
+# callbacks éprouvés (EarlyStopping avec restauration des meilleurs poids, ReduceLROnPlateau). Sur
+# ces données tabulaires, le réseau n'est pas attendu devant le boosting : la comparaison à
+# protocole identique est l'objet du dépôt. Aucune pondération de classes : l'asymétrie des
+# erreurs est portée par la matrice de coûts, et la décision à coût minimal a besoin de
+# probabilités softmax non déformées.
+#
+# Alternatives considérées : linear : modèle linéaire compilé à sortie softmax — baseline interprétable, même contrat, residual_mlp : MLP à blocs résiduels, utile quand on empile les couches.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.hidden_layers=...
+# =================================================================================================
+
+name: "Réseau de neurones Keras (API fonctionnelle, softmax)"
+algorithm: mlp
+class: KerasModel
+task: multiclass
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `KerasModel(params=...)` (voir src/models/model.py).
+params:
+  hidden_layers:
+  - 64
+  - 32
+  dropout: 0.2
+  activation: relu
+  batch_norm: false
+  optimizer: adamw
+  scheduler: cosine
+
+# --- options spécifiques à la stack `keras` ---------------------------------------
+deterministic: true
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: stratified

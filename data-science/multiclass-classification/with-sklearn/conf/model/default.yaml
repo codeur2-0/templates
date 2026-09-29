@@ -1,0 +1,44 @@
+# =================================================================================================
+# Modèle : Gradient boosting par histogrammes (HistGradientBoostingClassifier)
+# -------------------------------------------------------------------------------------------------
+# Le gradient boosting par histogrammes apprend directement les seuils physiques qui séparent les
+# modes (usure au-delà de 200 min, écart thermique à basse vitesse, puissance hors plage) et leurs
+# interactions avec la gamme de produit, sans transformation manuelle ; il gère nativement la
+# vibration manquante et reste déterministe à graine fixée. Il est volontairement **petit** (100
+# itérations, 8 feuilles) : le signal tient en quelques seuils, et un boosting profond (300
+# itérations x 31 feuilles) n'améliore pas le macro-F1 de validation mais devient sur-confiant
+# (ECE 0,13 contre 0,06, log loss 0,96 contre 0,71) tout en coûtant vingt fois plus cher à
+# entraîner. Des probabilités fidèles comptent ici plus qu'un point de macro-F1 : la décision à
+# coût minimal les multiplie par des euros. Pour la même raison, aucune pondération de classes
+# n'est appliquée — l'asymétrie des erreurs est portée par la matrice de coûts, pas par le modèle.
+#
+# Alternatives considérées : logistic_regression : baseline linéaire lisible et bien calibrée ; elle reste 8 points de macro-F1 sous le boosting, faute de capter les seuils et leurs interactions avec la gamme, random_forest : même macro-F1 et même log loss au bruit près, très rapide, mais une calibration moins fiable pour décider (ECE 0,08, et 0,14 avec pondération des classes), hist_gradient_boosting profond (300 x 31) : aucun gain de macro-F1, sur-confiance mesurée (ECE 0,13), entraînement 20x plus lent, class_weight=balanced : relève le rappel des modes rares à l'argmax, mais déforme les probabilités ; inutile dès que la décision passe par les coûts.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.max_iter=...
+# =================================================================================================
+
+name: "Gradient boosting par histogrammes (HistGradientBoostingClassifier)"
+algorithm: hist_gradient_boosting
+class: SklearnModel
+task: multiclass
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `SklearnModel(params=...)` (voir src/models/model.py).
+params:
+  max_iter: 100
+  learning_rate: 0.1
+  max_leaf_nodes: 8
+  min_samples_leaf: 40
+  l2_regularization: 1.0
+  early_stopping: false
+  random_state: 42
+
+# --- options spécifiques à la stack `sklearn` ---------------------------------------
+cross_validation:
+  enabled: true
+  folds: 5
+  strategy: stratified

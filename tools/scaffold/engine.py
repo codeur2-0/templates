@@ -84,7 +84,9 @@ def _task_dir(family: FamilySpec) -> str:
     """Map a family task onto its template directory name."""
     aliases = {
         "binary": "classification",
-        "multiclass": "classification",
+        # Le multi-classes a sa propre couche : sa décision (argmax, coût minimal, revue experte)
+        # n'a rien de commun avec le seuil de la classification binaire.
+        "multiclass": "multiclass",
         "regression": "regression",
         "clustering": "clustering",
         "forecasting": "forecasting",

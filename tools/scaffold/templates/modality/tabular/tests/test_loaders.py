@@ -284,13 +284,18 @@ class TestDatasetSplitter:
     def test_stratification_preserves_class_balance(
         self, split_frames: Any, app_config: Any
     ) -> None:
-        """La stratification conserve la proportion de la classe positive (± 5 points)."""
+        """La stratification conserve la proportion de chaque classe (± 5 points).
+
+        La comparaison porte sur la part de **chaque** classe : en binaire, elle équivaut à celle
+        de la classe positive ; en multi-classes (libellés texte), une moyenne n'aurait aucun sens.
+        """
         target = app_config.data.target
         if target is None or not app_config.train.split.stratify:
             pytest.skip("tâche non supervisée ou stratification désactivée")
-        global_rate = float(split_frames.train[target].mean())
-        test_rate = float(split_frames.test[target].mean())
-        assert abs(global_rate - test_rate) <= 0.05
+        train_share = split_frames.train[target].astype(str).value_counts(normalize=True)
+        test_share = split_frames.test[target].astype(str).value_counts(normalize=True)
+        gaps = train_share.subtract(test_share, fill_value=0.0).abs()
+        assert float(gaps.max()) <= 0.05
 
     def test_no_row_overlap(self, split_frames: Any, app_config: Any) -> None:
         """Aucune ligne ne doit apparaître dans deux splits (fuite de données)."""

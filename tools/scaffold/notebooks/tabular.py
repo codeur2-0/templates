@@ -185,6 +185,24 @@ def _is_ranking(context: NotebookContext) -> bool:
     return str(getattr(context.spec.metrics, "task", "")) == "ranking"
 
 
+def _is_multiclass(context: NotebookContext) -> bool:
+    """Return ``True`` when the project predicts one label among more than two classes.
+
+    Un multi-classes partage la grammaire de la classification, mais ni sa décision (argmax et
+    matrice de coûts au lieu d'un seuil) ni ses références (règle métier et plafond oracle au lieu
+    de la seule classe majoritaire) : il tomberait sinon dans les cellules binaires (classe
+    positive, ROC, arbitrage de seuil). Ce test doit donc être évalué **avant** l'aiguillage
+    générique.
+
+    Args:
+        context: Notebook context.
+
+    Returns:
+        ``True`` for a multiclass task, ``False`` otherwise.
+    """
+    return str(getattr(context.spec.metrics, "task", "")) == "multiclass"
+
+
 def _baseline_label(context: NotebookContext) -> str:
     """Return the human label of the trivial reference, per task family.
 
@@ -239,6 +257,12 @@ def _notebook_rows(context: NotebookContext) -> int:
         from tools.scaffold.notebooks.ranking import NB_ROWS_RANKING
 
         return NB_ROWS_RANKING
+    if _is_multiclass(context):
+        # Six classes dont la plus rare pèse ~6 % : sous le volume nominal, son rappel de test
+        # serait mesuré sur une vingtaine d'alarmes.
+        from tools.scaffold.notebooks.multiclass import NB_ROWS_MULTICLASS
+
+        return NB_ROWS_MULTICLASS
     return NB_ROWS
 
 
@@ -740,6 +764,15 @@ for column in categorical_columns:
             from tools.scaffold.notebooks.ranking import structure_cells as ranking_structure_cells
 
             cells += ranking_structure_cells(context)
+        elif _is_multiclass(context):
+            # Six modes : ce qui compte est leur poids, les combinaisons de capteurs qui les
+            # séparent et la raison pour laquelle la règle actuelle se trompe — pas un « taux de
+            # classe positive » qui n'a pas de sens ici.
+            from tools.scaffold.notebooks.multiclass import (
+                structure_cells as multiclass_structure_cells,
+            )
+
+            cells += multiclass_structure_cells(context)
         elif _is_regression(context):
             from tools.scaffold.notebooks.regression import target_cells
 
@@ -2187,10 +2220,16 @@ if satisfait is False and surveille not in OUTCOME.history:
 from src.models import load_model
 
 RESTORED = load_model(OUTCOME.artifacts["model"])
-original = np.asarray(MODEL.predict(PREPARED["X_test"]), dtype="float64")
-reloaded = np.asarray(RESTORED.predict(PREPARED["X_test"]), dtype="float64")
+original = np.asarray(MODEL.predict(PREPARED["X_test"]))
+reloaded = np.asarray(RESTORED.predict(PREPARED["X_test"]))
+# Des nombres se comparent à la tolérance près, des libellés de classes (multi-classes) à
+# l'identique : les convertir en flottants lèverait sans rien apprendre de plus.
+if np.issubdtype(original.dtype, np.number):
+    identical = bool(np.allclose(original.astype("float64"), reloaded.astype("float64")))
+else:
+    identical = bool((original.astype(str) == reloaded.astype(str)).all())
 print("modèle rechargé :", RESTORED.summary())
-print("prédictions identiques :", bool(np.allclose(original, reloaded)))
+print("prédictions identiques :", identical)
 """,
             context,
         ),
@@ -2582,6 +2621,20 @@ def build_all(context: NotebookContext, destination: Path) -> list[Path]:
 
         model_exploration = build_04_ranking
         error_analysis = build_06_ranking
+    elif _is_multiclass(context):
+        # En multi-classes, l'exploration installe plancher, règle métier et plafond avant de
+        # comparer les algorithmes, mesure l'apport des features physiques et l'effet de la
+        # pondération sur la décision ; l'analyse d'erreurs part du verdict de production et
+        # construit la décision à coût minimal et la revue experte.
+        from tools.scaffold.notebooks.multiclass import (
+            build_04_model_exploration as build_04_multiclass,
+        )
+        from tools.scaffold.notebooks.multiclass import (
+            build_06_error_analysis as build_06_multiclass,
+        )
+
+        model_exploration = build_04_multiclass
+        error_analysis = build_06_multiclass
     elif _is_regression(context):
         # L'analyse d'erreurs d'une cible continue n'a ni matrice de confusion ni seuil à arbitrer.
         from tools.scaffold.notebooks.regression import (
@@ -2632,6 +2685,7 @@ __all__ = [
     "_is_anomaly",
     "_is_clustering",
     "_is_forecasting",
+    "_is_multiclass",
     "_is_ranking",
     "_is_regression",
     "build_01_eda",

@@ -1,0 +1,46 @@
+# =================================================================================================
+# Modèle : Gradient boosting XGBoost (multi-classes)
+# -------------------------------------------------------------------------------------------------
+# XGBoost optimise la log loss multi-classes (`multi:softprob`) avec un boosting régularisé (L2,
+# sous-échantillonnage, shrinkage) et s'arrête seul sur la validation. Il n'accepte que des
+# classes codées 0..K-1 : le modèle encode les libellés à l'entraînement et les décode à la
+# prédiction, si bien que le reste du projet ne voit jamais que « tool_wear » ou «
+# heat_dissipation ». Profondeur modeste (4) pour garder des probabilités fidèles ; aucune
+# pondération de classes, l'asymétrie des erreurs étant portée par la matrice de coûts.
+#
+# Alternatives considérées : xgboost_dart : dropout sur les arbres, régularise les gros ensembles (early stopping non supporté), xgboost_linear : booster linéaire, vérifie la part linéaire du signal, logistic_regression : baseline linéaire et bien calibrée, aveugle aux seuils sans features physiques.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_estimators=...
+# =================================================================================================
+
+name: "Gradient boosting XGBoost (multi-classes)"
+algorithm: xgboost
+class: XGBoostModel
+task: multiclass
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `XGBoostModel(params=...)` (voir src/models/model.py).
+params:
+  n_estimators: 400
+  max_depth: 4
+  learning_rate: 0.06
+  subsample: 0.9
+  colsample_bytree: 0.8
+  min_child_weight: 3
+  reg_lambda: 1.5
+  reg_alpha: 0.0
+  gamma: 0.0
+  importance_type: gain
+
+# --- options spécifiques à la stack `xgboost` ---------------------------------------
+early_stopping_rounds: 30
+eval_metric: mlogloss
+native_categorical: true
+cross_validation:
+  enabled: true
+  folds: 5
+  strategy: stratified

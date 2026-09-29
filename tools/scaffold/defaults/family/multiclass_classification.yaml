@@ -1,0 +1,339 @@
+# ==============================================================================================
+# Famille « classification multi-classes » — cas d'usage : diagnostic du mode de défaillance
+# d'une machine d'usinage au moment où elle lève une alarme. Toutes les stacks de cette famille
+# (sklearn, xgboost, lightgbm, pytorch, keras) partagent EXACTEMENT ce cas d'usage, ces données
+# et ces métriques : seule l'implémentation du modèle change.
+# ==============================================================================================
+
+domain: data-science
+problem: multiclass-classification
+modality: tabular
+family: multiclass_classification
+
+business:
+  persona: >-
+    Responsable maintenance d'un atelier d'usinage (fraiseuses CNC sur quatre lignes), avec une
+    équipe de techniciens répartis par spécialité (outillage, thermique, électrique, mécanique)
+    et un data scientist qui industrialise le modèle ; le superviseur de production consomme le
+    diagnostic dans son outil de GMAO.
+  context: >-
+    Chaque alarme automate arrête la machine et déclenche une intervention. Aujourd'hui,
+    l'équipe envoyée est choisie d'après le code d'alarme émis par l'automate, calculé par des
+    règles à seuil fixes qui ignorent la gamme de produit et les zones de bordure : une fois sur
+    deux environ, la mauvaise spécialité se déplace, la machine reste arrêtée pendant qu'on
+    envoie la bonne, et une panne réelle classée « fausse alarme » est acquittée alors que la
+    machine continue de se dégrader.
+  problem: >-
+    Prédire, au moment de l'alarme et à partir des seuls capteurs disponibles, le mode de
+    défaillance parmi six (fausse alarme, usure outil, dissipation thermique, défaut de
+    puissance, surcharge mécanique, défaillance aléatoire), afin d'envoyer directement la bonne
+    équipe — ou de demander un avis expert quand le modèle doute.
+  inputs: >-
+    Contexte de production (gamme de produit L/M/H, ligne, équipe), code d'alarme automate,
+    et relevés capteurs à l'instant de l'alarme : températures air et process, vitesse de
+    broche, couple, usure outil, débit de refroidissement, vibration (capteur absent sur une
+    partie du parc), heures depuis la dernière maintenance.
+  outputs: >-
+    Mode de défaillance prédit, probabilité de chacun des six modes, confiance et marge entre
+    les deux hypothèses les plus probables, décision à coût minimal, équipe à envoyer, drapeau
+    de revue experte quand la confiance est insuffisante, et justification lisible.
+  value: >-
+    Moins de déplacements inutiles et de seconds passages, arrêts machine raccourcis, et
+    surtout moins de pannes réelles acquittées par erreur — l'erreur la plus chère, parce que la
+    machine continue de produire des pièces non conformes jusqu'à la casse.
+  success_criteria:
+    - "Macro-F1 ≥ 0,60 sur le split de test hors échantillon : les six modes comptent autant, quelle que soit leur fréquence."
+    - "Le modèle bat le routage actuel par code d'alarme d'au moins 20 points de macro-F1 : sans cet écart, la règle de l'automate suffit."
+    - "Rappel ≥ 0,55 sur chacun des cinq modes prédictibles (tous sauf `random_failure`, sans signal observable par construction)."
+    - "Au plus 5 % des pannes réelles acquittées comme « fausse alarme » par la décision retenue : c'est l'erreur qui laisse une machine se dégrader."
+    - "Probabilités exploitables pour la décision à coût minimal : erreur de calibration top-label (ECE) < 0,08."
+    - "Coût moyen par alarme inférieur d'au moins 40 % à celui du routage actuel, avec la même matrice de coûts."
+    - "Temps d'inférence < 50 ms pour un lot de 1 000 alarmes (contrainte de la GMAO)."
+    - "Reproductibilité : deux exécutions avec la même seed produisent exactement les mêmes métriques."
+  cadence: "Diagnostic calculé à chaque alarme (appel unitaire), modèle ré-entraîné chaque mois sur les interventions clôturées."
+  constraints:
+    - "Aucune donnée industrielle réelle : le jeu de ce dépôt est synthétique, sa physique est inspirée des jeux publics de maintenance prédictive."
+    - "Le modèle tourne sur CPU, à côté de la GMAO, sans service externe."
+    - "Toute décision automatisée reste explicable (probabilités par mode, seconde hypothèse, justification) et réversible (revue experte sous le seuil de confiance)."
+
+data:
+  dataset_name: machine_failure_diagnosis
+  title: "Alarmes machine et mode de défaillance diagnostiqué"
+  description: >-
+    Une ligne par alarme levée par une fraiseuse CNC : contexte de production, code émis par
+    l'automate, relevés capteurs à l'instant de l'alarme, et mode de défaillance constaté par le
+    technicien à la clôture de l'intervention. Le mode est tiré d'un modèle physique (usure,
+    écart thermique à basse vitesse, puissance hors plage, effort au-delà d'un seuil dépendant de
+    la gamme) avec un bruit irréductible : le signal est réel mais imparfait, et une classe
+    (`random_failure`) n'a volontairement aucun signal observable.
+  n_samples: 6000
+  seed: 42
+  formats: [parquet, csv]
+  target: failure_mode
+  id_column: alarm_id
+  time_column: null
+  group_column: null
+  positive_rate: null
+  columns:
+    - name: alarm_id
+      dtype: str
+      role: identifier
+      description: "Identifiant unique de l'alarme"
+      unique: true
+      checks: { regex: "^ALM-[0-9]{5}$" }
+      distribution: "identifiants séquentiels uniques"
+    - name: alarm_timestamp
+      dtype: datetime
+      role: timestamp
+      description: "Date et heure de levée de l'alarme"
+      distribution: "uniforme sur ~18 mois, heure cohérente avec l'équipe"
+    - name: product_quality
+      dtype: category
+      role: feature
+      description: "Gamme de la pièce usinée (L = standard, M = intermédiaire, H = haute précision)"
+      checks: { isin: [L, M, H] }
+      distribution: "~50 % L, ~30 % M, ~20 % H"
+    - name: production_line
+      dtype: category
+      role: feature
+      description: "Ligne de production de la machine"
+      checks: { isin: [line_a, line_b, line_c, line_d] }
+      distribution: "30 / 28 / 24 / 18 % ; line_d est la plus ancienne (refroidissement plus faible)"
+    - name: shift
+      dtype: category
+      role: feature
+      description: "Équipe en poste au moment de l'alarme"
+      checks: { isin: [day, evening, night] }
+      distribution: "~45 % jour, ~32 % soir, ~23 % nuit"
+    - name: alarm_code
+      dtype: category
+      role: feature
+      description: "Code d'alarme émis par l'automate (règles à seuil fixes, une part de codes corrompus)"
+      checks: { isin: [E101, E102, E201, E202, E301, E302, E901] }
+      distribution: "E1xx thermique, E2xx électrique, E3xx mécanique, E901 générique"
+    - name: air_temperature_k
+      dtype: float
+      role: feature
+      description: "Température de l'air ambiant"
+      unit: "K"
+      checks: { ge: 290.0, le: 310.0 }
+      distribution: "normale ~300 K, écart-type ~1,8 K"
+    - name: process_temperature_k
+      dtype: float
+      role: feature
+      description: "Température du process (zone de coupe)"
+      unit: "K"
+      checks: { ge: 295.0, le: 322.0 }
+      distribution: "≈ air + 10 K ; l'écart se resserre quand le refroidissement faiblit"
+    - name: rotational_speed_rpm
+      dtype: float
+      role: feature
+      description: "Vitesse de rotation de la broche"
+      unit: "tr/min"
+      checks: { ge: 900.0, le: 2600.0 }
+      distribution: "normale ~1 540 tr/min, anti-corrélée au couple"
+    - name: torque_nm
+      dtype: float
+      role: feature
+      description: "Couple de coupe"
+      unit: "N.m"
+      checks: { ge: 2.0, le: 90.0 }
+      distribution: "normale ~40 N.m, étirée par les régimes de surcharge"
+    - name: tool_wear_min
+      dtype: int
+      role: feature
+      description: "Temps d'utilisation cumulé de l'outil en place"
+      unit: "min"
+      checks: { ge: 0, le: 260 }
+      distribution: "uniforme 0-205 min, étirée au-delà de 200 min par les outils en fin de vie"
+    - name: coolant_flow_l_min
+      dtype: float
+      role: feature
+      description: "Débit du circuit de refroidissement"
+      unit: "L/min"
+      checks: { ge: 1.0, le: 22.0 }
+      distribution: "normale ~12,5 L/min, plus faible sur line_d"
+    - name: vibration_mm_s
+      dtype: float
+      role: feature
+      description: "Vitesse vibratoire efficace de la broche"
+      unit: "mm/s"
+      nullable: true
+      checks: { ge: 0.0, le: 30.0 }
+      distribution: "gamma ~3,6 mm/s, monte avec l'usure et l'effort ; ~4 % de manquants (capteur absent)"
+    - name: hours_since_maintenance
+      dtype: float
+      role: feature
+      description: "Heures de fonctionnement depuis la dernière maintenance préventive"
+      unit: "h"
+      checks: { ge: 0.0, le: 3000.0 }
+      distribution: "gamma ~320 h, légèrement plus élevée sur les machines stressées"
+    - name: failure_mode
+      dtype: str
+      role: target
+      description: "Mode de défaillance constaté à la clôture de l'intervention"
+      checks: { isin: [false_alarm, tool_wear, heat_dissipation, power_failure, overstrain, random_failure] }
+      distribution: "~30 / 20 / 18 / 14 / 12 / 6 %"
+  insights:
+    - "Six classes déséquilibrées (de ~30 % à ~6 %) : l'accuracy récompense un modèle qui ignore les modes rares, d'où le **macro-F1** comme métrique de pilotage."
+    - "Aucun capteur seul ne sépare les modes : ce sont des **combinaisons physiques** qui le font — l'écart process-air à basse vitesse (dissipation thermique), le produit couple × vitesse (puissance), le produit usure × couple (surcharge)."
+    - "Le seuil de surcharge dépend de la gamme (11 000 / 12 000 / 13 000 min.N.m pour L / M / H) : une règle unique, comme celle de l'automate, se trompe structurellement sur les pièces haute précision."
+    - "`tool_wear` et `overstrain` se confondent sur les outils usés soumis à un fort couple : la paire la plus difficile du jeu, qui se lit dans la matrice de confusion."
+    - "`heat_dissipation` et `power_failure` partagent la vitesse basse : un sous-régime de puissance ressemble à un défaut thermique tant qu'on ne regarde pas l'écart de température."
+    - "Le code d'alarme de l'automate est un résumé bruité des capteurs : utile, mais une fois sur deux environ il désigne la mauvaise spécialité."
+    - "`random_failure` n'a aucun signal observable par construction : son rappel reste proche de zéro pour tout modèle, oracle compris. C'est un plafond structurel, pas un défaut de réglage."
+    - "La vibration manque sur ~4 % des alarmes (machines non équipées) : l'imputation doit être apprise sur le train et le manque lui-même n'est pas informatif."
+    - "Les équipes de nuit acquittent un peu plus de fausses alarmes : effet faible, réel, à ne pas sur-interpréter."
+    - "Un score parfait signerait une fuite : le générateur publie un plafond oracle calculé avec le bruit, qu'aucun modèle ne peut dépasser."
+  recommendations:
+    - "Router sur la décision **à coût minimal** plutôt que sur l'argmax : une panne réelle classée fausse alarme coûte bien plus cher qu'une équipe dérangée pour rien."
+    - "Envoyer en revue experte les alarmes dont la confiance est sous le seuil : quelques pourcents d'alarmes relues suppriment une part importante des erreurs coûteuses."
+    - "Ajouter les features physiques (écart de température, puissance, effort) comme recettes déclarées : c'est le principal levier de performance, bien avant l'hyperparamétrage."
+    - "Instrumenter les machines sans capteur de vibration : c'est la seule donnée manquante du parc, et elle discrimine usure et surcharge."
+    - "Surveiller la dérive de la répartition des modes et de `tool_wear_min` : un changement de politique d'outillage déplace toute la distribution."
+    - "Ne pas promettre de diagnostic sur `random_failure` : documenter le plafond et traiter ces pannes par la maintenance préventive, pas par le modèle."
+  notes:
+    - "Valeurs manquantes volontaires sur `vibration_mm_s` (~4 %) pour exercer l'imputation."
+    - "Les classes sont tirées d'un softmax de logits physiques calculés sur les seules observables ; les ordonnées sont calibrées pour tenir les parts visées."
+    - "Le code d'alarme dérive des capteurs par des règles à seuil fixes avec ~30 % de codes corrompus : il n'apporte aucune information sur la classe au-delà des capteurs."
+    - "Plafond oracle, plancher majoritaire et référence de routage sont publiés dans `data/raw/generation_metadata.json`."
+
+metrics:
+  task: multiclass
+  primary: f1_macro
+  secondary: [balanced_accuracy, accuracy, mcc, log_loss, roc_auc_ovr, f1_weighted, precision_macro, recall_macro]
+  baseline: dummy
+  direction: maximize
+  min_primary: 0.55
+
+preprocessing:
+  numeric:
+    imputer: median
+    clip_outliers: true
+    clip_quantiles: [0.005, 0.995]
+    scaler: standard
+    log1p_columns: []
+  categorical:
+    imputer: most_frequent
+    encoder: onehot
+    handle_unknown: ignore
+    min_frequency: 0.01
+    max_categories: 12
+  features:
+    - type: difference
+      name: temperature_gap_k
+      left: process_temperature_k
+      right: air_temperature_k
+    - type: product
+      name: power_proxy
+      a: torque_nm
+      b: rotational_speed_rpm
+    - type: product
+      name: wear_torque
+      a: tool_wear_min
+      b: torque_nm
+
+train:
+  split:
+    test_size: 0.2
+    val_size: 0.15
+    stratify: true
+    shuffle: true
+    time_based: false
+
+extras:
+  reference_date: "2024-01-08"
+  # Options du générateur synthétique, exposées dans `conf/data/default.yaml` et transmises par
+  # `SyntheticDataGenerator.from_config` (aucune valeur codée en dur dans le code).
+  data_conf:
+    # Parts visées des six modes : les ordonnées des logits sont calibrées pour les atteindre.
+    class_shares:
+      false_alarm: 0.30
+      tool_wear: 0.20
+      heat_dissipation: 0.18
+      power_failure: 0.14
+      overstrain: 0.12
+      random_failure: 0.06
+    # Part des alarmes levées sous stress (refroidissement, puissance, usure, effort) : les autres
+    # le sont en conditions normales, ce qui alimente les fausses alarmes.
+    stressed_share: 0.80
+    # Saut de logit à l'intérieur d'une zone de défaillance. C'est lui qui fixe la séparabilité,
+    # donc le plafond oracle publié : le baisser rend le problème plus bruité.
+    signal_strength: 9.0
+    # Part de codes automate corrompus (remplacés par un code tiré au hasard).
+    alarm_code_noise: 0.30
+    # Part des machines sans capteur de vibration.
+    missing_rate: 0.04
+    # Fenêtre d'observation, en jours, à partir de `reference_date`.
+    window_days: 540
+  root_conf:
+    diagnosis:
+      # Ordre canonique des modes : tables, figures et colonnes de probabilités le suivent.
+      class_order: [false_alarm, tool_wear, heat_dissipation, power_failure, overstrain, random_failure]
+      # Le mode « pas de panne » : le classer à tort sur une panne réelle est l'erreur la plus chère.
+      no_failure_class: false_alarm
+      # Modes sans signal observable : exclus de l'objectif de rappel par classe (plafond structurel).
+      structural_classes: [random_failure]
+      # Colonne du code automate et règle de routage actuelle (référence métier à battre).
+      alarm_code_column: alarm_code
+      alarm_code_rule:
+        E101: heat_dissipation
+        E102: heat_dissipation
+        E201: power_failure
+        E202: power_failure
+        E301: overstrain
+        E302: tool_wear
+        E901: false_alarm
+      # Spécialité envoyée pour chaque mode diagnostiqué.
+      team_by_class:
+        false_alarm: "acquittement opérateur"
+        tool_wear: "outillage"
+        heat_dissipation: "thermique"
+        power_failure: "électrique"
+        overstrain: "mécanique"
+        random_failure: "expertise maintenance"
+      # Coûts unitaires (EUR par alarme) dont l'évaluateur dérive la matrice vraie classe x
+      # décision. Ils sont indicatifs : ce qui compte est leur **ordre de grandeur relatif**.
+      costs:
+        # Bonne équipe envoyée sur une panne réelle : l'intervention nominale.
+        correct_intervention: 120.0
+        # Fausse alarme correctement acquittée par l'opérateur.
+        correct_acknowledgement: 10.0
+        # Panne réelle, mauvaise spécialité : second déplacement et arrêt prolongé.
+        wrong_team: 420.0
+        # Panne réelle acquittée comme fausse alarme : la machine continue jusqu'à la casse.
+        missed_failure: 2500.0
+        # Fausse alarme sur laquelle une équipe se déplace pour rien.
+        useless_dispatch: 150.0
+        # Revue experte d'une alarme incertaine (s'ajoute au coût de l'intervention correcte).
+        expert_review: 90.0
+      # Lecture métier des paires de modes confondues, citée par le rapport quand la paire
+      # apparaît dans la matrice de confusion (clé : « mode réel / mode prédit », sans ordre).
+      confusion_notes:
+        "tool_wear / overstrain": "un outil usé soumis à un fort couple franchit les deux seuils à la fois : seule la gamme de produit, qui fixe le seuil de surcharge, départage les deux lectures."
+        "heat_dissipation / power_failure": "les deux modes partagent la vitesse de broche basse ; l'écart de température process-air les distingue, la puissance seule ne suffit pas."
+        "false_alarm / tool_wear": "un outil en fin de vie juste sous 200 min ressemble encore à un fonctionnement normal : la zone de bordure est bruitée par construction."
+        "false_alarm / random_failure": "une défaillance aléatoire n'a aucune signature capteur : elle ressemble à une fausse alarme, pour tout modèle comme pour l'oracle."
+        "false_alarm / overstrain": "une surcharge naissante (usure moyenne, couple modéré) reste sous le seuil de la gamme : les capteurs ne la distinguent pas encore d'un régime normal."
+        "false_alarm / heat_dissipation": "un refroidissement dégradé à vitesse normale réduit l'écart thermique sans franchir le seuil de vitesse : signal partiel."
+        "false_alarm / power_failure": "une puissance proche des bornes de la plage nominale laisse les deux lectures plausibles."
+      # Confiance (probabilité du mode retenu) sous laquelle l'alarme part en revue experte.
+      review_threshold: 0.50
+      # Objectifs contractuels évalués par l'évaluateur (verdict du rapport).
+      objectives:
+        f1_macro_min: 0.60
+        gain_vs_alarm_code_min: 0.20
+        per_class_recall_min: 0.55
+        missed_failure_rate_max: 0.05
+        ece_max: 0.08
+        cost_reduction_vs_alarm_code_min: 0.40
+        latency_ms_per_1000_max: 50.0
+
+learning_objectives:
+  - "Poser un problème multi-classes déséquilibré et choisir une métrique qui traite chaque classe à égalité (macro-F1), plutôt qu'une accuracy dominée par la classe majoritaire."
+  - "Lire une matrice de confusion normalisée pour identifier les paires de classes confondues et leur cause physique."
+  - "Confronter systématiquement un modèle à un plancher (classe majoritaire), à la référence métier (règle de l'automate) et au plafond atteignable publié par le générateur."
+  - "Passer de l'argmax à une décision à coût minimal : la matrice de coûts est le vrai contrat métier d'un classifieur multi-classes."
+  - "Utiliser la confiance pour router l'incertain vers un expert et chiffrer l'arbitrage couverture / exactitude."
+  - "Reconnaître un plafond structurel (une classe sans signal observable) et le documenter au lieu de le masquer."
+  - "Industrialiser l'ensemble : configuration Hydra, contrats Pandera, artefacts traçables, tests pytest, rapports générés."

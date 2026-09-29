@@ -88,8 +88,18 @@ _COMMON_PARAMS: frozenset[str] = frozenset(
         "step_gamma",
         "plateau_factor",
         "plateau_patience",
+        "loss",
     }
 )
+
+#: Pertes de régression acceptées par le paramètre ``loss`` (prévision comprise). L'erreur
+#: quadratique reste la valeur par défaut ; l'erreur absolue et la perte de Huber s'alignent sur une
+#: métrique en erreur absolue (MAE, MAPE), au prix de gradients moins informatifs sur les pointes.
+_REGRESSION_LOSSES: dict[str, type[nn.Module]] = {
+    "mse": nn.MSELoss,
+    "mae": nn.L1Loss,
+    "huber": nn.HuberLoss,
+}
 
 #: Paramètres propres à l'auto-encodeur (détection d'anomalies).
 _ANOMALY_PARAMS: frozenset[str] = frozenset({"code_dim", "code_ratio"})
@@ -832,8 +842,13 @@ def _loss_function(
             else None
         )
         return nn.CrossEntropyLoss(weight=class_weight)
-    # Régression, prévision et reconstruction (auto-encodeur) : erreur quadratique moyenne.
-    return nn.MSELoss()
+    # Régression, prévision et reconstruction (auto-encodeur) : erreur quadratique moyenne, sauf si
+    # `loss` demande une perte absolue ou de Huber.
+    name = str(params.get("loss") or "mse").lower()
+    if name not in _REGRESSION_LOSSES:
+        msg = f"Unknown regression loss '{name}'. Allowed: {sorted(_REGRESSION_LOSSES)}"
+        raise ValueError(msg)
+    return _REGRESSION_LOSSES[name]()
 
 
 def _optimizer(

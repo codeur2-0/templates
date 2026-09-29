@@ -388,6 +388,8 @@ class XGBoostModel(BaseModel):
         self.spec = resolve_algorithm(algorithm, task)
         self.estimator_: Any = None
         self.best_iteration_: int | None = None
+        #: Original class labels, indexed by the integer codes the booster was trained on.
+        self.label_classes_: np.ndarray | None = None
 
     # ------------------------------------------------------------------ construction ------
     def _resolved_params(self, labels: np.ndarray | None) -> dict[str, Any]:
@@ -490,6 +492,14 @@ class XGBoostModel(BaseModel):
 
         params = self._resolved_params(labels)
         is_classifier = self.task in _CLASSIFICATION
+        # XGBoost n'accepte que des classes codées 0..K-1 : des libellés (« tool_wear ») ou des
+        # entiers non contigus lèveraient au `fit`. On encode donc les labels ici, et `_predict`
+        # décode : le reste du projet ne voit jamais que les libellés d'origine. En binaire 0/1,
+        # le code est le label lui-même : l'entraînement est strictement inchangé.
+        self.label_classes_ = None
+        fit_labels = labels
+        if is_classifier and labels is not None:
+            self.label_classes_, fit_labels = np.unique(labels, return_inverse=True)
 
         # L'API sklearn d'XGBoost prend les callbacks au **constructeur** : un `set_params`
         # postérieur reconfigure le booster C++ et sérialise mal `eval_metric` (bug observé en
@@ -502,8 +512,8 @@ class XGBoostModel(BaseModel):
         fit_kwargs: dict[str, Any] = {"verbose": False}
         validation = None
         if X_val is not None and y_val is not None:
-            validation = (self._matrix(X_val), np.asarray(y_val).ravel())
-            fit_kwargs["eval_set"] = [(matrix, labels), validation]
+            validation = (self._matrix(X_val), self._encode(np.asarray(y_val).ravel()))
+            fit_kwargs["eval_set"] = [(matrix, fit_labels), validation]
             rounds = self._early_stopping_rounds()
             if rounds:
                 params["early_stopping_rounds"] = rounds
@@ -515,10 +525,10 @@ class XGBoostModel(BaseModel):
             callbacks=None if bridge is None else [bridge],
         )
 
-        if labels is None:  # pragma: no cover - garde-fou (tâche non supervisée refusée plus haut)
+        if fit_labels is None:  # pragma: no cover - garde-fou (tâche non supervisée refusée)
             estimator.fit(matrix, **fit_kwargs)
         else:
-            estimator.fit(matrix, labels, **fit_kwargs)
+            estimator.fit(matrix, fit_labels, **fit_kwargs)
 
         # Le booster conserve une référence à ses callbacks : on la retire (par affectation
         # directe, jamais via `set_params`) pour que l'artefact joblib reste léger et indépendant
@@ -526,7 +536,11 @@ class XGBoostModel(BaseModel):
         estimator.callbacks = None
         self.estimator_ = estimator
         self.params = dict(params)
-        self.classes_ = getattr(estimator, "classes_", None)
+        self.classes_ = (
+            self.label_classes_
+            if self.label_classes_ is not None
+            else getattr(estimator, "classes_", None)
+        )
         if self._supports_proba is None:
             self._supports_proba = bool(hasattr(estimator, "predict_proba"))
         self.best_iteration_ = _best_iteration(estimator)
@@ -555,7 +569,34 @@ class XGBoostModel(BaseModel):
             RuntimeError: When no booster is attached.
         """
         estimator = self._require_estimator()
-        return np.asarray(estimator.predict(self._matrix(X))).ravel()
+        predictions = np.asarray(estimator.predict(self._matrix(X))).ravel()
+        classes = getattr(self, "label_classes_", None)
+        if classes is not None:
+            return np.asarray(classes)[predictions.astype("int64")]
+        return predictions
+
+    def _encode(self, labels: np.ndarray) -> np.ndarray:
+        """Map original labels onto the integer codes of the training labels.
+
+        Args:
+            labels: Labels to encode (validation split).
+
+        Returns:
+            The integer codes (labels unchanged for a regression task).
+
+        Raises:
+            ValueError: When a label never appears in the training split.
+        """
+        classes = self.label_classes_
+        if classes is None:
+            return labels
+        unseen = sorted(set(labels.tolist()) - set(classes.tolist()), key=str)
+        if unseen:
+            msg = (
+                f"Validation labels {unseen} never appear in the training split {classes.tolist()}"
+            )
+            raise ValueError(msg)
+        return np.searchsorted(classes, labels)
 
     def _predict_proba(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
         """Predict class probabilities with the fitted booster.
