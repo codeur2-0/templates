@@ -42,6 +42,10 @@ DEV_DEPENDENCIES: list[str] = [
     "pytest-cov>=5.0",
     "ruff>=0.5",
     "mypy>=1.10",
+    # Les stubs de numpy >= 2.4 utilisent la syntaxe `type X = ...` (Python 3.12), que mypy refuse
+    # quand il cible Python 3.11 (`python_version` des projets) : toute installation fraîche
+    # échouerait au typage avant même de lire le code du projet.
+    "numpy<2.4",
     "nbformat>=5.9",
     "nbclient>=0.10",
     "ipykernel>=6.29",
