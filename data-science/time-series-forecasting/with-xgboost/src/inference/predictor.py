@@ -1,0 +1,874 @@
+"""Inference: publish the load forecast of new records with the trained artefacts.
+
+The predictor is the *production facing* object of the project — the one the 06:00 balancing
+publication depends on. It:
+
+1. loads the artefacts written by training (model, preprocessing, feature builder) **and** the
+   interval / per-horizon tables written by the evaluation,
+2. validates the incoming payload with ``InferenceDataSchema`` (fail fast, explicit message),
+3. rebuilds exactly the same features and transformations as during training,
+4. returns a business-readable frame: **forecast, interval, expected error, confidence level,
+   review flag and the reasons behind both**.
+
+Publishing a single number would be an operational mistake. A forecast is a decision input: the
+buyer needs the interval to size the risk, the on-call engineer needs the confidence level to know
+whether to trust it, and the analyst needs the reasons to challenge it. Every one of those is
+computed here from persisted artefacts, never hard-coded:
+
+* the interval is rebuilt from the **calibration persisted by the evaluation** (method, score
+  quantile and scale column per horizon), so the J+7 interval is genuinely wider than the J+1
+  one
+  and a winter peak gets a wider band than a summer trough — the predictor never re-derives a
+  different interval from the one that was measured;
+* the expected error is the **MAPE of that horizon** on the held-out test split;
+* the confidence level degrades when the forecast leaves the domain the model has seen (extreme
+  temperature forecast, missing weather observation, jump versus the last observed load).
+
+Nothing here knows how the model was trained: swapping scikit-learn for a gradient boosting library
+or a recurrent network only changes ``src/models/model.py``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from src.data.generators import DEFAULT_DATASET_NAME, SyntheticDataGenerator
+from src.data.loaders import InferenceDataLoader
+from src.data.schemas import InferenceDataSchema
+from src.features.build_features import FeatureBuilder
+from src.models import load_model
+from src.models.base import BaseModel
+from src.preprocessing.pipelines import PreprocessingPipeline
+from src.utils.io import load_pickle, read_table, write_table
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+
+logger = get_logger(__name__)
+
+#: Colonne cible (absente des payloads d'inférence, présente en évaluation).
+TARGET_NAME = "load_mw"
+
+#: Identifiant métier, conservé dans les prédictions pour la traçabilité.
+ID_COLUMN = "sample_id"
+
+#: Unité de la cible, utilisée dans les libellés publiés.
+TARGET_UNIT = "MW"
+
+#: Niveau nominal de l'intervalle publié, écrasable par ``load_forecasting.interval_level``.
+DEFAULT_INTERVAL_LEVEL = 0.90
+
+#: Échelle de dispersion par défaut d'un intervalle conforme normalisé. Sur une série dont le
+# bruit
+#: est multiplicatif, la dispersion des résidus est proportionnelle au niveau : la dernière
+#: consommation connue est donc une échelle qui ne demande aucun modèle supplémentaire, et
+# elle est
+#: connue à l'origine, ce qui garde l'intervalle légal pour une publication réelle.
+DEFAULT_INTERVAL_SCALE = "load_last_observed"
+
+#: Méthodes de construction d'intervalle reconnues, dans l'ordre de robustesse croissante.
+INTERVAL_METHODS: tuple[str, ...] = ("residual_quantile", "conformal", "normalized_conformal")
+
+
+@dataclass(frozen=True, slots=True)
+class IntervalCalibration:
+    """Interval construction parameters persisted by the evaluation.
+
+    The evaluator measures an interval; the predictor must publish **the same** interval,
+    otherwise
+    the coverage advertised in the report does not describe what leaves the system at 06:00.
+    This
+    object is the contract between the two: it carries the method, the dispersion scale and, per
+    horizon, either absolute offsets (signed residual quantiles) or a relative score quantile
+    (conformal methods).
+
+    Attributes:
+        method: One of :data:`INTERVAL_METHODS`.
+        scale_column: Column carrying the dispersion scale (``normalized_conformal``
+        only). It must
+            be known at the origin; when it is missing from a payload, the forecast
+            level is used as
+            a documented approximation.
+        offsets: ``(low, high)`` offsets in MW per horizon, for ``residual_quantile``.
+        scores: Score quantile per horizon (relative), for the conformal methods.
+        level: Nominal coverage the calibration was built for.
+        source: Where the calibration came from (``validation_split`` or
+        ``evaluated_split``), kept
+            for traceability of the published artefact.
+    """
+
+    method: str = "normalized_conformal"
+    scale_column: str = DEFAULT_INTERVAL_SCALE
+    offsets: dict[Any, tuple[float, float]] = field(default_factory=dict)
+    scores: dict[Any, float] = field(default_factory=dict)
+    level: float = DEFAULT_INTERVAL_LEVEL
+    source: str = "unavailable"
+
+    @property
+    def usable(self) -> bool:
+        """Whether at least one horizon carries a calibrated parameter."""
+        return bool(self.offsets or self.scores)
+
+
+#: Niveaux de confiance publiés, du plus sûr au plus douteux.
+CONFIDENCE_LEVELS: tuple[str, ...] = ("élevée", "moyenne", "faible")
+
+#: Domaine de température dans lequel le modèle a été entraîné (hors épisode exceptionnel).
+# Toute
+#: prévision météo en dehors de cette plage dégrade la confiance : le modèle extrapole.
+TEMPERATURE_DOMAIN_C: tuple[float, float] = (-12.0, 38.0)
+
+#: Colonnes de contexte conservées dans le fichier de prédictions.
+CONTEXT_COLUMNS: tuple[str, ...] = (
+    "sample_id",
+    "origin_date",
+    "load_mw",
+)
+
+
+class Predictor:
+    """Batch and single-record forecasting, with validation, interval and confidence."""
+
+    def __init__(
+        self,
+        *,
+        model: BaseModel,
+        preprocessing: PreprocessingPipeline,
+        feature_builder: FeatureBuilder | None = None,
+        config: Mapping[str, Any] | None = None,
+        paths: ProjectPaths | None = None,
+        horizon_column: str = "horizon_days",
+        horizons: tuple[int, ...] = (),
+        long_horizon: int = 7,
+        interval_level: float = DEFAULT_INTERVAL_LEVEL,
+        review_mape_threshold: float = 6.0,
+        sanity_max_relative_change: float = 0.35,
+        calibration: IntervalCalibration | None = None,
+        horizon_mape: Mapping[Any, float] | None = None,
+    ) -> None:
+        """Inject the trained artefacts and the publication policy.
+
+        Args:
+            model: Fitted model.
+            preprocessing: Fitted preprocessing pipeline.
+            feature_builder: Fitted feature builder (``None`` when no derived feature is used).
+            config: Root configuration mapping (used for paths, seed and options).
+            paths: Project layout.
+            horizon_column: Column carrying the forecast horizon, in days.
+            horizons: Horizons the project publishes.
+            long_horizon: Horizon considered « long » (degrades the confidence level).
+            interval_level: Nominal coverage of the published interval.
+            review_mape_threshold: Per-horizon MAPE (percent) above which the
+            forecast is flagged
+                for human review.
+            sanity_max_relative_change: Relative jump versus the last observed load
+            above which the
+                forecast is flagged as atypical (regime break or model failure).
+            calibration: Interval construction parameters read from the evaluation
+            tables. When it
+                is empty, a documented approximate band is published instead of
+                a calibrated one.
+            horizon_mape: Expected MAPE per horizon, read from the evaluation.
+
+        Raises:
+            ValueError: When the interval level is not a probability.
+        """
+        if not 0.0 < float(interval_level) < 1.0:
+            msg = f"interval_level must lie in (0, 1), got {interval_level}"
+            raise ValueError(msg)
+        self.model = model
+        self.preprocessing = preprocessing
+        self.feature_builder = feature_builder or FeatureBuilder([])
+        self.config: dict[str, Any] = dict(config or {})
+        self.paths = paths or ProjectPaths.from_config(self.config)
+        self.horizon_column = str(horizon_column)
+        self.horizons = tuple(int(value) for value in horizons)
+        self.long_horizon = int(long_horizon)
+        self.interval_level = float(interval_level)
+        self.review_mape_threshold = float(review_mape_threshold)
+        self.sanity_max_relative_change = float(sanity_max_relative_change)
+        self.calibration: IntervalCalibration = calibration or IntervalCalibration(
+            level=self.interval_level
+        )
+        self.horizon_mape: dict[Any, float] = dict(horizon_mape or {})
+        #: Niveau d'importance utilisé pour citer les facteurs dominants d'une prévision.
+        self._importances: np.ndarray | None = None
+
+    # ------------------------------------------------------------------ factories -------
+    @classmethod
+    def from_config(cls, config: Any, paths: ProjectPaths | None = None) -> Predictor:
+        """Build a predictor from a validated application configuration.
+
+        Args:
+            config: ``AppConfig`` instance (or mapping).
+            paths: Optional project layout.
+
+        Returns:
+            The predictor, with every artefact loaded from disk.
+
+        Raises:
+            FileNotFoundError: When the model or the preprocessing artefact is missing.
+        """
+        payload: Mapping[str, Any] = (
+            config.model_dump() if hasattr(config, "model_dump") else dict(config or {})
+        )
+        layout = paths or ProjectPaths.from_config(payload)
+        artifacts = (payload.get("train") or {}).get("artifacts") or {}
+        # Le point de fonctionnement de la publication vit dans le noeud `load_forecasting` de
+        # `conf/config.yaml` (injecté par le manifeste) ; le noeud standard `predict`
+        # sert de repli.
+        # Rien n'est codé en dur dans le code source.
+        family_node = dict(payload.get("load_forecasting") or {})
+        predict_node = {**dict(payload.get("predict") or {}), **family_node}
+
+        model_path = layout.models_dir / str(artifacts.get("model_file", "model.joblib"))
+        pipeline_path = layout.models_dir / str(
+            artifacts.get("pipeline_file", "preprocessing.joblib")
+        )
+        builder_path = layout.models_dir / str(
+            artifacts.get("feature_builder_file", "feature_builder.joblib")
+        )
+        for required in (model_path, pipeline_path):
+            if not required.exists():
+                msg = (
+                    f"Artefact manquant : {required}. Entraînez d'abord le modèle avec "
+                    "`python scripts/train.py` (ou `make train`)."
+                )
+                raise FileNotFoundError(msg)
+
+        model = load_model(model_path, config=config)
+        preprocessing = PreprocessingPipeline.load(pipeline_path)
+        feature_builder = load_pickle(builder_path) if builder_path.exists() else FeatureBuilder([])
+        calibration, mape_by_horizon = cls._load_evaluation_tables(
+            layout, level=float(predict_node.get("interval_level") or DEFAULT_INTERVAL_LEVEL)
+        )
+
+        predictor = cls(
+            model=model,
+            preprocessing=preprocessing,
+            feature_builder=feature_builder,
+            config=payload,
+            paths=layout,
+            horizon_column=str(predict_node.get("horizon_column") or "horizon_days"),
+            horizons=tuple(int(value) for value in (predict_node.get("horizons") or ()) if value),
+            long_horizon=int(predict_node.get("long_horizon") or 7),
+            interval_level=float(predict_node.get("interval_level") or DEFAULT_INTERVAL_LEVEL),
+            review_mape_threshold=float(predict_node.get("review_mape_threshold") or 6.0),
+            sanity_max_relative_change=float(
+                predict_node.get("sanity_max_relative_change") or 0.35
+            ),
+            calibration=calibration,
+            horizon_mape=mape_by_horizon,
+        )
+        logger.info(
+            "Predictor ready | model={} features={} horizons={} intervalle={}"
+            " (échelle={}, {} horizon(s) calibré(s), source={})",
+            model.summary(),
+            len(preprocessing.feature_names_out),
+            predictor.horizons or "non déclarés",
+            calibration.method,
+            calibration.scale_column,
+            len(calibration.scores) or len(calibration.offsets),
+            calibration.source,
+        )
+        return predictor
+
+    @staticmethod
+    def _load_evaluation_tables(
+        layout: ProjectPaths, level: float = DEFAULT_INTERVAL_LEVEL
+    ) -> tuple[IntervalCalibration, dict[Any, float]]:
+        """Read the interval calibration and the expected error per horizon, produced by evaluation.
+
+        Both tables are optional: a predictor built before any evaluation still
+        forecasts, it just
+        publishes an approximate band and no expected error, and says so in the logs.
+
+        The interval table carries the **method** used to build the bounds, which is
+        what makes the
+        published interval faithful to the measured coverage. Reading only the absolute offsets
+        would silently publish a near-zero-width band for a normalised conformal interval, whose
+        offsets are relative — an interval that looks calibrated and protects nothing.
+
+        Args:
+            layout: Project layout.
+            level: Nominal coverage declared in the configuration.
+
+        Returns:
+            ``(interval calibration, expected MAPE per horizon)``.
+        """
+        offsets: dict[Any, tuple[float, float]] = {}
+        scores: dict[Any, float] = {}
+        method = "normalized_conformal"
+        scale_column = DEFAULT_INTERVAL_SCALE
+        source = "unavailable"
+        mape: dict[Any, float] = {}
+        intervals_path = Path(layout.reports_dir) / "intervals.csv"
+        if intervals_path.exists():
+            try:
+                table = read_table(intervals_path)
+                for row in table.itertuples():
+                    key = _horizon_key(getattr(row, "horizon", None))
+                    row_method = str(getattr(row, "method", "") or "")
+                    if row_method in INTERVAL_METHODS:
+                        method = row_method
+                    row_scale = str(getattr(row, "scale_column", "") or "")
+                    if row_scale and row_scale != "-":
+                        scale_column = row_scale
+                    source = str(getattr(row, "source", "") or source)
+                    score = getattr(row, "score_quantile", None)
+                    if score is not None and np.isfinite(float(score)):
+                        scores[key] = float(score)
+                    low = float(getattr(row, "offset_low_mw", float("nan")))
+                    high = float(getattr(row, "offset_high_mw", float("nan")))
+                    if np.isfinite(low) and np.isfinite(high):
+                        offsets[key] = (low, high)
+                if bool(getattr(table, "empty", True)):
+                    logger.warning(
+                        "Table d'intervalles vide ({}): bande approximative", intervals_path
+                    )
+            except (OSError, ValueError) as exc:
+                logger.warning("Table d'intervalles illisible ({}): bande approximative", exc)
+        else:
+            logger.warning(
+                "Aucune table d'intervalles ({}): lancez `python"
+                " scripts/evaluate.py` pour publier "
+                "des intervalles calibrés par horizon",
+                intervals_path,
+            )
+        calibration = IntervalCalibration(
+            method=method,
+            scale_column=scale_column,
+            offsets=offsets if method == "residual_quantile" else {},
+            scores=scores if method != "residual_quantile" else {},
+            level=level,
+            source=source,
+        )
+
+        horizon_path = Path(layout.reports_dir) / "per_horizon.csv"
+        if horizon_path.exists():
+            try:
+                table = read_table(horizon_path)
+                for row in table.itertuples():
+                    value = getattr(row, "mape_pct", None)
+                    if value is not None and np.isfinite(float(value)):
+                        mape[_horizon_key(getattr(row, "horizon", None))] = float(value)
+            except (OSError, ValueError) as exc:
+                logger.warning("Table par horizon illisible ({}): erreur attendue non publiée", exc)
+        return calibration, mape
+
+    # ------------------------------------------------------------------ inputs ----------
+    def load_inputs(self, path: str | Path) -> pd.DataFrame:
+        """Load and validate an inference file.
+
+        Args:
+            path: Parquet / CSV / JSON file.
+
+        Returns:
+            The validated frame.
+        """
+        loader = InferenceDataLoader(
+            self.paths,
+            dataset_name=str((self.config.get("data") or {}).get("dataset_name", "inference")),
+            validate=bool(
+                ((self.config.get("data") or {}).get("validation") or {}).get("inference", True)
+            ),
+        )
+        return loader.load_from(path)
+
+    def sample_inputs(self, n_samples: int = 5, *, seed: int | None = None) -> pd.DataFrame:
+        """Generate a synthetic inference payload (demo without preparing a file).
+
+        The sample keeps every column available at the origin — history, calendar of the
+        target day
+        and weather forecast — and drops the ground truth, exactly like a real morning request.
+
+        Args:
+            n_samples: Number of records.
+            seed: Optional seed override.
+
+        Returns:
+            A frame without the target column.
+        """
+        data_node = dict(self.config.get("data") or {})
+        generator = SyntheticDataGenerator(
+            n_samples=max(int(n_samples) * len(self.horizons or (1,)) * 2, 40),
+            seed=int(
+                seed
+                if seed is not None
+                else (self.config.get("seed") or data_node.get("seed") or 42)
+            ),
+            dataset_name=str(data_node.get("dataset_name", DEFAULT_DATASET_NAME)),
+        )
+        frame = generator.sample(max(int(n_samples), 1), with_target=False)
+        return InferenceDataSchema.validate(frame, lazy=False)
+
+    # ------------------------------------------------------------------ prediction ------
+    def prepare(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Apply feature engineering and preprocessing to a validated payload.
+
+        Args:
+            frame: Raw records (validated).
+
+        Returns:
+            The model-ready matrix.
+        """
+        enriched = self.feature_builder.transform(frame)
+        matrix = self.preprocessing.transform(enriched)
+        logger.debug("Prepared {} record(s) -> {} feature(s)", len(matrix), matrix.shape[1])
+        return matrix
+
+    def predict(self, frame: pd.DataFrame, *, validate: bool = True) -> pd.DataFrame:
+        """Forecast a batch of (origin, horizon) records.
+
+        Args:
+            frame: Raw records, as produced by the morning extract.
+            validate: Validate the payload against ``InferenceDataSchema`` first.
+
+        Returns:
+            A frame with the forecast, its interval, the expected error, the
+            confidence level, the
+            review flag, the reasons and the dominant drivers.
+        """
+        payload = InferenceDataSchema.validate(frame, lazy=False) if validate else frame.copy()
+        matrix = self.prepare(payload)
+        forecast = np.asarray(self.model.predict(matrix), dtype="float64").ravel()
+
+        published = pd.DataFrame(index=payload.index)
+        for column in CONTEXT_COLUMNS:
+            if column in payload.columns:
+                published[column] = payload[column].to_numpy()
+        if self.horizon_column in payload.columns:
+            published[self.horizon_column] = payload[self.horizon_column].to_numpy()
+        published[f"{TARGET_NAME}_prediction"] = np.round(forecast, 1)
+
+        horizons = (
+            payload[self.horizon_column].to_numpy()
+            if self.horizon_column in payload.columns
+            else np.full(len(payload), self.long_horizon)
+        )
+        lower, upper = self._interval_bounds(forecast, horizons, payload)
+        published["lower_mw"] = np.round(lower, 1)
+        published["upper_mw"] = np.round(upper, 1)
+        published["interval_width_mw"] = np.round(upper - lower, 1)
+        published["relative_width_pct"] = np.round(
+            100.0 * (upper - lower) / np.where(np.abs(forecast) < 1e-9, np.nan, np.abs(forecast)), 2
+        )
+        published["expected_mape_pct"] = [
+            _round_or_none(self.horizon_mape.get(_horizon_key(value)), 2) for value in horizons
+        ]
+        published["interval_level_pct"] = round(100.0 * self.interval_level, 1)
+        published["interval_method"] = self.calibration.method
+        published["interval_calibrated"] = self.calibration.usable
+
+        confidence, review, reasons = self._confidence(payload, forecast, horizons)
+        published["confidence"] = confidence
+        published["review_required"] = review
+        published["reasons"] = [" ; ".join(items) for items in reasons]
+        published["top_drivers"] = [
+            ", ".join(self.top_drivers(matrix.iloc[[index]])) for index in range(len(matrix))
+        ]
+        logger.info(
+            "{} prévision(s) publiée(s) | niveaux={} revue={}",
+            len(published),
+            dict(published["confidence"].value_counts()),
+            int(published["review_required"].sum()),
+        )
+        return published.reset_index(drop=True)
+
+    def predict_one(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Forecast a single record and return the full publication payload.
+
+        This is the shape an API would answer with: a number alone is not usable by the on-call
+        engineer, who needs the interval, the expected error and the reasons to decide.
+
+        Args:
+            record: One (origin, horizon) record.
+
+        Returns:
+            A JSON-serialisable payload describing the forecast and its trust level.
+        """
+        frame = pd.DataFrame([dict(record)])
+        published = self.predict(frame)
+        row = published.iloc[0]
+        horizon = row.get(self.horizon_column)
+        return {
+            "id": _jsonable(row.get(ID_COLUMN)),
+            "origin": _jsonable(row.get("origin_date")),
+            "horizon_days": _jsonable(horizon),
+            "forecast_mw": float(row[f"{TARGET_NAME}_prediction"]),
+            "interval_mw": [float(row["lower_mw"]), float(row["upper_mw"])],
+            "interval_level_pct": float(row["interval_level_pct"]),
+            "interval_method": str(row["interval_method"]),
+            "interval_calibrated": bool(row["interval_calibrated"]),
+            "relative_width_pct": _jsonable(row["relative_width_pct"]),
+            "expected_mape_pct": _jsonable(row["expected_mape_pct"]),
+            "confidence": str(row["confidence"]),
+            "review_required": bool(row["review_required"]),
+            "reasons": str(row["reasons"]).split(" ; ") if row["reasons"] else [],
+            "top_drivers": str(row["top_drivers"]).split(", ") if row["top_drivers"] else [],
+            "unit": TARGET_UNIT,
+        }
+
+    # ------------------------------------------------------------------ trust -----------
+    def _interval_bounds(
+        self, forecast: np.ndarray, horizons: np.ndarray, payload: pd.DataFrame
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Rebuild, per horizon, the interval that the evaluation actually measured.
+
+        The construction depends on the persisted method, and the predictor reproduces
+        it exactly:
+
+        * ``residual_quantile`` — the bounds are the forecast plus two absolute offsets in MW;
+        * ``conformal`` — the offsets are relative score quantiles applied to the forecast level;
+        * ``normalized_conformal`` — the score quantile multiplies a dispersion **scale** read on
+          the payload, so the band widens automatically on a winter peak.
+
+        When no calibration is available (a predictor used before any evaluation run), an
+        approximate band growing with the horizon is published instead, and the logs say so: a
+        fallback that pretends to be calibrated is worse than no interval.
+
+        Args:
+            forecast: Point forecasts.
+            horizons: Horizon of each forecast, in days.
+            payload: Validated input records, carrying the dispersion scale when the
+            method needs it.
+
+        Returns:
+            ``(lower, upper)`` bounds, in MW.
+        """
+        lower = np.full(len(forecast), np.nan)
+        upper = np.full(len(forecast), np.nan)
+        method = self.calibration.method
+        scale = (
+            self._scale_values(payload, forecast)
+            if method == "normalized_conformal"
+            else np.abs(forecast)
+        )
+        for index, horizon in enumerate(horizons):
+            key = _horizon_key(horizon)
+            point = float(forecast[index])
+            if method == "residual_quantile":
+                offsets = self.calibration.offsets.get(key)
+                if offsets is None:
+                    offsets = self._fallback_offsets(horizon, point)
+                lower[index] = point + offsets[0]
+                upper[index] = point + offsets[1]
+                continue
+            scores = self.calibration.scores if method != "residual_quantile" else {}
+            score = scores.get(key)
+            if score is None:
+                if not self.calibration.usable:
+                    offsets = self._fallback_offsets(horizon, point)
+                    lower[index] = point + offsets[0]
+                    upper[index] = point + offsets[1]
+                    continue
+                score = self._fallback_score(horizon)
+                logger.warning(
+                    "Aucun score calibré pour l'horizon {}: bande approximative publiée", horizon
+                )
+            width = float(score) * float(scale[index])
+            lower[index] = point - width
+            upper[index] = point + width
+        return lower, upper
+
+    def _scale_values(self, payload: pd.DataFrame, forecast: np.ndarray) -> np.ndarray:
+        """Return the per-record dispersion scale used by a normalised conformal interval.
+
+        The scale must be strictly positive and known at the origin. A missing column
+        falls back to
+        the forecast level (the closest available proxy), and missing or non-positive
+        values fall
+        back to the median of the usable ones, so that a sensor outage widens the
+        interval rather
+        than collapsing it to zero width.
+
+        Args:
+            payload: Validated input records.
+            forecast: Point forecasts, used as a documented fallback scale.
+
+        Returns:
+            An array of strictly positive scales, one per record.
+        """
+        column = self.calibration.scale_column
+        fallback_scale = np.where(np.abs(forecast) > 1e-9, np.abs(forecast), 1.0)
+        if not column or column not in payload.columns:
+            logger.warning(
+                "Colonne d'échelle '{}' absente du payload d'inférence :"
+                " l'intervalle est normalisé "
+                "par le niveau prévu (approximation documentée)",
+                column,
+            )
+            return fallback_scale
+        values = np.abs(pd.to_numeric(payload[column], errors="coerce").to_numpy(dtype="float64"))
+        usable = values[np.isfinite(values) & (values > 1e-9)]
+        if len(usable) == 0:
+            logger.warning(
+                "Colonne d'échelle '{}' inutilisable : normalisation par le niveau prévu", column
+            )
+            return fallback_scale
+        median = float(np.median(usable))
+        return np.where(np.isfinite(values) & (values > 1e-9), values, median)
+
+    def _fallback_score(self, horizon: Any) -> float:
+        """Approximate relative half-width when a horizon has no calibrated score.
+
+        The band grows with the square root of the horizon, the shape of an accumulating random
+        walk. It is a documented fallback, not a calibrated interval.
+
+        Args:
+            horizon: Horizon in days.
+
+        Returns:
+            A relative half-width (fraction of the scale).
+        """
+        try:
+            days = max(float(horizon), 1.0)
+        except (TypeError, ValueError):
+            days = float(self.long_horizon)
+        return 0.02 * float(np.sqrt(days))
+
+    def _fallback_offsets(self, horizon: Any, forecast: float) -> tuple[float, float]:
+        """Approximate interval offsets when no calibrated table is available.
+
+        Args:
+            horizon: Horizon in days.
+            forecast: Point forecast, used to express the band in MW.
+
+        Returns:
+            ``(low, high)`` offsets in MW.
+        """
+        band = abs(float(forecast)) * self._fallback_score(horizon)
+        return -band, band
+
+    def _confidence(
+        self, payload: pd.DataFrame, forecast: np.ndarray, horizons: np.ndarray
+    ) -> tuple[list[str], list[bool], list[list[str]]]:
+        """Grade each forecast and explain the grade.
+
+        Four independent reasons can degrade the confidence, each traceable to a column of the
+        payload: a long horizon, a weather forecast outside the trained domain, a
+        missing weather
+        observation, and a jump versus the last observed load that exceeds the sanity
+        threshold. The
+        last one matters most operationally: it separates « the model sees a regime break » from
+        « the model has drifted », which no metric can tell apart after the fact.
+
+        Args:
+            payload: Validated input records.
+            forecast: Point forecasts.
+            horizons: Horizon of each forecast.
+
+        Returns:
+            ``(confidence level, review flag, reasons)`` per record.
+        """
+        levels: list[str] = []
+        reviews: list[bool] = []
+        all_reasons: list[list[str]] = []
+        temperature = _column_values(payload, "temperature_forecast_c")
+        observed_temperature = _column_values(payload, "temperature_lag_1d")
+        last_observed = _column_values(payload, "load_last_observed")
+        reference_column = next(
+            (
+                name
+                for name in ("load_seasonal_naive", "load_rolling_mean_7d")
+                if name in payload.columns
+            ),
+            None,
+        )
+        reference = _column_values(payload, reference_column) if reference_column else None
+
+        for index in range(len(payload)):
+            reasons: list[str] = []
+            penalties = 0
+            horizon = horizons[index]
+            try:
+                horizon_value = float(horizon)
+            except (TypeError, ValueError):
+                horizon_value = float(self.long_horizon)
+            if horizon_value >= float(self.long_horizon):
+                reasons.append(f"horizon long (J+{int(horizon_value)}) : l'erreur météo domine")
+                penalties += 1
+
+            value = temperature[index] if temperature is not None else np.nan
+            if np.isfinite(value):
+                if not TEMPERATURE_DOMAIN_C[0] <= value <= TEMPERATURE_DOMAIN_C[1]:
+                    reasons.append(
+                        f"prévision météo hors domaine entraîné ({value:.1f} °C) : extrapolation"
+                    )
+                    penalties += 2
+                elif value <= 0.0 or value >= 30.0:
+                    reasons.append(f"régime météo extrême ({value:.1f} °C) : épisode rare")
+                    penalties += 1
+            if observed_temperature is not None and not np.isfinite(observed_temperature[index]):
+                reasons.append("température observée manquante à l'origine (capteur en panne)")
+                penalties += 1
+
+            if last_observed is not None and np.isfinite(last_observed[index]):
+                base = abs(float(last_observed[index]))
+                if base > 1e-9:
+                    change = abs(float(forecast[index]) - base) / base
+                    if change > self.sanity_max_relative_change:
+                        reasons.append(
+                            f"rupture de {change:.0%} vs dernière valeur connue : à confirmer "
+                            "(épisode réel ou dérive du modèle)"
+                        )
+                        penalties += 2
+
+            expected = self.horizon_mape.get(_horizon_key(horizon))
+            review = penalties >= 2
+            if expected is not None and np.isfinite(expected):
+                reasons.append(f"erreur attendue {expected:.2f} % à cet horizon (mesurée en test)")
+                if expected > self.review_mape_threshold:
+                    reasons.append(
+                        "MAPE attendu au-dessus du seuil de revue"
+                        f" ({self.review_mape_threshold:.1f} %)"
+                    )
+                    review = True
+            else:
+                reasons.append("erreur attendue non disponible : lancez `scripts/evaluate.py`")
+
+            if reference is not None and np.isfinite(reference[index]):
+                drift = float(forecast[index]) - float(reference[index])
+                reasons.append(
+                    f"{drift:+.0f} {TARGET_UNIT} vs {reference_column} "
+                    f"({100.0 * drift / max(abs(float(reference[index])), 1e-9):+.1f} %)"
+                )
+
+            level = (
+                CONFIDENCE_LEVELS[0]
+                if penalties == 0
+                else (CONFIDENCE_LEVELS[1] if penalties == 1 else CONFIDENCE_LEVELS[2])
+            )
+            levels.append(level)
+            reviews.append(bool(review))
+            all_reasons.append(reasons)
+        return levels, reviews, all_reasons
+
+    def top_drivers(self, matrix: pd.DataFrame, *, limit: int = 3) -> list[str]:
+        """Name the variables that drive the forecast, using the model's importance ranking.
+
+        A global ranking is used rather than a per-row attribution on purpose: the
+        project has no
+        SHAP dependency, and a global ranking read at inference time is honest about
+        what it is. The
+        limitation is documented in the report.
+
+        Args:
+            matrix: Model-ready rows (used only to restrict to available features).
+            limit: Number of drivers to return.
+
+        Returns:
+            The most important available feature names, most important first.
+        """
+        importances = self._importances
+        if importances is None:
+            estimator = getattr(self.model, "estimator_", None) or getattr(
+                self.model, "model_", None
+            )
+            native = getattr(estimator, "feature_importances_", None)
+            if native is None:
+                native = getattr(estimator, "coef_", None)
+                if native is not None:
+                    native = (
+                        np.abs(np.asarray(native)).mean(axis=0)
+                        if np.ndim(native) > 1
+                        else np.abs(np.asarray(native)).ravel()
+                    )
+            importances = np.asarray(native, dtype="float64") if native is not None else None
+            self._importances = importances
+        if importances is None or len(importances) != matrix.shape[1]:
+            return []
+        ranking = pd.Series(importances, index=list(matrix.columns)).sort_values(ascending=False)
+        return [str(name) for name in ranking.head(int(limit)).index]
+
+    # ------------------------------------------------------------------ persistence -----
+    def save(self, predictions: pd.DataFrame, path: str | Path | None = None) -> Path:
+        """Write the published forecasts.
+
+        Args:
+            predictions: Frame produced by :meth:`predict`.
+            path: Destination (defaults to ``artifacts/reports/predictions.csv``).
+
+        Returns:
+            The written path.
+        """
+        destination = Path(path) if path else self.paths.reports_dir / "predictions.csv"
+        return write_table(predictions, destination)
+
+
+def _horizon_key(value: Any) -> Any:
+    """Normalise a horizon value so that int and float keys match across artefacts.
+
+    Args:
+        value: Horizon read from a table or a payload.
+
+    Returns:
+        An ``int`` when the value is integral, the raw value otherwise.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    return int(number) if number.is_integer() else number
+
+
+def _column_values(payload: pd.DataFrame, column: str | None) -> np.ndarray | None:
+    """Return a numeric column of the payload, or ``None`` when it is absent.
+
+    Args:
+        payload: Input records.
+        column: Column name.
+
+    Returns:
+        The values as floats, or ``None``.
+    """
+    if not column or column not in payload.columns:
+        return None
+    return pd.to_numeric(payload[column], errors="coerce").to_numpy(dtype="float64")
+
+
+def _round_or_none(value: Any, digits: int) -> Any:
+    """Round a value when it is a finite number, keep ``None`` otherwise.
+
+    Args:
+        value: Value to round.
+        digits: Number of decimals.
+
+    Returns:
+        The rounded float or ``None``.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(number, digits) if np.isfinite(number) else None
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert a payload value to something JSON serialisable.
+
+    Args:
+        value: Value to convert.
+
+    Returns:
+        A JSON-friendly value.
+    """
+    if value is None or (isinstance(value, float) and not np.isfinite(value)):
+        return None
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (pd.Timestamp,)):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (ValueError, TypeError):  # pragma: no cover - tableau non scalaire
+            return str(value)
+    return value

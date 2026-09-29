@@ -1,0 +1,49 @@
+# =================================================================================================
+# Modèle : Gradient boosting LightGBM (LGBMRegressor)
+# -------------------------------------------------------------------------------------------------
+# LightGBM construit ses arbres feuille par feuille (leaf-wise) sur des histogrammes : à précision
+# comparable, il est le plus rapide des boosters, ce qui compte pour un ré-entraînement quotidien
+# et un backtest à cinq replis. `num_leaves` pilote directement la capacité ; le réglage retenu
+# est **petit** (7 feuilles, 60 lignes minimum par feuille), parce qu'une croissance leaf-wise non
+# bridée mémorise les pointes isolées d'une série bruitée. L'arrêt anticipé natif sur la
+# validation chronologique fixe le nombre d'arbres. Limites : perte quadratique face à un métier
+# qui pilote au MAPE, extrapolation médiocre hors du domaine vu, et aucun modèle linéaire dans la
+# stack pour lire la thermo-sensibilité en MW par degré.
+#
+# Alternatives considérées : lightgbm_dart : dropout sur les arbres, régularise les gros ensembles, mais sans arrêt anticipé, lightgbm_goss : échantillonnage par gradient, utile sur de très gros volumes, référence naïve saisonnière : le seul adversaire qui compte — tout modèle qui ne la bat pas de 30 % en MAPE n'a aucune valeur opérationnelle.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_estimators=...
+# =================================================================================================
+
+name: "Gradient boosting LightGBM (LGBMRegressor)"
+algorithm: lightgbm
+class: LightGBMModel
+task: forecasting
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `LightGBMModel(params=...)` (voir src/models/model.py).
+params:
+  n_estimators: 1500
+  num_leaves: 7
+  max_depth: -1
+  learning_rate: 0.05
+  min_child_samples: 60
+  subsample: 0.9
+  subsample_freq: 1
+  colsample_bytree: 0.5
+  reg_lambda: 1.0
+  reg_alpha: 0.0
+  importance_type: gain
+
+# --- options spécifiques à la stack `lightgbm` ---------------------------------------
+early_stopping_rounds: 40
+eval_metric: l2
+native_categorical: true
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold

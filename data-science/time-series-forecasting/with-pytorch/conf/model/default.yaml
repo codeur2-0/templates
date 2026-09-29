@@ -1,0 +1,45 @@
+# =================================================================================================
+# Modèle : Réseau de neurones PyTorch (MLP de régression)
+# -------------------------------------------------------------------------------------------------
+# Un perceptron multicouche entraîné par une boucle explicite (lots, perte, rétropropagation, pas
+# d'optimiseur, arrêt anticipé avec restauration du meilleur état) apprend la thermo-sensibilité
+# et les interactions calendrier x météo sans les fabriquer à la main, à partir des mêmes 41
+# features que les boosters. La cible est normalisée à l'entraînement puis dénormalisée à la
+# prédiction, ce qui rend la perte quadratique comparable d'une saison à l'autre. Limites assumées
+# : un réseau extrapole aussi mal qu'un booster hors du domaine vu, son entraînement dépend de
+# l'initialisation (d'où les graines fixées partout), et il ne produit ni coefficient lisible en
+# MW/°C ni importance native — l'explication passe par la permutation.
+#
+# Alternatives considérées : linear : régression linéaire entraînée par gradient — le témoin qui mesure ce qu'apportent les couches cachées, residual_mlp : MLP à blocs résiduels, utile quand on empile davantage de couches, référence naïve saisonnière : le seul adversaire qui compte — tout modèle qui ne la bat pas de 30 % en MAPE n'a aucune valeur opérationnelle.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.hidden_layers=...
+# =================================================================================================
+
+name: "Réseau de neurones PyTorch (MLP de régression)"
+algorithm: mlp
+class: PyTorchModel
+task: forecasting
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `PyTorchModel(params=...)` (voir src/models/model.py).
+params:
+  hidden_layers:
+  - 128
+  - 64
+  dropout: 0.1
+  activation: relu
+  batch_norm: false
+  optimizer: adamw
+  scheduler: cosine
+  loss: mse
+
+# --- options spécifiques à la stack `pytorch` ---------------------------------------
+device: cpu
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold

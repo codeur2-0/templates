@@ -1,0 +1,257 @@
+# ==============================================================================================
+# data-science / time-series-forecasting / with-pytorch
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/time_series_forecasting.yaml` (prévision de la
+# consommation électrique régionale pour un gestionnaire de réseau de distribution). Ce manifeste
+# ne décrit QUE ce qui change avec la stack : identité du projet, modèle et point de fonctionnement.
+# ==============================================================================================
+
+key: ds-forecasting-pytorch
+title: "Prévision de consommation électrique multi-horizons avec PyTorch"
+summary: >-
+  Pipeline de prévision de bout en bout (série quotidienne synthétique de consommation régionale ->
+  expansion en couples origine/horizon avec contrat d'antériorité -> contrats Pandera -> features de
+  décalage, de momentum et de thermo-sensibilité -> réseau de neurones PyTorch sur cible
+  normalisée avec arrêt anticipé chronologique -> MAPE et MASE ventilés par horizon, backtest à
+  origine glissante, comparaison aux références naïves, intervalles conformes normalisés,
+  publication des sept prochains jours) pour une équipe Prévisions, entièrement piloté par Hydra.
+
+family: time_series_forecasting
+domain: data-science
+problem: time-series-forecasting
+stack: pytorch
+project_slug: electricity-load-forecasting-pytorch
+package_name: load_forecast_pytorch
+
+business:
+  # Critères et mesures de CETTE stack (exécution de référence `make all`, graine 42, test
+  # chronologique de 960 lignes) : les valeurs de la famille sont celles du projet scikit-learn.
+  success_criteria:
+    - "MAPE ≤ 4,0 % sur le split de test chronologique, tous horizons confondus. Mesuré : 3,386 % (J+1 3,099 | J+2 3,360 | J+3 3,463 | J+7 3,621), pour un plancher structurel de bruit à ~2,8 %."
+    - "Le modèle doit battre le **naif saisonnier** (même jour de la semaine précédente) d'au moins 30 % en MAPE : c'est le seul seuil qui prouve une valeur ajoutée. Mesuré : +62,5 % (9,029 % -> 3,386 %)."
+    - "MAPE ≤ 6,0 % à l'horizon J+7 : la dégradation avec l'horizon doit rester maîtrisée (le J+7 pilote les achats hebdomadaires). Mesuré : 3,621 %, soit 0,52 point au-dessus du J+1."
+    - "MASE ≤ 0,75 : l'erreur doit être inférieure à celle du naif saisonnier pris comme référence d'échelle. Mesuré : 0,382."
+    - "Biais moyen < 1,5 % et aucun mois dont le biais dépasse 4 % : une prévision systématiquement basse fait acheter trop cher en urgence. Mesuré : -0,763 % en moyenne, pire mois mars à -3,447 %."
+    - "Couverture de l'intervalle de prévision ≥ 85 % pour un niveau nominal de 90 %. Mesuré : 84,79 % avec le conformal normalisé — sous la cible métier, au-dessus du seuil bloquant de 82 % de la configuration."
+    - "Reproductibilité : deux exécutions avec la même graine produisent exactement les mêmes métriques. Mesuré : dispersion inter-replis du backtest 0,577."
+  constraints:
+    - "Aucune donnée réelle de consommation : le dataset de ce dépôt est synthétique et hors ligne."
+    - "Interdiction absolue de fuite temporelle : une feature ne peut utiliser que l'information disponible au matin de l'origine (historique) ou connue par avance (calendrier, prévision météo)."
+    - "Le split d'évaluation est chronologique : jamais de mélange aléatoire, jamais de validation croisée aléatoire sur des séries temporelles."
+    - "Le modèle doit s'exécuter sur CPU en moins de 5 secondes pour les 7 horizons d'une journée (contrainte d'astreinte). Mesuré : 0,11 s en moyenne sur 20 appels, sur un poste de développement Windows à charge variable — une marge d'un facteur 15 au moins."
+    - "Les épisodes extrêmes (vague de froid, canicule, arrêt industriel) ne doivent pas être rognés : ce sont précisément les jours où la prévision vaut de l'argent."
+  measured_results:
+    - label: "MAPE global (test, 960 lignes)"
+      value: "3,386 %"
+    - label: "MAE"
+      value: "90,4 MW"
+    - label: "sMAPE / MASE / R²"
+      value: "3,42 % / 0,382 / 0,962"
+    - label: "Biais moyen (pire mois : mars)"
+      value: "-0,763 % (-3,447 %)"
+    - label: "MAPE du naif saisonnier -> gain du modèle"
+      value: "9,029 % -> +62,5 %"
+    - label: "Couverture d'intervalle (nominal 90 %)"
+      value: "84,79 %"
+    - label: "MAPE J+1 / J+2 / J+3 / J+7"
+      value: "3,099 / 3,360 / 3,463 / 3,621 %"
+    - label: "MAPE sur les 20 jours d'épisode extrême"
+      value: "6,22 % (biais -6,18 %, limite documentée)"
+    - label: "Dispersion inter-replis du backtest"
+      value: "0,577"
+    - label: "Features en entrée du modèle"
+      value: "41 (32 colonnes brutes + encodage)"
+
+train:
+  epochs: 120
+  batch_size: 64
+  learning_rate: 0.002
+  weight_decay: 0.0001
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    patience: 12
+    min_delta: 0.0
+    mode: min
+    restore_best: true
+
+model:
+  display_name: "Réseau de neurones PyTorch (MLP de régression)"
+  algorithm: mlp
+  rationale: >-
+    Un perceptron multicouche entraîné par une boucle explicite (lots, perte, rétropropagation, pas
+    d'optimiseur, arrêt anticipé avec restauration du meilleur état) apprend la thermo-sensibilité et
+    les interactions calendrier x météo sans les fabriquer à la main, à partir des mêmes 41 features
+    que les boosters. La cible est normalisée à l'entraînement puis dénormalisée à la prédiction, ce
+    qui rend la perte quadratique comparable d'une saison à l'autre. Limites assumées : un réseau
+    extrapole aussi mal qu'un booster hors du domaine vu, son entraînement dépend de l'initialisation
+    (d'où les graines fixées partout), et il ne produit ni coefficient lisible en MW/°C ni importance
+    native — l'explication passe par la permutation.
+  alternatives:
+    - "linear : régression linéaire entraînée par gradient — le témoin qui mesure ce qu'apportent les couches cachées"
+    - "residual_mlp : MLP à blocs résiduels, utile quand on empile davantage de couches"
+    - "référence naïve saisonnière : le seul adversaire qui compte — tout modèle qui ne la bat pas de 30 % en MAPE n'a aucune valeur opérationnelle"
+  params:
+    hidden_layers: [128, 64]
+    dropout: 0.1
+    activation: relu
+    batch_norm: false
+    optimizer: adamw
+    scheduler: cosine
+    loss: mse
+
+extras:
+  # Grille explorée par le notebook 04 (8 combinaisons), centrée sur le point retenu.
+  notebook_param_grid:
+    dropout: [0.0, 0.2]
+    hidden_layers: [[64, 32], [128, 64]]
+    activation: [relu, gelu]
+  # Taille des fixtures pytest : 400 lignes = 100 origines x 4 horizons.
+  test_n_samples: 400
+  # Réglages des notebooks propres à la stack (valeurs scikit-learn par défaut).
+  notebook_forecasting:
+    comparison: [mlp, linear, residual_mlp]
+    linear_algorithm: null
+    loss_param: loss
+    losses: [mse, mae]
+    complexity_param: dropout
+    complexity_values: [0.0, 0.1, 0.2, 0.3, 0.5]
+    complexity_label: dropout
+    complexity_axis: taux de dropout
+    complexity_log2: false
+    # Commentaires chiffrés des notebooks, écrits d'après les mesures de cette stack.
+    prose:
+      algorithms:
+        - "À réglages par défaut, le MLP résiduel (3,46 %) devance le MLP simple (3,61 %) et la régression linéaire entraînée par gradient (4,16 %) : les couches cachées apportent un demi-point, les connexions résiduelles un peu plus — un écart sous la dispersion entre replis, donc sans valeur de décision."
+        - "Même la régression linéaire bat le naif saisonnier de 54 % : l'essentiel du signal est porté par les features (niveau récent, calendrier, météo), le réseau n'ajoute que les interactions."
+        - "Un réseau coûte 10 à 15 s d'entraînement contre moins d'une seconde pour un booster : négligeable pour un ré-entraînement hebdomadaire, mais multiplié par cinq dans le backtest."
+        - "Le modèle configuré (MLP 128-64, dropout 0,1, arrêt anticipé) atteint 3,39 % de MAPE de test dans le pipeline : le meilleur résultat de la famille, à lire avec la dispersion entre replis (section 2 du notebook 05)."
+      thermo:
+        - "Le témoin linéaire de la stack (`linear`) est un module PyTorch entraîné par gradient, sans coefficients exposés au format scikit-learn : aucune thermo-sensibilité en MW/°C n'est publiée ici, d'où la section sans objet."
+        - "La lecture dans l'unité du métier reste disponible dans la famille : Ridge en scikit-learn, booster linéaire en XGBoost."
+        - "Pour ce réseau, l'explication passe par l'importance par permutation (notebook 06), qui dit **quelle** variable compte mais pas **dans quel sens** ni en quelle unité."
+      grid:
+        - "Le dropout est le réglage qui compte : avec 128-64 neurones en `relu`, passer de 0,0 à 0,2 fait gagner 0,2 point de MAPE de validation (3,40 % → 3,19 %)."
+        - "La largeur interagit avec la régularisation : sans dropout, le réseau étroit (64-32) bat le large ; avec dropout, c'est l'inverse — un réseau plus large n'est utile que bridé."
+        - "`gelu` devance `relu` de 0,04 point au meilleur point de la grille (3,15 % contre 3,19 %) : c'est sous la dispersion entre graines, donc `relu`, plus simple, est conservé."
+        - "Le dropout retenu (0,1) n'est pas dans la grille : il est fixé par le balayage du notebook 05 (section 4), où il donne le meilleur MAPE de validation (3,16 %)."
+      loss:
+        - "Contrairement aux boosters, la perte absolue (`mae`) fait ici jeu égal avec la quadratique : MAPE 3,31 % contre 3,38 %, MAE 88 contre 90 MW, RMSE 114 contre 116 MW, mais un biais (+0,41 % contre +0,36 %) et une P95 (8,4 % contre 8,2 %) légèrement moins bons."
+        - "Rejouée avec le protocole de production (120 époques, arrêt anticipé sur la validation), la perte absolue reste légèrement devant : MAPE de validation 3,14 % contre 3,21 %, et 3,22 % contre 3,39 % sur le test."
+        - "Ces écarts restent très en dessous de la dispersion des replis chronologiques (écart-type 1,6 point, section 2) : une seule graine ne suffit pas à trancher."
+        - "`mse` est conservée par cohérence avec la famille ; basculer est un changement d'une ligne (`model.params.loss=mae`), à valider sur plusieurs graines avant d'être publié."
+      overfit:
+        - "Sans dropout, l'écart train/validation est le plus large (1,03 point) ; à 0,1, la validation atteint son meilleur niveau (3,16 %) avec un écart presque divisé par deux."
+        - "À 0,5, le réseau sous-apprend : le MAPE d'entraînement remonte à 3,4 % et la validation se dégrade à 4,4 % — trop de régularisation coûte autant que pas assez."
+        - "Le rapport val/train reste entre 1,2 et 1,4, bien plus bas que pour les boosters (2 à 3) : l'arrêt anticipé avec restauration du meilleur état borne déjà le sur-apprentissage."
+  # Options du générateur synthétique, exposées dans `conf/data/default.yaml` et transmises par
+  # `SyntheticDataGenerator.from_config` (aucune valeur codée en dur dans le code).
+  data_conf:
+    horizons: [1, 2, 3, 7]
+    start_date: "2021-01-01"
+    warmup_days: 40
+    base_load_mw: 2100.0
+    annual_amplitude: 0.18
+    trend_per_year: -0.008
+    heat_gradient: 0.035
+    # Gradient de climatisation trois fois plus faible que le gradient de chauffe : le parc
+    # français est peu climatisé. Cette asymétrie est réelle, mesurable, et elle explique
+    # pourquoi une canicule coûte moins cher en erreur de prévision qu'une vague de froid.
+    cool_gradient: 0.012
+    holiday_drop: 0.13
+    school_holiday_lift: 0.015
+    noise_sigma: 0.022
+    noise_ar: 0.60
+    forecast_error_j1: 0.35
+    forecast_error_growth: 0.14
+    missing_temperature_rate: 0.03
+    # Jours d'épisode sur toute la période simulée (~3,3 ans) : assez pour que l'analyse d'erreur
+    # par régime dispose de quelques dizaines de jours cibles, pas assez pour que le modèle les
+    # apprenne par coeur — c'est exactement la situation réelle d'un gestionnaire de réseau.
+    cold_snap_days: 18
+    heatwave_days: 18
+    shutdown_days: 9
+  # Critères de succès du cas d'usage, lus par le rapport d'évaluation.
+  #
+  # Calibration : les MAPE sont exprimés en pourcents, comme les métriques `mape` et `smape` du
+  # registre. Le plancher structurel est d'environ 1,5 % (bruit AR(1) de 2,2 % plus l'erreur de
+  # prévision météo) : un MAPE proche de 0 signerait une fuite temporelle, pas une performance.
+  # Les seuils sont calibrés sur les mesures réelles de ce générateur (seed 42, 4 800 lignes) et
+  # laissent une marge supérieure à la dispersion entre graines. Un seuil non atteint n'est pas
+  # caché : le verdict du rapport l'affiche en échec, avec la valeur mesurée.
+  # Unité : tout ce qui est un taux est exprimé en **pourcent** (30.0 et non 0.30), parce que les
+  # métriques du rapport le sont aussi ; `mase_max` est un ratio sans unité. Les deux clés de taux
+  # dont la valeur documentée est ≥ 10 sont converties automatiquement si elles sont déclarées en
+  # fraction, avec un avertissement dans le journal.
+  quality:
+    # MAPE global sur le test. Plancher structurel ~2,8 % (bruit AR(1) multiplicatif de 2,75 %
+    # d'écart-type, plus l'erreur de prévision météo) : ce seuil est donc atteignable sans fuite, et
+    # un MAPE proche de 0 signerait une fuite temporelle et non une performance.
+    mape_max: 4.0
+    # L'horizon long est le plus difficile (prévision météo dégradée, information d'origine plus
+    # ancienne) : on tolère 1,5 fois le seuil global.
+    mape_long_horizon_max: 6.0
+    mase_max: 0.75
+    # Gain minimal sur la référence naïve saisonnière : en dessous de 30 %, le modèle ne justifie
+    # pas sa complexité d'exploitation. Mesuré : ~55 %.
+    improvement_vs_naive_min: 30.0
+    # Biais moyen (surestimation ou sous-estimation systématique), en % du niveau de consommation.
+    bias_max: 1.5
+    # Couverture réalisée de l'intervalle publié, dont le niveau nominal est 90 %. Le seuil est
+    # volontairement sous le nominal : la période de test contient une vague de froid absente de la
+    # fenêtre de calibration, et aucune calibration honnête ne peut couvrir un régime qu'elle n'a
+    # jamais vu. Le rapport ventile donc la couverture entre jours calmes (~89 %, proche du nominal)
+    # et jours de régime extrême (très basse), et c'est cette ventilation qui est exploitable.
+    interval_coverage_min: 82.0
+    # Écart-type du MAPE entre les replis du backtest à origine glissante : mesure la stabilité
+    # opérationnelle, pas la performance.
+    backtest_spread_max: 2.0
+  model_conf:
+    device: cpu
+    # Aucune validation croisée aléatoire : sur une série temporelle elle mélange les époques et
+    # produit un score optimiste. La validation temporelle est portée par le backtest à origine
+    # glissante (`src/evaluation/evaluator.py`), qui respecte l'antériorité de l'information.
+    cross_validation:
+      enabled: false
+      folds: 3
+      strategy: kfold
+  root_conf:
+    load_forecasting:
+      # Colonne portant l'horizon de prévision. Lue par l'évaluateur (ventilation par horizon) et
+      # par le prédicteur (intervalle et erreur attendue) : aucun nom de colonne n'est codé en dur.
+      horizon_column: horizon_days
+      # Horizons publiés chaque matin. Doivent rester un sous-ensemble des horizons du générateur :
+      # un horizon jamais vu en entraînement serait de l'extrapolation pure.
+      horizons: [1, 2, 3, 7]
+      # Horizon considéré comme « long » dans les rapports et les alertes de dérive.
+      long_horizon: 7
+      # Niveau nominal de l'intervalle publié avec la prévision ponctuelle.
+      interval_level: 0.90
+      # Construction de l'intervalle : prédiction conforme **normalisée**, par horizon. Les scores
+      # de calibration sont les résidus absolus de la validation divisés par une échelle connue à
+      # l'origine. Deux raisons à ce choix, mesurées sur ce jeu :
+      #   - les résidus sont autocorrélés et leur dispersion croît avec l'horizon, donc une
+      #     hypothèse gaussienne globale donne un intervalle trop étroit au J+7 et trop large au J+1 ;
+      #   - le bruit de la série est multiplicatif, donc la dispersion des résidus est proportionnelle
+      #     au niveau de consommation. Un intervalle calibré sur une fenêtre estivale calme est deux
+      #     fois trop étroit pour une pointe hivernale : normaliser par la dernière valeur connue
+      #     fait passer la couverture réalisée de 73 % à 85 %.
+      interval_method: normalized_conformal
+      # Échelle de dispersion de l'intervalle normalisé. Doit être connue à l'origine (jamais la
+      # vérité du jour cible) et proportionnelle à la dispersion des résidus.
+      interval_scale_column: load_last_observed
+      # Nombre de replis du backtest à origine glissante (fenêtre d'entraînement étendue à chaque
+      # repli, jamais mélangée : c'est l'équivalent temporel d'une validation croisée).
+      backtest_folds: 5
+      # Au-delà de ce MAPE par horizon (en pourcents), la prévision est publiée avec l'indicateur
+      # « à revoir par un analyste » plutôt qu'engagée telle quelle.
+      review_mape_threshold: 6.0
+      # Écart relatif à la prévision au-delà duquel une publication est signalée comme atypique
+      # (garde-fou contre un modèle qui décroche après une rupture de régime).
+      sanity_max_relative_change: 0.35
+
+learning_objectives:
+  - "Écrire une boucle d'entraînement de régression explicite et l'arrêter sur une validation **chronologique**."
+  - "Comparer un réseau de neurones aux boosters sur les mêmes données, métriques et références naïves."
+  - "Régulariser un réseau (dropout, arrêt anticipé, décroissance des poids) en lisant l'écart train/validation."
+  - "Situer le modèle face aux références naïves et publier un intervalle dont la couverture est mesurée."

@@ -1,0 +1,26 @@
+# =================================================================================================
+# Configuration Hydra (groupe `hydra`)
+# -------------------------------------------------------------------------------------------------
+# Ce fichier surcharge le noeud réservé `hydra` de Hydra : il est chargé via
+# `defaults: [- hydra: local]` dans `conf/config.yaml`.
+#
+# `job.chdir: false` est **essentiel** : sans cela Hydra déplace le processus dans le répertoire
+# de sortie et tous les chemins relatifs du projet (data/, artifacts/, conf/) cessent de
+# fonctionner. Les chemins sont de toute façon résolus depuis `src/utils/paths.py`.
+# =================================================================================================
+
+run:
+  dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+sweep:
+  dir: multirun/${now:%Y-%m-%d}/${now:%H-%M-%d-%S}
+  subdir: ${hydra.job.num}
+job:
+  chdir: false
+  config:
+    override_dirname:
+      kv_sep: "="
+      item_sep: ","
+      exclude_keys:
+        - log_level
+        - mode
+verbose: false

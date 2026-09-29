@@ -1,0 +1,47 @@
+# =================================================================================================
+# Modèle : Réseau de neurones Keras (API fonctionnelle, régression)
+# -------------------------------------------------------------------------------------------------
+# L'API fonctionnelle déclare le graphe (entrées -> couches denses -> sortie linéaire), le compile
+# avec sa perte et laisse `fit` piloter l'entraînement avec des callbacks éprouvés (EarlyStopping
+# avec restauration des meilleurs poids, ReduceLROnPlateau). Le réseau apprend la thermo-
+# sensibilité et les interactions calendrier x météo à partir des mêmes 41 features que les
+# boosters, sur une cible normalisée. Limites assumées : extrapolation médiocre hors du domaine
+# vu, dépendance à l'initialisation (graines et opérations déterministes imposées), et aucune
+# lecture native en MW/°C — l'explication passe par la permutation. L'activation retenue est
+# `gelu` : sur la grille de validation du notebook 04, elle bat `relu` dans les huit
+# configurations, parfois de près d'un point de MAPE, alors que l'écart est négligeable dans la
+# stack PyTorch.
+#
+# Alternatives considérées : linear : régression linéaire entraînée par gradient — le témoin qui mesure ce qu'apportent les couches cachées, residual_mlp : MLP à blocs résiduels, utile quand on empile davantage de couches, référence naïve saisonnière : le seul adversaire qui compte — tout modèle qui ne la bat pas de 30 % en MAPE n'a aucune valeur opérationnelle.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.hidden_layers=...
+# =================================================================================================
+
+name: "Réseau de neurones Keras (API fonctionnelle, régression)"
+algorithm: mlp
+class: KerasModel
+task: forecasting
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `KerasModel(params=...)` (voir src/models/model.py).
+params:
+  hidden_layers:
+  - 128
+  - 64
+  dropout: 0.1
+  activation: gelu
+  batch_norm: false
+  optimizer: adamw
+  scheduler: cosine
+  loss: mse
+
+# --- options spécifiques à la stack `keras` ---------------------------------------
+deterministic: true
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold
