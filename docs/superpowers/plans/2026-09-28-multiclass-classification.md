@@ -36,20 +36,20 @@ changements additifs dans `modality/tabular`.
 
 - [x] `engine.py` et `utils_notebooks.py` écrivent en `newline="\n"`.
 - [x] Vérifié : régénération de `classification/with-sklearn` = diff nul hors date du README.
-- [ ] Commit.
+- [x] Commit.
 
 ### Task 2: Métriques et tests partagés (modality/tabular)
 
 **Files:** `templates/modality/tabular/src/training/losses_metrics.py`,
 `templates/modality/tabular/tests/test_models.py`, `templates/modality/tabular/tests/test_loaders.py`
 
-- [ ] `_log_loss` : `labels = extra["classes"]` si fourni, sinon `np.unique(y_true)`.
-- [ ] `_roc_auc_ovr` : `roc_auc_score(y_true, proba, multi_class="ovr", average="macro", labels=classes)` ;
+- [x] `_log_loss` : `labels = extra["classes"]` si fourni, sinon `np.unique(y_true)`.
+- [x] `_roc_auc_ovr` : `roc_auc_score(y_true, proba, multi_class="ovr", average="macro", labels=classes)` ;
   NaN + warning si < 2 classes ; enregistrée pour `multiclass`, `requires={y_true, y_proba}`.
-- [ ] `METRICS_BY_TASK["multiclass"]` += `mcc`, `roc_auc_ovr`.
-- [ ] `test_models.py` : casts `float64` des prédictions limités aux tâches numériques.
-- [ ] `test_loaders.py` : stratification comparée par proportion de chaque classe.
-- [ ] Régénérer `classification/with-sklearn`, pytest vert. Commit.
+- [x] `METRICS_BY_TASK["multiclass"]` += `mcc`, `roc_auc_ovr`.
+- [x] `test_models.py` : casts `float64` des prédictions limités aux tâches numériques.
+- [x] `test_loaders.py` : stratification comparée par proportion de chaque classe.
+- [x] Régénérer `classification/with-sklearn`, pytest vert. Commit.
 
 ### Task 3: Famille, générateur, manifeste
 
@@ -57,46 +57,57 @@ changements additifs dans `modality/tabular`.
 `templates/family/multiclass_classification/src/data/generators.py.j2`,
 `manifests/ds-multiclass-sklearn.yaml`, `engine.py` (alias)
 
-- [ ] Défauts de famille : business, data (15 colonnes, checks), metrics (`task: multiclass`,
+- [x] Défauts de famille : business, data (15 colonnes, checks), metrics (`task: multiclass`,
   primary `f1_macro`), preprocessing (features `difference`/`product`), train split stratifié,
   `extras.root_conf.diagnosis`.
-- [ ] Générateur : conditions mélange normal/stressé, logits physiques, calibration itérative
+- [x] Générateur : conditions mélange normal/stressé, logits physiques, calibration itérative
   des intercepts, `alarm_code` bruité, manquants, `generation_metadata.json` avec oracle,
   majoritaire, règle `alarm_code`.
-- [ ] Générer, `make data` équivalent, vérifier parts de classes et plafond oracle. Ajuster logits.
-- [ ] Commit.
+- [x] Générer, `make data` équivalent, vérifier parts de classes et plafond oracle. Ajuster logits.
+- [x] Commit.
 
 ### Task 4: Couche task/multiclass
 
 **Files:** `templates/task/multiclass/src/{evaluation,inference,visualization}/…`,
 `templates/task/multiclass/tests/test_multiclass.py`
 
-- [ ] `evaluator.py` : `EvaluationResult` compatible, métriques avec `extra.classes`, table par
+- [x] `evaluator.py` : `EvaluationResult` compatible, métriques avec `extra.classes`, table par
   classe (+ AUC OvR), confusion ordonnée `classes_`, paires confondues, références
   (majoritaire, `alarm_code`, oracle), décision coût minimal, abstention, calibration top-label,
   verdict. `compare_to_baseline`, `feature_importance`.
-- [ ] `reports.py.j2` : rapport Markdown + JSON + CSV.
-- [ ] `predictor.py.j2` : colonnes spec §4.
-- [ ] `plots.py` : `MulticlassPlots.save_all`.
-- [ ] Tests dédiés (Review Focus 1-4). Pipeline `mode=all` vert. Commit.
+- [x] `reports.py.j2` : rapport Markdown + JSON + CSV.
+- [x] `predictor.py.j2` : colonnes spec §4.
+- [x] `plots.py` : `MulticlassPlots.save_all`.
+- [x] Tests dédiés (Review Focus 1-4). Pipeline `mode=all` vert. Commit.
 
 ### Task 5: Notebooks et README de projet
 
 **Files:** `notebooks/multiclass.py`, `notebooks/tabular.py`, `templates/base/README.md.j2`
 
-- [ ] `structure_cells`, `build_04_model_exploration`, `build_06_error_analysis`.
-- [ ] `_is_multiclass` + aiguillages 01/04/06 + `__all__`.
-- [ ] Leçons 04/05/06 multiclasses dans le README de projet.
-- [ ] `tools.verify` complet vert sur le nouveau projet. Calibrer les seuils d'objectifs sur mesure. Commit.
+- [x] `structure_cells`, `build_04_model_exploration`, `build_06_error_analysis`.
+- [x] `_is_multiclass` + aiguillages 01/04/06 + `__all__`.
+- [x] Leçons 04/05/06 multiclasses dans le README de projet.
+- [x] `tools.verify` complet vert sur le nouveau projet. Calibrer les seuils d'objectifs sur mesure. Commit.
 
 ### Task 6: Non-régression et README racine
 
-- [ ] Régénérer les 16 projets ; relire `git diff -I 'Dernière génération'`.
-- [ ] `tools.verify` complet sur `classification/with-sklearn`, `--quick` sur les 15 autres.
-- [ ] Rejouer le pipeline recommandation, README racine (17 projets, §1.6, §1.7, feuille de route).
-- [ ] Commit.
+- [x] Régénérer les 16 projets ; relire `git diff -I 'Dernière génération'`.
+- [x] `tools.verify` complet sur `classification/with-sklearn`, `--quick` sur les 15 autres.
+- [x] Rejouer le pipeline recommandation, README racine (17 projets, §1.6, §1.7, feuille de route).
+- [x] Commit.
 
 ### Task 7+: Autres stacks de la famille (sous-projet 2)
 
-- [ ] LightGBM (métriques `multi_logloss`), PyTorch, Keras (`class_weight: auto`), XGBoost (LabelEncoder).
-- [ ] Un manifeste + verify complet par stack ; README racine mis à jour.
+- [x] LightGBM (métriques `multi_logloss`), PyTorch, Keras (`class_weight: auto`), XGBoost (LabelEncoder).
+- [x] Un manifeste + verify complet par stack ; README racine mis à jour.
+
+### Task 8: Prévision multi-stacks (ajoutée en cours d'exécution)
+
+- [x] `notebooks/forecasting.py` paramétré par stack (`extras.notebook_forecasting` : réglages + prose).
+- [x] Correctif `np.percentile` sans quantile (cellule perte du notebook 05) ; insights sklearn réécrits.
+- [x] Paramètre `loss` (mse / mae / huber) en régression pour PyTorch et Keras.
+- [x] Manifestes et projets `time-series-forecasting/with-{xgboost,lightgbm,pytorch,keras}`, conformes 7/7.
+
+## Résultat
+
+25/25 projets conformes à `tools/verify.py` (4 235 tests, 150 notebooks exécutés, pipeline complet).
