@@ -1,0 +1,58 @@
+# =================================================================================================
+# Données : Alarmes machine et mode de défaillance diagnostiqué
+# -------------------------------------------------------------------------------------------------
+# Une ligne par alarme levée par une fraiseuse CNC : contexte de production, code émis par
+# l'automate, relevés capteurs à l'instant de l'alarme, et mode de défaillance constaté par le
+# technicien à la clôture de l'intervention. Le mode est tiré d'un modèle physique (usure, écart
+# thermique à basse vitesse, puissance hors plage, effort au-delà d'un seuil dépendant de la
+# gamme) avec un bruit irréductible : le signal est réel mais imparfait, et une classe
+# (`random_failure`) n'a volontairement aucun signal observable.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: machine_failure_diagnosis
+n_samples: 6000
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: failure_mode
+id_column: alarm_id
+time_column: null
+group_column: null
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['alarm_id', 'alarm_timestamp']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+class_shares:
+  false_alarm: 0.3
+  tool_wear: 0.2
+  heat_dissipation: 0.18
+  power_failure: 0.14
+  overstrain: 0.12
+  random_failure: 0.06
+stressed_share: 0.8
+signal_strength: 9.0
+alarm_code_noise: 0.3
+missing_rate: 0.04
+window_days: 540

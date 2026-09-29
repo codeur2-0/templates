@@ -104,9 +104,19 @@ def format_python_files(project_dir: Path) -> bool:
     if probe.returncode != 0:
         return False
     for arguments in (["format", "--quiet", "."], ["check", "--quiet", "--fix", "."]):
-        subprocess.run(
+        completed = subprocess.run(
             [*prefix, *arguments], capture_output=True, text=True, check=False, cwd=project_dir
         )
+        # Un échec ici (fichier verrouillé sous Windows, violation non corrigeable) laisserait un
+        # projet à moitié normalisé, donc une régénération non reproductible : on le signale au
+        # lieu de l'avaler.
+        if completed.returncode != 0:
+            detail = (completed.stdout or completed.stderr).strip().splitlines()[-3:]
+            print(
+                f"  ! ruff {' '.join(arguments[:1])} a échoué dans {project_dir.name} "
+                f"(code {completed.returncode}) : {' | '.join(detail)}",
+                file=sys.stderr,
+            )
     return True
 
 

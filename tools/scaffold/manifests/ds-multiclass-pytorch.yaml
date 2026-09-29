@@ -1,0 +1,100 @@
+# ==============================================================================================
+# data-science / multiclass-classification / with-pytorch
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/multiclass_classification.yaml` (diagnostic du mode de
+# défaillance d'une machine d'usinage). Ce manifeste ne décrit QUE ce qui change avec la stack.
+# ==============================================================================================
+
+key: ds-multiclass-pytorch
+title: "Diagnostic du mode de défaillance machine avec PyTorch"
+summary: >-
+  Pipeline multi-classes de bout en bout (alarmes machine synthétiques à physique explicite ->
+  contrats Pandera -> features physiques déclarées en configuration -> réseau de neurones PyTorch
+  à sortie softmax entraîné par une boucle explicite -> évaluation face au plancher majoritaire,
+  au routage actuel par code automate et au plafond oracle -> décision à coût minimal et revue
+  experte) pour une équipe maintenance, entièrement piloté par Hydra.
+
+family: multiclass_classification
+domain: data-science
+problem: multiclass-classification
+stack: pytorch
+project_slug: machine-failure-diagnosis-pytorch
+package_name: failure_diagnosis_pytorch
+
+business:
+  # Exécution de référence (`make all`, graine 42, split de test de 1 200 alarmes). Les valeurs
+  # sont déterministes ; seule la latence dépend de la machine.
+  measured_results:
+    - label: "Macro-F1 (test)"
+      value: "0,657 (routage actuel 0,375 ; plafond oracle 0,679)"
+    - label: "Accuracy / balanced accuracy / MCC"
+      value: "0,766 / 0,660 / 0,708"
+    - label: "Log loss / AUC un-contre-tous / ECE"
+      value: "0,731 / 0,907 / 0,030"
+    - label: "Coût par alarme : argmax / coût minimal / routage actuel"
+      value: "455 / 168 / 428 EUR"
+    - label: "Pannes réelles acquittées : argmax / coût minimal / routage actuel"
+      value: "20,8 % / 0,0 % / 14,4 %"
+    - label: "Rappel le plus faible d'un mode prédictible (overstrain)"
+      value: "0,586"
+    - label: "Rappel de random_failure (modèle / oracle)"
+      value: "0,000 / 0,000"
+    - label: "Latence pour 1 000 alarmes"
+      value: "4 ms"
+    - label: "Verdict contractuel"
+      value: "7/7 objectifs atteints"
+
+train:
+  epochs: 60
+  batch_size: 64
+  learning_rate: 0.003
+  weight_decay: 0.0001
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    patience: 8
+    min_delta: 0.0
+    mode: min
+    restore_best: true
+
+model:
+  display_name: "Réseau de neurones PyTorch (MLP softmax)"
+  algorithm: mlp
+  rationale: >-
+    Un perceptron multicouche à sortie softmax, entraîné par une boucle explicite (lots, entropie
+    croisée sur logits, rétropropagation, pas d'optimiseur, arrêt anticipé avec restauration du
+    meilleur état), montre ce que les librairies de boosting masquent. Sur ces données tabulaires,
+    il n'est pas attendu devant le boosting : la comparaison à données et métriques identiques est
+    précisément ce qui rend le choix de stack argumentable. Aucune pondération de classes :
+    l'asymétrie des erreurs est portée par la matrice de coûts, et la décision à coût minimal a
+    besoin de probabilités softmax non déformées.
+  alternatives:
+    - "linear : modèle linéaire à sortie softmax — baseline interprétable, même contrat"
+    - "residual_mlp : MLP à blocs résiduels, utile quand on empile les couches"
+  params:
+    hidden_layers: [64, 32]
+    dropout: 0.2
+    activation: relu
+    batch_norm: false
+    optimizer: adamw
+    scheduler: cosine
+
+extras:
+  # Grille explorée par le notebook 04 (8 combinaisons).
+  notebook_param_grid:
+    dropout: [0.1, 0.3]
+    hidden_layers: [[32, 16], [64, 32]]
+    learning_rate: [0.003, 0.01]
+  test_n_samples: 600
+  model_conf:
+    device: cpu
+    cross_validation:
+      enabled: false
+      folds: 3
+      strategy: stratified
+
+learning_objectives:
+  - "Écrire une boucle d'entraînement multi-classes explicite : entropie croisée sur logits, softmax en sortie, arrêt anticipé."
+  - "Comparer un réseau de neurones au boosting sur les mêmes données, métriques et références."
+  - "Préserver la calibration de la sortie softmax, dont dépend la décision à coût minimal."
+  - "Situer un modèle entre le plancher majoritaire, la règle métier actuelle et le plafond atteignable."

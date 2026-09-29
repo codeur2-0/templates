@@ -14,8 +14,8 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**15 projets**, tous verts dans `tools/verify.py` (lint, formatage, typage, tests, six notebooks
-exécutés, pipeline complet `data → train → evaluate → predict`).
+**25 projets** sur sept familles tabulaires, tous verts dans `tools/verify.py` (lint, formatage,
+typage, tests, six notebooks exécutés, pipeline complet `data → train → evaluate → predict`).
 
 ### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks
 
@@ -95,15 +95,38 @@ contre 0,666 pour la forêt d'isolation selon la graine) mais reste écarté : i
 l'intégralité du jeu d'entraînement en mémoire pour scorer une ligne nouvelle, ce qui est
 rédhibitoire sur un flux de millions de paiements.
 
-### 1.5 `data-science/time-series-forecasting` — prévision de consommation électrique, scikit-learn
+### 1.5 `data-science/time-series-forecasting` — prévision de consommation électrique, cinq stacks
 
 | Projet | Stack | Modèle | MAPE | MAE | MASE | R² | Biais | Gain sur naif | Couverture 90 % |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| [`with-sklearn`](data-science/time-series-forecasting/with-sklearn) | scikit-learn | `hist_gradient_boosting` (41 features) | **3,692 %** | 99,4 MW | 0,420 | 0,953 | +0,89 % | **+59,1 %** | **85,4 %** |
+| [`with-sklearn`](data-science/time-series-forecasting/with-sklearn) | scikit-learn | `hist_gradient_boosting` (15 feuilles) | 3,692 % | 99,4 MW | 0,420 | 0,953 | +0,89 % | +59,1 % | 85,4 % |
+| [`with-xgboost`](data-science/time-series-forecasting/with-xgboost) | XGBoost | `xgboost` (profondeur 3, arrêt anticipé) | 3,441 % | 93,3 MW | 0,394 | 0,957 | +0,33 % | +61,9 % | **87,2 %** |
+| [`with-lightgbm`](data-science/time-series-forecasting/with-lightgbm) | LightGBM | `lightgbm` (7 feuilles, arrêt anticipé) | 3,521 % | 94,0 MW | 0,397 | 0,960 | +0,69 % | +61,0 % | **87,2 %** |
+| [`with-pytorch`](data-science/time-series-forecasting/with-pytorch) | PyTorch | `mlp` 128-64 (dropout 0,1) | **3,386 %** | **90,4 MW** | **0,382** | **0,962** | −0,76 % | **+62,5 %** | 84,8 % |
+| [`with-keras`](data-science/time-series-forecasting/with-keras) | Keras (API fonctionnelle) | `mlp` 128-64 `gelu` (dropout 0,1) | 3,422 % | 90,5 MW | **0,382** | 0,961 | **−0,22 %** | +62,1 % | 84,0 % |
 
 4 800 lignes (1 200 origines x 4 horizons), du 2021-02-10 au 2024-05-24, avec 80 vagues de
 froid, 72 canicules et 36 arrêts industriels reproduits fidèlement (3,92 % des jours). Le split
-est chronologique : jamais de mélange aléatoire, jamais de validation croisée aléatoire.
+est chronologique : jamais de mélange aléatoire, jamais de validation croisée aléatoire. Les
+cinq projets passent les sept critères de la famille.
+
+**Lecture honnête de ce tableau** : les cinq stacks tiennent dans 0,31 point de MAPE, et ce qui
+les départage n'est pas le MAPE. Les boosters XGBoost et LightGBM ont la meilleure couverture
+d'intervalle (87,2 %) et un biais positif faible. Les réseaux ont le meilleur MAPE, mais sous-prévoient
+en mars (biais mensuel de −3,3 à −3,4 %) et leur couverture reste sous la cible métier de 85 %
+(au-dessus du seuil bloquant de 82 %). Pour un acheteur d'énergie, une sous-prévision coûte un achat spot : le
+choix se discute sur ces deux critères, pas sur le troisième chiffre après la virgule.
+
+Chaque notebook commente **sa** stack : les réglages et les commentaires chiffrés propres à une
+stack (familles comparées, perte, levier de complexité) se déclarent dans
+`extras.notebook_forecasting` du manifeste, avec les valeurs scikit-learn par défaut. Trois
+lectures qui en sortent : la perte quadratique l'emporte pour les trois boosters ; en Keras, un
+notebook raccourci (12 époques, sans arrêt anticipé) donnait l'avantage à la perte absolue, et
+le protocole de production l'inverse ; en PyTorch, la perte absolue garde une avance de 0,07 point
+de validation, sous la dispersion des replis, donc sans changement de configuration. Enfin
+`gelu` bat `relu` d'un point de MAPE en Keras, pas en PyTorch.
+
+Détail du projet scikit-learn :
 
 | Horizon | MAPE | MAE | Biais | Couverture |
 | --- | --- | --- | --- | --- |
@@ -124,6 +147,78 @@ Quatre méthodes d'intervalle sont calibrées sur la validation puis comparées 
 locale est précisément ce qui redresse la couverture. La variante normalisée + adaptative monte
 à 86,7 % mais tombe à 0 % sur les vagues de froid : elle est documentée comme limite connue
 plutôt que livrée.
+
+### 1.6 `data-science/recommendation` — classement de catalogue e-commerce, scikit-learn
+
+| Projet | Stack | Modèle | NDCG@10 | Precision@10 | Recall@10 | MAP@10 | Hit-rate@10 | Couverture catalogue |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-sklearn`](data-science/recommendation/with-sklearn) | scikit-learn | `hist_gradient_boosting` (15 feuilles) | **0,602** | 0,299 | 0,733 | 0,582 | 0,951 | **65,3 %** |
+
+36 000 couples (1 200 utilisateurs x 30 candidats, catalogue de 900 références, ~14 % de
+pertinence), split chronologique par session, évaluation **par utilisateur** (226 utilisateurs de
+test avec au moins une intention observable) et jamais ligne à ligne. Verdict **conforme, 8/8
+objectifs**.
+
+| Référence (même test) | NDCG@10 | Couverture catalogue |
+| --- | --- | --- |
+| Tirage aléatoire (plancher) | 0,235 | 82,8 % |
+| **Tri par popularité** (le moteur historique à battre) | 0,300 | 15,4 % |
+| Intention récente (ne recommander que le déjà-vu) | 0,343 | 83,6 % |
+| Plafond oracle (probabilité de pertinence avant bruit, jeu complet) | 0,726 | — |
+
+Le modèle double le NDCG du tri par popularité (+100 %) et capte 83 % du plafond atteignable, en
+exposant quatre fois plus de catalogue. Les utilisateurs froids (une commande ou moins sur 12 mois)
+sont servis presque aussi bien que les autres (rapport de rappel 0,96), et le NDCG varie de 0,033
+seulement entre plis chronologiques. Le tri par popularité échoue précisément au critère de
+couverture : c'est le mécanisme par lequel la longue traîne meurt, que le NDCG seul ne voit pas.
+
+### 1.7 `data-science/multiclass-classification` — diagnostic du mode de défaillance machine, cinq stacks
+
+Une alarme d'automate arrête une fraiseuse CNC ; il faut envoyer la bonne équipe. Six modes à
+distinguer à partir des capteurs (`false_alarm`, `tool_wear`, `heat_dissipation`,
+`power_failure`, `overstrain`, `random_failure`, de 30 % à 6 %), métrique de pilotage
+**macro-F1**, et une décision qui ne se réduit pas à l'argmax : acquitter une panne réelle coûte
+vingt fois plus cher que déranger une équipe pour rien.
+
+| Projet | Stack | Modèle | Macro-F1 | Log loss | ECE | Coût / alarme (coût min.) | Pannes acquittées |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-sklearn`](data-science/multiclass-classification/with-sklearn) | scikit-learn | `hist_gradient_boosting` (100 x 8 feuilles) | 0,671 | 0,694 | 0,026 | 172 EUR | 0,0 % |
+| [`with-xgboost`](data-science/multiclass-classification/with-xgboost) | XGBoost | `xgboost` (106 rounds, profondeur 4) | **0,676** | **0,669** | 0,027 | **167 EUR** | 0,0 % |
+| [`with-lightgbm`](data-science/multiclass-classification/with-lightgbm) | LightGBM | `lightgbm` (62 rounds, 15 feuilles) | 0,674 | 0,684 | 0,039 | 168 EUR | 0,0 % |
+| [`with-pytorch`](data-science/multiclass-classification/with-pytorch) | PyTorch | `mlp` softmax (4 134 paramètres) | 0,657 | 0,731 | 0,030 | 168 EUR | 0,0 % |
+| [`with-keras`](data-science/multiclass-classification/with-keras) | Keras (API fonctionnelle) | `mlp` softmax (4 134 paramètres) | 0,659 | 0,726 | **0,020** | 168 EUR | 0,0 % |
+
+6 000 alarmes, split stratifié 65/15/20, mêmes graines et mêmes 28 features pour les cinq stacks.
+Les cinq rapports rendent un verdict **conforme (7/7 objectifs)**.
+
+Trois références sont rejouées sur le même test, et c'est leur écart qui donne un sens aux
+chiffres :
+
+| Référence | Macro-F1 | Coût / alarme | Pannes acquittées |
+| --- | --- | --- | --- |
+| Classe majoritaire (plancher) | 0,077 | 1 755 EUR | 100 % |
+| **Routage actuel par code automate** (la règle à battre) | 0,375 | 428 EUR | 14,4 % |
+| Plafond oracle (argmax des vraies probabilités du générateur) | 0,679 | — | — |
+
+**Lecture honnête de ce tableau** :
+
+- Les boosters atteignent le plafond (97 à 99 % du chemin règle → plafond), les réseaux en sont
+  à 93-94 %. Les écarts entre boosters sont dans le bruit : le signal est épuisé, et la suite se
+  joue ailleurs.
+- **La décision compte plus que le modèle.** À l'argmax, chaque modèle coûte 455 à 498 EUR par
+  alarme et acquitte 21 à 24 % des pannes réelles — plus cher que la règle actuelle. La
+  décision à coût minimal (probabilités x matrice de coûts `diagnosis.costs`) ramène ce coût à
+  167-172 EUR (**−60 %** face au routage actuel) et n'acquitte plus aucune panne.
+- `random_failure` a un rappel nul pour tout modèle, oracle compris : aucun capteur ne l'annonce.
+  C'est un plafond structurel documenté, pas un défaut de réglage.
+- Un boosting profond (300 x 31 feuilles) n'améliore pas le macro-F1 de validation mais devient
+  sur-confiant (ECE 0,13 contre 0,06) : le modèle livré est volontairement petit, parce que la
+  décision multiplie ses probabilités par des euros.
+
+La couche `task/multiclass/` apporte l'évaluateur (références, verdict, confusions, décision à coût
+minimal, revue experte, calibration top-label), le rapport, le predictor (mode prédit, probabilité
+par mode, décision, équipe, drapeau de revue, justification) et dix figures ; les réglages métier
+vivent dans le bloc `diagnosis` de `conf/config.yaml`.
 
 Chaque projet expose aussi : les six notebooks exécutés par la CI locale, les artefacts
 (`artifacts/models`, `artifacts/metrics`, `artifacts/reports`, `artifacts/figures`), une fiche
@@ -248,6 +343,19 @@ Pièges documentés dans le code (et résolus) que ces stacks partagent :
   il est singleton (la régression du dépôt l'active, `batch_norm: true`).
 - **`torch.load` est en `weights_only=True` par défaut depuis torch 2.x** : ni tableaux NumPy, ni
   `TorchVersion` ne passent dans le checkpoint — classes sérialisées en listes, version en `str`.
+- **XGBoost n'accepte que des classes codées 0..K-1** : des libellés (`"tool_wear"`) lèvent au
+  `fit`. Le modèle encode les labels à l'entraînement (et dans l'`eval_set`) puis décode à la
+  prédiction ; en binaire 0/1 le code est le label lui-même, l'entraînement est inchangé.
+- **`sklearn.metrics.log_loss` trie ses `labels` en interne** et lit les colonnes de probabilités
+  dans cet ordre trié — sans la moindre erreur si elles sont rangées autrement ; `roc_auc_score`,
+  lui, refuse des labels non triés. Le registre de métriques réaligne colonnes et labels avant
+  l'appel (mesuré : une log loss de 3,4 au lieu de 0,71 avec des colonnes dans l'ordre métier).
+- **Les stubs de numpy ≥ 2.4 utilisent la syntaxe `type X = …` de Python 3.12** : mypy, qui cible
+  Python 3.11 dans les projets, s'arrête sur `numpy/__init__.pyi` avant de lire une ligne de code.
+  Les dépendances de développement bornent donc `numpy<2.4`.
+- **Un `HistGradientBoostingClassifier` multi-classes construit K arbres par itération** : 300
+  itérations x 6 classes = 1 800 arbres, soit 30 s d'entraînement sous Windows et des probabilités
+  sur-confiantes. Le projet multi-classes livre 100 itérations x 8 feuilles.
 
 ---
 
@@ -266,7 +374,7 @@ tools/
 │   ├── engine.py                 # rendu Jinja2 + post-traitement (ruff format / ruff --fix)
 │   ├── context.py                # contexte de rendu (spec, stack, family, helpers comme wrap())
 │   ├── registry/
-│   │   ├── stacks.yaml           # 20 stacks : dépendances, classe, format du fichier modèle, docs
+│   │   ├── stacks.yaml           # 18 stacks : dépendances, classe, format du fichier modèle, docs
 │   │   └── families.yaml         # familles de problèmes : modalité, tâche, builder de notebooks
 │   ├── defaults/
 │   │   ├── global.yaml           # valeurs par défaut de tous les projets (train, preprocessing…)
@@ -294,9 +402,9 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **15/15 projets conformes** (ruff check, ruff format, mypy strict,
-165 tests par projet soit 2 475 au total, 90 notebooks exécutés, `python -m src.main mode=all`
-de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
+État au dernier passage : **25/25 projets conformes** (ruff check, ruff format, mypy strict,
+4 235 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les tests
+de leur couche tâche —, 150 notebooks exécutés, `python -m src.main mode=all` de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
 six notebooks et pipeline complet — avant d'être considéré comme livré.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
@@ -319,23 +427,22 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 
 ## 7. Feuille de route
 
-État du générateur : `registry/families.yaml` déclare **30 familles** et `registry/stacks.yaml`
-**18 stacks** ; les couches `base/`, `modality/tabular/`, `task/{classification,regression,clustering,anomaly,forecasting}/`,
-`family/{binary_classification,regression,clustering,anomaly_detection,time_series_forecasting}/`
-et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/` sont écrites et vérifiées. Ce qui reste, par ordre de valeur pédagogique :
+État du générateur : `registry/families.yaml` déclare **29 familles** et `registry/stacks.yaml`
+**18 stacks**. Les couches `base/`, `modality/tabular/`,
+`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking}/`,
+`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation}/`
+et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/` sont écrites et vérifiées : les
+**sept familles tabulaires** sont livrées. Ce qui reste, par ordre de valeur pédagogique :
 
-1. **Familles tabulaires restantes** — `multiclass_classification` et `recommendation`.
-   `anomaly_detection` et `time_series_forecasting` sont livrées : leurs couches `task/`
-   (évaluateur, rapport, prédicteur, figures) et `family/` (générateur + valeurs par défaut)
-   servent de modèle pour les deux suivantes. Les métriques existent déjà dans
-   `losses_metrics.py` (macro-F1, MCC, recall@top-k, Precision@K / NDCG@K / MAP@K) et le
-   registre sklearn déclare quatre détecteurs pour la tâche `anomaly`. Pour `recommendation`
-   il reste la couche `task/` (évaluation par utilisateur et par catalogue, coupure temporelle
-   leave-one-out), la couche `family/` (générateur d'interactions creuses) et la branche du
-   générateur de notebooks.
+1. **Stacks tabulaires déclarées, pas encore livrées** — `clustering` et `anomaly_detection` en
+   PyTorch et TensorFlow (auto-encodeurs), `recommendation` en PyTorch (modèle à deux tours),
+   `binary_classification` avec MLflow. Leurs couches `task/` et `family/` existent ; il reste un
+   manifeste par stack et, comme pour la prévision, des notebooks paramétrés par stack
+   (`extras.notebook_<famille>`) : les commentaires chiffrés d'un notebook doivent parler de la
+   stack réellement mesurée.
 2. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
    GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
-   `ai-eng/` (LangChain, Transformers, serving FastAPI), `computer-vision/` et `nlp/`
+   `ai-eng/` (LangChain, Deepagents, Strands, CrewAI, RAG, Transformers, serving FastAPI), `computer-vision/` et `nlp/`
    (spaCy, Transformers). Chacune demande une nouvelle couche `modality/` (loaders,
    pré-traitement, pipelines, tests) en plus des couches `family/` et `task/`.
 3. **Stacks déjà déclarées, non implémentées** — `spacy`, `transformers`, `langchain`, `duckdb`,

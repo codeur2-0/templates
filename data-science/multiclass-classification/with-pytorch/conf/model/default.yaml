@@ -1,0 +1,43 @@
+# =================================================================================================
+# Modèle : Réseau de neurones PyTorch (MLP softmax)
+# -------------------------------------------------------------------------------------------------
+# Un perceptron multicouche à sortie softmax, entraîné par une boucle explicite (lots, entropie
+# croisée sur logits, rétropropagation, pas d'optimiseur, arrêt anticipé avec restauration du
+# meilleur état), montre ce que les librairies de boosting masquent. Sur ces données tabulaires,
+# il n'est pas attendu devant le boosting : la comparaison à données et métriques identiques est
+# précisément ce qui rend le choix de stack argumentable. Aucune pondération de classes :
+# l'asymétrie des erreurs est portée par la matrice de coûts, et la décision à coût minimal a
+# besoin de probabilités softmax non déformées.
+#
+# Alternatives considérées : linear : modèle linéaire à sortie softmax — baseline interprétable, même contrat, residual_mlp : MLP à blocs résiduels, utile quand on empile les couches.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.hidden_layers=...
+# =================================================================================================
+
+name: "Réseau de neurones PyTorch (MLP softmax)"
+algorithm: mlp
+class: PyTorchModel
+task: multiclass
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `PyTorchModel(params=...)` (voir src/models/model.py).
+params:
+  hidden_layers:
+  - 64
+  - 32
+  dropout: 0.2
+  activation: relu
+  batch_norm: false
+  optimizer: adamw
+  scheduler: cosine
+
+# --- options spécifiques à la stack `pytorch` ---------------------------------------
+device: cpu
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: stratified

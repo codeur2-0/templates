@@ -433,7 +433,11 @@ Après `make all`, le dépôt local contient :
 | `artifacts/reports/intervals.csv` | bornes, largeur relative et méthode de calibration par prévision |
 | `artifacts/reports/backtest.csv` | replis chronologiques et dispersion de la performance |
 | `artifacts/reports/errors.csv` | pires erreurs, avec leurs références naïves |
-{% elif spec.metrics.task in ["binary", "multiclass"] %}| `artifacts/reports/top_errors.csv` | exemples les plus mal classés, avec leurs probabilités et les features en cause |
+{% elif spec.metrics.task == "binary" %}| `artifacts/reports/top_errors.csv` | exemples les plus mal classés, avec leurs probabilités et les features en cause |
+{% elif spec.metrics.task == "multiclass" %}| `artifacts/reports/per_class.csv` | précision, rappel, F1, AUC un-contre-tous et équipe, pour chaque classe |
+| `artifacts/reports/decision_policies.csv` | coût et profil d'erreur de l'argmax, de la décision à coût minimal, de la revue experte et de la règle actuelle |
+| `artifacts/reports/abstention_curve.csv` | couverture, exactitude automatisée et coût selon le seuil de revue experte |
+| `artifacts/reports/top_errors.csv` | diagnostics erronés les plus confiants, avec leurs probabilités et leur contexte |
 {% elif spec.metrics.task == "anomaly" %}| `artifacts/reports/anomaly_errors.csv` | anomalies les mieux et les moins bien détectées |
 | `artifacts/reports/budget_tradeoff.csv` | précision / rappel en fonction du quota d'alertes |
 | `artifacts/reports/scheme_coverage.csv` | couverture par schéma de fraude |
@@ -443,7 +447,7 @@ Après `make all`, le dépôt local contient :
 {% elif spec.metrics.task == "regression" %}| `artifacts/reports/top_errors.csv` | résidus les plus élevés, avec leurs features |
 | `artifacts/reports/error_by_segment.csv` | erreur ventilée par segment |
 {% endif %}| `artifacts/reports/predictions.csv` | prédictions sur l'échantillon de démonstration |
-| `artifacts/figures/*.png` | {{ "matrice de confusion, courbes ROC/PR, calibration" if spec.metrics.task in ["binary", "multiclass"] else ("résidus, prédit vs réel, importance des features" if spec.metrics.task == "regression" else ("prévision vs réel, erreur par horizon et par régime, couverture d'intervalle, diagnostics de résidus, biais mensuel, stabilité du backtest" if spec.metrics.task == "forecasting" else ("score par transaction, trade-off budget, couverture par schéma" if spec.metrics.task == "anomaly" else ("silhouette, projection ACP, profils de clusters" if spec.metrics.task == "clustering" else "figures spécifiques à la tâche")))) }} |
+| `artifacts/figures/*.png` | {{ "matrice de confusion normalisée, qualité par classe, références, ROC un-contre-tous, fiabilité, revue experte, coût des politiques de décision" if spec.metrics.task == "multiclass" else ("matrice de confusion, courbes ROC/PR, calibration" if spec.metrics.task == "binary" else ("résidus, prédit vs réel, importance des features" if spec.metrics.task == "regression" else ("prévision vs réel, erreur par horizon et par régime, couverture d'intervalle, diagnostics de résidus, biais mensuel, stabilité du backtest" if spec.metrics.task == "forecasting" else ("score par transaction, trade-off budget, couverture par schéma" if spec.metrics.task == "anomaly" else ("silhouette, projection ACP, profils de clusters" if spec.metrics.task == "clustering" else "figures spécifiques à la tâche"))))) }} |
 | `outputs/<date>/<heure>/` | configuration composée + logs Hydra |
 
 Métrique principale : **`{{ spec.metrics.primary }}`**{% if spec.metrics.min_primary is not none %} (sens `{{ spec.metrics.direction }}`, seuil de smoke test : {{ "≤" if spec.metrics.direction == "minimize" else "≥" }} {{ spec.metrics.min_primary }}){% endif %}.
@@ -473,6 +477,7 @@ cellule par cellule, comme un support de formation pour juniors.
     "regression": "Baseline d'abord — sans elle aucune performance n'est interprétable — puis comparaison des algorithmes de la stack, distinction sous-apprentissage / sur-apprentissage par la courbe d'apprentissage, et lecture de l'importance des features.",
     "clustering": "Choix du nombre de groupes par triangulation (silhouette, Davies-Bouldin, coude d'inertie, taille minimale), comparaison des algorithmes **à k fixé** — la comparaison n'a de sens qu'à structure égale — et stabilité des affectations entre graines.",
     "anomaly": "Plancher aléatoire (une PR AUC égale à la prévalence) et règles métier existantes comme références à battre, comparaison des détecteurs **à données et budget égaux**, et effet de la contamination : elle déplace le seuil sans changer le classement, d'où le pilotage au budget.",
+    "multiclass": "Plancher (classe majoritaire), règle métier actuelle et plafond oracle installés **avant** toute comparaison, algorithmes comparés sur le macro-F1 **et** la calibration, apport chiffré des features physiques, effet de la pondération de classes sur la décision à coût minimal, grille de réglage et dispersion entre graines.",
     "forecasting": "Plancher naïf mesuré **sur le test** avant tout modèle, comparaison des familles d'algorithmes à protocole identique, thermo-sensibilité apprise lue en MW par °C comme contrôle de cohérence métier, arbitrage modèle unique contre modèle par horizon, grille de réglage et sonde de fuite temporelle.",
 } %}
 {% set lesson_05 = {
@@ -483,6 +488,7 @@ cellule par cellule, comme un support de formation pour juniors.
     "supervised": "Matrice de confusion, rapport par classe, exemples mal prédits, hypothèses sur les causes et recommandations concrètes.",
     "regression": "Métriques globales, résidus et couverture de fourchette, détection d'un **biais segmenté** (le modèle se trompe-t-il toujours dans le même sens ?), pires erreurs et leur cause probable, puis recommandations appuyées sur les chiffres observés.",
     "clustering": "Critères internes, tailles de groupes et confiance des affectations, profilage de chaque segment **en unités brutes** (euros, jours, commandes), validité externe contre un comportement observé après coup, affectations fragiles et groupes dégénérés.",
+    "multiclass": "Verdict contractuel de l'évaluateur de production, position du modèle entre la règle actuelle et le plafond, confusions lues comme des causes physiques, **argmax contre décision à coût minimal**, choix du seuil de revue experte sur la courbe couverture / coût, calibration, plafond structurel d'une classe sans signal et plan d'action.",
     "anomaly": "Évaluation hors échantillon contre le plancher aléatoire, traduction du score en décision de capacité (volume d'alertes -> rappel / précision / lift), couverture **par mode opératoire** — un bon score global peut masquer un schéma non détecté —, puis dissection des fraudes manquées et des fausses alertes.",
     "forecasting": "Évaluation complète avec l'objet de production (intervalles et backtest compris), ventilation de l'erreur **par horizon, par régime et par mois** — trois lectures qui appellent trois correctifs différents —, lecture des pires journées une par une, autocorrélation des résidus, recalibrage des intervalles et recommandations opérationnelles.",
 } %}
@@ -492,7 +498,7 @@ cellule par cellule, comme un support de formation pour juniors.
 {% set l06 = lesson_06[task_key] if task_key in lesson_06 else lesson_06["supervised"] %}
 {% set title_04 = {"anomaly": "Exploration et comparaison de détecteurs d'anomalies", "forecasting": "Exploration des modèles de prévision"} %}
 {% set title_05 = {"forecasting": "Entraînement et validation temporelle"} %}
-{% set title_06 = {"clustering": "Analyse de la segmentation et recommandations", "anomaly": "Analyse des erreurs et recommandations"} %}
+{% set title_06 = {"clustering": "Analyse de la segmentation et recommandations", "anomaly": "Analyse des erreurs et recommandations", "multiclass": "Analyse d'erreurs, décision et recommandations"} %}
 {% set t04 = title_04[task_key] if task_key in title_04 else "Exploration et comparaison de modèles" %}
 {% set t05 = title_05[task_key] if task_key in title_05 else "Entraînement dans les conditions de production" %}
 {% set t06 = title_06[task_key] if task_key in title_06 else "Analyse d'erreurs et recommandations" %}

@@ -35,6 +35,19 @@ def _task(app_config: Any) -> str:
     return str(app_config.metrics.task)
 
 
+def _assert_same_predictions(first: Any, second: Any) -> None:
+    """Compare two prediction vectors: tolerance when numeric, exact match when categorical.
+
+    Une classification multi-classes prédit des libellés (``"tool_wear"``) : les convertir en
+    ``float64`` lèverait, alors que la question posée reste la même — deux vecteurs identiques.
+    """
+    left, right = np.asarray(first), np.asarray(second)
+    if np.issubdtype(left.dtype, np.number) and np.issubdtype(right.dtype, np.number):
+        np.testing.assert_allclose(left.astype("float64"), right.astype("float64"))
+    else:
+        np.testing.assert_array_equal(left.astype(str), right.astype(str))
+
+
 class TestModelContract:
     """Le contrat partagé par toutes les implémentations."""
 
@@ -105,9 +118,8 @@ class TestFitting:
                 y_val=prepared["y_val"],
                 callbacks=[],
             )
-        np.testing.assert_allclose(
-            first.predict(prepared["X_test"]).astype("float64"),
-            second.predict(prepared["X_test"]).astype("float64"),
+        _assert_same_predictions(
+            first.predict(prepared["X_test"]), second.predict(prepared["X_test"])
         )
 
     def test_model_can_be_refitted(self, app_config: Any, prepared: dict[str, Any]) -> None:
@@ -129,7 +141,11 @@ class TestPrediction:
         """``predict`` renvoie un vecteur aligné sur les lignes, sans NaN."""
         predictions = fitted_model.predict(matrices["X_test"])
         assert np.asarray(predictions).shape == (len(matrices["X_test"]),)
-        assert np.isfinite(np.asarray(predictions, dtype="float64")).all()
+        values = np.asarray(predictions)
+        if np.issubdtype(values.dtype, np.number):
+            assert np.isfinite(values.astype("float64")).all()
+        else:
+            assert pd.notna(values).all()
 
     def test_predictions_stay_in_the_observed_label_space(
         self, fitted_model: BaseModel, matrices: dict[str, Any], app_config: Any
@@ -175,9 +191,9 @@ class TestPrediction:
         self, fitted_model: BaseModel, matrices: dict[str, Any]
     ) -> None:
         """Deux appels sur les mêmes données donnent exactement le même résultat."""
-        first = np.asarray(fitted_model.predict(matrices["X_test"]), dtype="float64")
-        second = np.asarray(fitted_model.predict(matrices["X_test"]), dtype="float64")
-        np.testing.assert_allclose(first, second)
+        _assert_same_predictions(
+            fitted_model.predict(matrices["X_test"]), fitted_model.predict(matrices["X_test"])
+        )
 
 
 class TestFeatureAlignment:
@@ -206,9 +222,8 @@ class TestFeatureAlignment:
     ) -> None:
         """``predict`` aligne lui-même les colonnes (l'appelant n'a pas à le faire)."""
         reordered = matrices["X_test"][list(reversed(fitted_model.feature_names))]
-        np.testing.assert_allclose(
-            np.asarray(fitted_model.predict(reordered), dtype="float64"),
-            np.asarray(fitted_model.predict(matrices["X_test"]), dtype="float64"),
+        _assert_same_predictions(
+            fitted_model.predict(reordered), fitted_model.predict(matrices["X_test"])
         )
 
 
@@ -224,9 +239,8 @@ class TestPersistence:
         restored = type(fitted_model).load(path)
         assert restored.is_fitted
         assert restored.feature_names == fitted_model.feature_names
-        np.testing.assert_allclose(
-            np.asarray(restored.predict(matrices["X_test"]), dtype="float64"),
-            np.asarray(fitted_model.predict(matrices["X_test"]), dtype="float64"),
+        _assert_same_predictions(
+            restored.predict(matrices["X_test"]), fitted_model.predict(matrices["X_test"])
         )
 
     def test_load_model_helper_returns_a_base_model(

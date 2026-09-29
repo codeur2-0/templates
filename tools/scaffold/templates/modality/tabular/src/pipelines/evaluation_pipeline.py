@@ -14,6 +14,7 @@ consume it without parsing logs.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -51,12 +52,18 @@ class EvaluationPipeline(BasePipeline):
 
         X_test = self._transform_test(preprocessing, test_frame, test_features)
         y_test = self._extract_target(test_frame)
-        evaluator = Evaluator(
-            model,
-            metrics_config=self.config.metrics.model_dump(),
-            paths=self.paths,
-            task=self.config.metrics.task,
-        )
+        evaluator_options: dict[str, Any] = {
+            "metrics_config": self.config.metrics.model_dump(),
+            "paths": self.paths,
+            "task": self.config.metrics.task,
+        }
+        # Les évaluateurs qui appliquent une politique métier (classement, diagnostic) lisent leur
+        # bloc de la configuration racine : le leur transmettre est ce qui fait qu'une surcharge
+        # Hydra (`diagnosis.review_threshold=0.6`) atteint aussi `mode=evaluate`. Les autres
+        # n'en ont pas besoin et ne l'acceptent pas.
+        if "config" in inspect.signature(Evaluator).parameters:
+            evaluator_options["config"] = self.config.model_dump()
+        evaluator = Evaluator(model, **evaluator_options)
         evaluation: EvaluationResult = evaluator.evaluate(
             X_test, y_test, split="test", context=test_frame
         )

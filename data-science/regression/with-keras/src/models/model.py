@@ -97,6 +97,7 @@ _COMMON_PARAMS: frozenset[str] = frozenset(
         "momentum",
         "pos_weight",
         "class_weight",
+        "loss",
         "step_size",
         "step_gamma",
         "plateau_factor",
@@ -698,7 +699,7 @@ def _class_weights(
     return None
 
 
-def _loss_and_metrics(task: str) -> tuple[Any, list[Any]]:
+def _loss_and_metrics(task: str, params: Mapping[str, Any] | None = None) -> tuple[Any, list[Any]]:
     """Return the compiled loss and the native metrics matching the task.
 
     The output layer carries the activation, so the metrics read probabilities (classification) or
@@ -706,9 +707,13 @@ def _loss_and_metrics(task: str) -> tuple[Any, list[Any]]:
 
     Args:
         task: Learning task.
+        params: Resolved hyper-parameters (``loss`` selects the regression loss).
 
     Returns:
         ``(loss, metrics)``.
+
+    Raises:
+        ValueError: When ``loss`` names an unknown regression loss.
     """
     if task == "binary":
         return keras.losses.BinaryCrossentropy(), [
@@ -720,7 +725,18 @@ def _loss_and_metrics(task: str) -> tuple[Any, list[Any]]:
             keras.metrics.SparseCategoricalAccuracy(name="sparse_categorical_accuracy"),
         ]
     if task in _REGRESSION:
-        return keras.losses.MeanSquaredError(), [
+        # Erreur quadratique par défaut ; `loss` peut demander une erreur absolue (alignée sur le
+        # MAPE) ou une perte de Huber.
+        losses = {
+            "mse": keras.losses.MeanSquaredError,
+            "mae": keras.losses.MeanAbsoluteError,
+            "huber": keras.losses.Huber,
+        }
+        name = str((params or {}).get("loss") or "mse").lower()
+        if name not in losses:
+            msg = f"Unknown regression loss '{name}'. Allowed: {sorted(losses)}"
+            raise ValueError(msg)
+        return losses[name](), [
             keras.metrics.RootMeanSquaredError(name="root_mean_squared_error"),
             keras.metrics.MeanAbsoluteError(name="mean_absolute_error"),
         ]
@@ -1263,7 +1279,7 @@ class KerasModel(BaseModel):
         batch_size = self._batch_size()
         epochs = self._epochs()
         steps_per_epoch = max(int(np.ceil(len(matrix) / max(batch_size, 1))), 1)
-        loss, metrics = _loss_and_metrics(self.task)
+        loss, metrics = _loss_and_metrics(self.task, params)
         schedule = _learning_rate_schedule(
             params,
             learning_rate=self._learning_rate(),

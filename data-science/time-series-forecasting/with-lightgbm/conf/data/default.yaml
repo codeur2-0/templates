@@ -1,0 +1,73 @@
+# =================================================================================================
+# Données : Consommation électrique régionale et prévision multi-horizons
+# -------------------------------------------------------------------------------------------------
+# Jeu d'apprentissage supervisé construit par **expansion temporelle** d'une série quotidienne de
+# consommation régionale (~3,4 ans) : chaque ligne correspond à un couple (origine, horizon) et
+# porte la consommation réellement observée `horizon_days` jours après l'origine, ainsi que les
+# seules informations disponibles au matin de cette origine. La série sous-jacente est générée par
+# un modèle explicite et réaliste : niveau de base, tendance lente, saisonnalité annuelle (pointe
+# hivernale), saisonnalité hebdomadaire (creux du week-end), thermo-sensibilité asymétrique (3,5 %
+# par degré sous 15 °C, trois fois moins au-dessus de 24 °C car le parc français est peu
+# climatisé), jours fériés et vacances scolaires, épisodes extrêmes (vague de froid, canicule,
+# arrêt industriel) et bruit autocorrélé AR(1). La prévision de température fournie au modèle est
+# la vérité **entachée d'une erreur de prévision croissante avec l'horizon**, comme dans la
+# réalité : c'est ce qui rend la dégradation du J+1 au J+7 incompressible.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: regional_electricity_load
+n_samples: 4800
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: load_mw
+id_column: sample_id
+time_column: origin_date
+group_column: null
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['sample_id', 'origin_date', 'target_date', 'target_month', 'event_type', 'is_extreme_event']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+horizons:
+- 1
+- 2
+- 3
+- 7
+start_date: '2021-01-01'
+warmup_days: 40
+base_load_mw: 2100.0
+annual_amplitude: 0.18
+trend_per_year: -0.008
+heat_gradient: 0.035
+cool_gradient: 0.012
+holiday_drop: 0.13
+school_holiday_lift: 0.015
+noise_sigma: 0.022
+noise_ar: 0.6
+forecast_error_j1: 0.35
+forecast_error_growth: 0.14
+missing_temperature_rate: 0.03
+cold_snap_days: 18
+heatwave_days: 18
+shutdown_days: 9

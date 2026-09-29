@@ -1,0 +1,49 @@
+# =================================================================================================
+# Modèle : Gradient boosting XGBoost (XGBRegressor)
+# -------------------------------------------------------------------------------------------------
+# XGBoost apprend les mêmes interactions que le boosting de scikit-learn (température x jour de la
+# semaine x niveau récent) avec deux leviers de plus : l'**arrêt anticipé natif** sur la
+# validation chronologique, qui fixe le nombre d'arbres au lieu de le deviner, et une
+# régularisation explicite (profondeur, poids minimal par feuille, sous-échantillonnage de lignes
+# et de colonnes). Le réglage retenu est volontairement **peu profond** (profondeur 3) : sur une
+# série bruitée, des arbres profonds mémorisent les pointes isolées — l'écart train/validation le
+# montre avant le score. Les limites restent celles d'un booster : perte quadratique alors que le
+# métier pilote au MAPE, extrapolation médiocre hors du domaine vu, et aucune notion d'ordre
+# temporel sans features.
+#
+# Alternatives considérées : xgboost_dart : dropout sur les arbres, régularise les gros ensembles, mais sans arrêt anticipé, xgboost_linear : booster linéaire (gblinear), lisible en MW par degré comme une régression ridge, référence naïve saisonnière : le seul adversaire qui compte — tout modèle qui ne la bat pas de 30 % en MAPE n'a aucune valeur opérationnelle.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_estimators=...
+# =================================================================================================
+
+name: "Gradient boosting XGBoost (XGBRegressor)"
+algorithm: xgboost
+class: XGBoostModel
+task: forecasting
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `XGBoostModel(params=...)` (voir src/models/model.py).
+params:
+  n_estimators: 1500
+  max_depth: 3
+  learning_rate: 0.05
+  min_child_weight: 5
+  subsample: 0.9
+  colsample_bytree: 0.5
+  reg_lambda: 1.0
+  reg_alpha: 0.0
+  gamma: 0.0
+  importance_type: gain
+
+# --- options spécifiques à la stack `xgboost` ---------------------------------------
+early_stopping_rounds: 40
+eval_metric: rmse
+native_categorical: true
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold

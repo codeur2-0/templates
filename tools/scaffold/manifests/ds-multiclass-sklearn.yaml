@@ -1,0 +1,97 @@
+# ==============================================================================================
+# data-science / multiclass-classification / with-sklearn
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/multiclass_classification.yaml` (diagnostic du mode de
+# défaillance d'une machine d'usinage). Ce manifeste ne décrit QUE ce qui change avec la stack :
+# identité du projet et modèle.
+# ==============================================================================================
+
+key: ds-multiclass-sklearn
+title: "Diagnostic du mode de défaillance machine avec scikit-learn"
+summary: >-
+  Pipeline multi-classes de bout en bout (alarmes machine synthétiques à physique explicite ->
+  contrats Pandera -> features physiques déclarées en configuration -> gradient boosting par
+  histogrammes -> évaluation face au plancher majoritaire, au routage actuel par code automate et
+  au plafond oracle -> décision à coût minimal et revue experte des cas incertains) pour une
+  équipe maintenance, entièrement piloté par Hydra et structuré en objets testables.
+
+family: multiclass_classification
+domain: data-science
+problem: multiclass-classification
+stack: sklearn
+project_slug: machine-failure-diagnosis-sklearn
+package_name: failure_diagnosis_sklearn
+
+business:
+  # Exécution de référence (`make all`, graine 42, split de test de 1 200 alarmes). Les valeurs
+  # sont déterministes ; seule la latence dépend de la machine.
+  measured_results:
+    - label: "Macro-F1 (test)"
+      value: "0,671 (routage actuel 0,375 ; plafond oracle 0,679)"
+    - label: "Accuracy / balanced accuracy / MCC"
+      value: "0,777 / 0,667 / 0,723"
+    - label: "Log loss / AUC un-contre-tous / ECE"
+      value: "0,694 / 0,908 / 0,026"
+    - label: "Coût par alarme : argmax / coût minimal / routage actuel"
+      value: "476 / 172 / 428 EUR"
+    - label: "Pannes réelles acquittées : argmax / coût minimal / routage actuel"
+      value: "22,4 % / 0,0 % / 14,4 %"
+    - label: "Rappel le plus faible d'un mode prédictible (overstrain)"
+      value: "0,593"
+    - label: "Rappel de random_failure (modèle / oracle)"
+      value: "0,000 / 0,000"
+    - label: "Latence pour 1 000 alarmes"
+      value: "21 ms"
+    - label: "Verdict contractuel"
+      value: "7/7 objectifs atteints"
+
+model:
+  display_name: "Gradient boosting par histogrammes (HistGradientBoostingClassifier)"
+  algorithm: hist_gradient_boosting
+  rationale: >-
+    Le gradient boosting par histogrammes apprend directement les seuils physiques qui séparent
+    les modes (usure au-delà de 200 min, écart thermique à basse vitesse, puissance hors plage)
+    et leurs interactions avec la gamme de produit, sans transformation manuelle ; il gère
+    nativement la vibration manquante et reste déterministe à graine fixée. Il est volontairement
+    **petit** (100 itérations, 8 feuilles) : le signal tient en quelques seuils, et un boosting
+    profond (300 itérations x 31 feuilles) n'améliore pas le macro-F1 de validation mais devient
+    sur-confiant (ECE 0,13 contre 0,06, log loss 0,96 contre 0,71) tout en coûtant vingt fois plus
+    cher à entraîner. Des probabilités fidèles comptent ici plus qu'un point de macro-F1 : la décision à
+    coût minimal les multiplie par des euros. Pour la même raison, aucune pondération de classes
+    n'est appliquée — l'asymétrie des erreurs est portée par la matrice de coûts, pas par le
+    modèle.
+  alternatives:
+    - "logistic_regression : baseline linéaire lisible et bien calibrée ; elle reste 8 points de macro-F1 sous le boosting, faute de capter les seuils et leurs interactions avec la gamme"
+    - "random_forest : même macro-F1 et même log loss au bruit près, très rapide, mais une calibration moins fiable pour décider (ECE 0,08, et 0,14 avec pondération des classes)"
+    - "hist_gradient_boosting profond (300 x 31) : aucun gain de macro-F1, sur-confiance mesurée (ECE 0,13), entraînement 20x plus lent"
+    - "class_weight=balanced : relève le rappel des modes rares à l'argmax, mais déforme les probabilités ; inutile dès que la décision passe par les coûts"
+  params:
+    max_iter: 100
+    learning_rate: 0.1
+    max_leaf_nodes: 8
+    min_samples_leaf: 40
+    l2_regularization: 1.0
+    early_stopping: false
+    random_state: 42
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 2 min).
+  notebook_param_grid:
+    learning_rate: [0.05, 0.1]
+    max_leaf_nodes: [8, 15]
+    max_iter: [100, 200]
+  # Taille des fixtures pytest : 600 alarmes laissent ~36 lignes au mode le plus rare, assez pour
+  # un split stratifié en trois parties.
+  test_n_samples: 600
+  model_conf:
+    cross_validation:
+      enabled: true
+      folds: 5
+      strategy: stratified
+
+learning_objectives:
+  - "Composer un pipeline scikit-learn multi-classes propre : ColumnTransformer, features physiques déclarées, fit sur le train uniquement."
+  - "Utiliser une classe abstraite BaseModel pour rendre le framework interchangeable."
+  - "Lire des métriques multi-classes en contexte déséquilibré (macro-F1, balanced accuracy, MCC, AUC un-contre-tous)."
+  - "Remplacer l'argmax par une décision à coût minimal et un seuil de revue experte chiffrés sur le métier."
+  - "Situer un modèle entre le plancher majoritaire, la règle métier actuelle et le plafond atteignable."

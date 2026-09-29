@@ -1,0 +1,96 @@
+# ==============================================================================================
+# data-science / multiclass-classification / with-lightgbm
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/multiclass_classification.yaml` (diagnostic du mode de
+# défaillance d'une machine d'usinage). Ce manifeste ne décrit QUE ce qui change avec la stack.
+# ==============================================================================================
+
+key: ds-multiclass-lightgbm
+title: "Diagnostic du mode de défaillance machine avec LightGBM"
+summary: >-
+  Pipeline multi-classes de bout en bout (alarmes machine synthétiques à physique explicite ->
+  contrats Pandera -> features physiques déclarées en configuration -> boosting LightGBM leaf-wise
+  avec early stopping natif -> évaluation face au plancher majoritaire, au routage actuel par code
+  automate et au plafond oracle -> décision à coût minimal et revue experte) pour une équipe
+  maintenance, entièrement piloté par Hydra et structuré en objets testables.
+
+family: multiclass_classification
+domain: data-science
+problem: multiclass-classification
+stack: lightgbm
+project_slug: machine-failure-diagnosis-lightgbm
+package_name: failure_diagnosis_lightgbm
+
+business:
+  # Exécution de référence (`make all`, graine 42, split de test de 1 200 alarmes). Les valeurs
+  # sont déterministes ; seule la latence dépend de la machine.
+  measured_results:
+    - label: "Macro-F1 (test)"
+      value: "0,674 (routage actuel 0,375 ; plafond oracle 0,679)"
+    - label: "Accuracy / balanced accuracy / MCC"
+      value: "0,782 / 0,671 / 0,730"
+    - label: "Log loss / AUC un-contre-tous / ECE"
+      value: "0,684 / 0,911 / 0,039"
+    - label: "Coût par alarme : argmax / coût minimal / routage actuel"
+      value: "469 / 168 / 428 EUR"
+    - label: "Pannes réelles acquittées : argmax / coût minimal / routage actuel"
+      value: "22,0 % / 0,0 % / 14,4 %"
+    - label: "Rappel le plus faible d'un mode prédictible (overstrain)"
+      value: "0,607"
+    - label: "Rappel de random_failure (modèle / oracle)"
+      value: "0,000 / 0,000"
+    - label: "Latence pour 1 000 alarmes"
+      value: "12 ms"
+    - label: "Verdict contractuel"
+      value: "7/7 objectifs atteints"
+
+model:
+  display_name: "Gradient boosting LightGBM (multi-classes)"
+  algorithm: lightgbm
+  rationale: >-
+    LightGBM construit un arbre par classe et par itération (objectif softmax), en croissance
+    leaf-wise : il capte les seuils physiques qui séparent les modes et leurs interactions avec la
+    gamme, gère les manquants nativement et s'arrête seul grâce à l'early stopping sur la log loss
+    multi-classes de validation. Les arbres sont volontairement petits (15 feuilles) : le signal
+    tient en quelques seuils, et un ensemble profond deviendrait sur-confiant alors que la décision
+    à coût minimal a besoin de probabilités fidèles. Aucune pondération de classes : l'asymétrie
+    des erreurs est portée par la matrice de coûts.
+  alternatives:
+    - "lightgbm_dart : dropout sur les arbres, régularise les gros ensembles (early stopping indisponible)"
+    - "lightgbm_goss : échantillonnage par gradient, plus rapide sur de très gros volumes"
+    - "logistic_regression : baseline linéaire et bien calibrée, aveugle aux seuils sans features physiques"
+  params:
+    n_estimators: 400
+    num_leaves: 15
+    max_depth: -1
+    learning_rate: 0.06
+    min_child_samples: 40
+    subsample: 0.9
+    subsample_freq: 1
+    colsample_bytree: 0.8
+    reg_lambda: 1.0
+    reg_alpha: 0.0
+    min_split_gain: 0.0
+    importance_type: gain
+
+extras:
+  # Grille explorée par le notebook 04 (8 combinaisons).
+  notebook_param_grid:
+    num_leaves: [7, 15]
+    learning_rate: [0.04, 0.08]
+    min_child_samples: [20, 60]
+  test_n_samples: 600
+  model_conf:
+    early_stopping_rounds: 30
+    eval_metric: multi_logloss
+    native_categorical: true
+    cross_validation:
+      enabled: true
+      folds: 5
+      strategy: stratified
+
+learning_objectives:
+  - "Comprendre l'objectif softmax d'un booster : un arbre par classe et par itération."
+  - "Armer l'early stopping natif sur une métrique multi-classes (`multi_logloss`)."
+  - "Garder des arbres petits pour préserver la calibration, dont dépend la décision à coût minimal."
+  - "Situer un modèle entre le plancher majoritaire, la règle métier actuelle et le plafond atteignable."

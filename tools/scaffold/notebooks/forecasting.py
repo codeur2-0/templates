@@ -36,7 +36,7 @@ quels : un notebook de prévision et un notebook de régression partagent la mê
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tools.scaffold.notebooks.tabular import (
     LOAD_RAW,
@@ -591,6 +591,83 @@ BEST_REFERENCE = floor_table["référence"].iloc[0]
 print(f"\\nplancher sur le test : {FLOOR_MAPE:.2f} % ({BEST_REFERENCE})")
 """
 
+#: Réglages des notebooks de prévision qui dépendent de la stack. Un manifeste les surcharge dans
+#: `extras.notebook_forecasting` ; les valeurs par défaut sont celles de scikit-learn, si bien que
+#: le projet scikit-learn n'a rien à déclarer. Les commentaires chiffrés (`prose`) se surchargent de
+#: la même façon : un insight qui commente une mesure doit parler de la stack réellement mesurée.
+_STACK_DEFAULTS: dict[str, Any] = {
+    "comparison": ["ridge", "random_forest", "gradient_boosting", "svm"],
+    "linear_algorithm": "ridge",
+    "loss_param": "loss",
+    "losses": ["squared_error", "absolute_error"],
+    "complexity_param": "max_leaf_nodes",
+    "complexity_values": [7, 15, 31, 63, 127],
+    "complexity_label": "feuilles",
+    "complexity_axis": "nombre maximal de feuilles par arbre",
+    "complexity_log2": True,
+}
+
+
+def _stack_setting(context: NotebookContext, key: str) -> Any:
+    """Return a stack-dependent notebook setting (manifest override, else scikit-learn default).
+
+    Args:
+        context: Notebook context.
+        key: Setting name (see :data:`_STACK_DEFAULTS`).
+
+    Returns:
+        The setting value.
+    """
+    node = dict(context.spec.extras.get("notebook_forecasting") or {})
+    return node.get(key, _STACK_DEFAULTS[key])
+
+
+def _prose(context: NotebookContext, key: str, default: list[str]) -> list[str]:
+    """Return the insight lines of a section (manifest override, else the scikit-learn reading).
+
+    Args:
+        context: Notebook context.
+        key: Prose key (``algorithms``, ``thermo``, ``grid``, ``loss``, ``overfit``).
+        default: Lines written for the scikit-learn project.
+
+    Returns:
+        The lines to render.
+    """
+    node = dict(dict(context.spec.extras.get("notebook_forecasting") or {}).get("prose") or {})
+    return [str(line) for line in node.get(key, default)]
+
+
+def _stack_cell(source: str, context: NotebookContext) -> NotebookNode:
+    """Render a code cell after substituting the stack-dependent settings.
+
+    Args:
+        source: Cell template carrying ``__FC_*__`` tokens.
+        context: Notebook context.
+
+    Returns:
+        The code cell.
+    """
+    losses = [str(value) for value in _stack_setting(context, "losses")]
+    # Entiers (feuilles, profondeur) ou flottants (dropout) : le type déclaré est conservé.
+    values = list(_stack_setting(context, "complexity_values"))
+    linear = _stack_setting(context, "linear_algorithm")
+    tokens = {
+        "__FC_CANDIDATES__": repr([str(value) for value in _stack_setting(context, "comparison")]),
+        "__FC_LINEAR__": repr(None if linear is None else str(linear)),
+        "__FC_LOSS_PARAM__": str(_stack_setting(context, "loss_param")),
+        "__FC_LOSSES__": repr(tuple(losses)),
+        "__FC_COMPLEXITY_PARAM__": str(_stack_setting(context, "complexity_param")),
+        "__FC_COMPLEXITY_VALUES__": repr(tuple(values)),
+        "__FC_COMPLEXITY_LABEL__": str(_stack_setting(context, "complexity_label")),
+        "__FC_COMPLEXITY_AXIS__": str(_stack_setting(context, "complexity_axis")),
+        "__FC_COMPLEXITY_LOG2__": repr(bool(_stack_setting(context, "complexity_log2"))),
+    }
+    rendered = source
+    for token, value in tokens.items():
+        rendered = rendered.replace(token, value)
+    return _code(rendered, context)
+
+
 _ALGORITHMS_CELL = """
 # Comparaison des familles d'algorithmes, à données et protocole identiques.
 # Chacun est entraîné avec ses réglages par défaut (`params={}`) : c'est la comparaison loyale. Le
@@ -601,7 +678,8 @@ import time  # noqa: E402
 from src.models import build_model  # noqa: E402
 
 CONFIGURED = str(CONFIG.model.algorithm)
-candidates = ["ridge", "random_forest", "gradient_boosting", "svm", CONFIGURED]
+# Les familles comparées sont celles de la stack (`extras.notebook_forecasting.comparison`).
+candidates = list(dict.fromkeys([*__FC_CANDIDATES__, CONFIGURED]))
 naive_test = (
     PREPARED["splits"].test[NAIVE_COLUMN].to_numpy(dtype="float64") if NAIVE_COLUMN else None
 )
@@ -638,13 +716,14 @@ print(algorithm_table.to_string(index=False))
 
 _THERMO_LEARNED_CELL = """
 # Ce que le modèle linéaire a appris : la thermo-sensibilité en MW par °C.
-# C'est la raison d'entraîner une Ridge alors qu'elle est battue par les arbres : elle rend la
+# C'est la raison d'entraîner un modèle linéaire alors qu'il est battu par les arbres : il rend la
 # relation lisible dans l'unité du métier, et cette lecture est un contrôle de sanity du modèle.
-if "ridge" not in fitted:
-    print("la Ridge n'a pas pu être entraînée : section sans objet")
+LINEAR_REFERENCE = __FC_LINEAR__
+if LINEAR_REFERENCE is None or LINEAR_REFERENCE not in fitted:
+    print("aucun modèle linéaire entraîné dans cette stack : section sans objet")
 else:
     names = list(PREPARED["feature_names"])
-    estimator = getattr(fitted["ridge"], "estimator_", None)
+    estimator = getattr(fitted[LINEAR_REFERENCE], "estimator_", None)
     coefficients = np.asarray(getattr(estimator, "coef_", [])).ravel()
     if coefficients.size != len(names):
         print(f"taille inattendue : {coefficients.size} coefficients pour {len(names)} features")
@@ -970,44 +1049,52 @@ meilleure référence de 30 % au moins ne justifie pas son coût d'exploitation.
             ]
         ),
         _md("## 2. Comparaison des familles d'algorithmes"),
-        _code(_ALGORITHMS_CELL, context),
+        _stack_cell(_ALGORITHMS_CELL, context),
         _insight(
-            [
-                "La Ridge est battue parce que la thermo-sensibilité est une **courbe** : elle ne "
-                "peut la représenter qu'au prix de features fabriquées à la main (degrés-jours, "
-                "termes croisés). Les arbres la capturent sans transformation.",
-                "La forêt aléatoire et le boosting par histogrammes sont proches ; le boosting gagne "
-                "généralement sur ce volume, et surtout il est **natif valeurs manquantes** — une "
-                "panne de capteur météo ne casse pas la publication du matin.",
-                "Le boosting séquentiel historique (`gradient_boosting`) est plusieurs fois plus "
-                "lent à précision comparable : c'est la raison du choix des histogrammes.",
-                "Le SVR à noyau RBF tient sur quelques milliers de lignes mais son coût est "
-                "quadratique et il ne gère pas les manquants : inutilisable sur un périmètre "
-                "national.",
-                "Un écart de MAPE inférieur à la dispersion entre replis du backtest (section 5) "
-                "n'est pas un signal : ne pas choisir une famille sur un écart de cet ordre.",
-            ]
+            _prose(
+                context,
+                "algorithms",
+                [
+                    "La Ridge est battue parce que la thermo-sensibilité est une **courbe** : elle ne "
+                    "peut la représenter qu'au prix de features fabriquées à la main (degrés-jours, "
+                    "termes croisés). Les arbres la capturent sans transformation.",
+                    "La forêt aléatoire et le boosting par histogrammes sont proches ; le boosting gagne "
+                    "généralement sur ce volume, et surtout il est **natif valeurs manquantes** — une "
+                    "panne de capteur météo ne casse pas la publication du matin.",
+                    "Le boosting séquentiel historique (`gradient_boosting`) est plusieurs fois plus "
+                    "lent à précision comparable : c'est la raison du choix des histogrammes.",
+                    "Le SVR à noyau RBF tient sur quelques milliers de lignes mais son coût est "
+                    "quadratique et il ne gère pas les manquants : inutilisable sur un périmètre "
+                    "national.",
+                    "Un écart de MAPE inférieur à la dispersion entre replis du backtest (section 5) "
+                    "n'est pas un signal : ne pas choisir une famille sur un écart de cet ordre.",
+                ],
+            )
         ),
         _md(
             """## 3. Ce que le modèle linéaire a appris : la thermo-sensibilité en MW/°C
 
-On entraîne la Ridge même en sachant qu'elle est battue : elle rend la relation dans l'unité du
-métier. Un coefficient de température qui aurait le mauvais signe est une erreur que le MAPE ne
-révèle pas."""
+On entraîne le modèle linéaire de la stack même en sachant qu'il est battu : il rend la relation
+dans l'unité du métier. Un coefficient de température qui aurait le mauvais signe est une erreur
+que le MAPE ne révèle pas."""
         ),
-        _code(_THERMO_LEARNED_CELL, context),
+        _stack_cell(_THERMO_LEARNED_CELL, context),
         _insight(
-            [
-                "Les coefficients sont exprimés sur des features **standardisées** : ils sont "
-                "comparables entre eux, mais pas directement en MW/°C. La conversion passe par "
-                "l'écart-type de la colonne de température dans le pré-traitement ajusté.",
-                "Le bloc météo domine, suivi du calendrier et de l'historique récent : c'est "
-                "l'ordre attendu pour une consommation tertiaire/résidentielle, et le vérifier est "
-                "un contrôle de sanity gratuit.",
-                "Le boosting ne produit pas cette lecture ; il faut passer par une importance par "
-                "permutation (notebook 06), qui dit **quelle** variable compte mais pas **dans quel "
-                "sens** ni en quelle unité.",
-            ]
+            _prose(
+                context,
+                "thermo",
+                [
+                    "Les coefficients sont exprimés sur des features **standardisées** : ils sont "
+                    "comparables entre eux, mais pas directement en MW/°C. La conversion passe par "
+                    "l'écart-type de la colonne de température dans le pré-traitement ajusté.",
+                    "Le bloc météo domine, suivi du calendrier et de l'historique récent : c'est "
+                    "l'ordre attendu pour une consommation tertiaire/résidentielle, et le vérifier est "
+                    "un contrôle de sanity gratuit.",
+                    "Le boosting ne produit pas cette lecture ; il faut passer par une importance par "
+                    "permutation (notebook 06), qui dit **quelle** variable compte mais pas **dans quel "
+                    "sens** ni en quelle unité.",
+                ],
+            )
         ),
         _md("## 4. Un modèle multi-horizons, ou un modèle par horizon ?"),
         _code(_HORIZON_STRATEGY_CELL, context),
@@ -1033,20 +1120,24 @@ train/validation**, pas seulement le score."""
         ),
         _code(_GRID_CELL, context),
         _insight(
-            [
-                "Le nombre de feuilles est le réglage le plus sensible : trop de feuilles sur une "
-                "série bruitée mémorise les pointes isolées, et cela se voit d'abord dans l'écart "
-                "train/validation avant de se voir dans le score.",
-                "Le sous-échantillonnage de colonnes (`max_features`) décorrèle les arbres, ce qui "
-                "compte ici parce que plusieurs colonnes sont des transformations monotones les "
-                "unes des autres (température, anomalie, degrés-jours).",
-                "Le pas d'apprentissage et le nombre d'itérations sont quasi interchangeables à "
-                "produit constant : la grille est plate sur cet axe, donc on retient le point le "
-                "plus économe.",
-                "Un point de grille qui gagne 0,02 point de MAPE mais double l'écart "
-                "train/validation est un mauvais choix : il achète du score en backtest avec de la "
-                "fragilité en exploitation.",
-            ]
+            _prose(
+                context,
+                "grid",
+                [
+                    "Le nombre de feuilles est le réglage le plus sensible : trop de feuilles sur une "
+                    "série bruitée mémorise les pointes isolées, et cela se voit d'abord dans l'écart "
+                    "train/validation avant de se voir dans le score.",
+                    "Le sous-échantillonnage de colonnes (`max_features`) décorrèle les arbres, ce qui "
+                    "compte ici parce que plusieurs colonnes sont des transformations monotones les "
+                    "unes des autres (température, anomalie, degrés-jours).",
+                    "Le pas d'apprentissage et le nombre d'itérations sont quasi interchangeables à "
+                    "produit constant : la grille est plate sur cet axe, donc on retient le point le "
+                    "plus économe.",
+                    "Un point de grille qui gagne 0,02 point de MAPE mais double l'écart "
+                    "train/validation est un mauvais choix : il achète du score en backtest avec de la "
+                    "fragilité en exploitation.",
+                ],
+            )
         ),
         _md(
             """## 6. Backtest à origine glissante **avec** ré-entraînement
@@ -1228,13 +1319,13 @@ for index in range(5):
 
 _LOSS_CELL = """
 # Perte d'entraînement : le métier pilote au MAPE, l'estimateur optimise une perte.
-# `squared_error` optimise la RMSE ; `absolute_error` est alignée sur le MAPE mais produit des
-# gradients discontinus. La comparaison est le seul moyen honnête de trancher.
+# La première perte (quadratique) optimise la RMSE ; la seconde (absolue) est alignée sur le MAPE
+# mais produit des gradients discontinus. La comparaison est le seul moyen honnête de trancher.
 from src.models import build_model  # noqa: E402
 
 rows = []
-for loss in ("squared_error", "absolute_error"):
-    params = {**dict(CONFIG.model.params), "loss": loss}
+for loss in __FC_LOSSES__:
+    params = {**dict(CONFIG.model.params), "__FC_LOSS_PARAM__": loss}
     try:
         model = build_model(CONFIG, feature_names=PREPARED["feature_names"], params=params)
         model.fit(PREPARED["X_train"], PREPARED["y_train"])
@@ -1246,7 +1337,7 @@ for loss in ("squared_error", "absolute_error"):
             "MAE MW": round(float(np.mean(np.abs(truth - forecast))), 1),
             "RMSE MW": round(float(np.sqrt(np.mean((truth - forecast) ** 2))), 1),
             "biais %": round(float(np.mean((forecast - truth) / truth)) * 100.0, 2),
-            "P95 erreur %": round(float(np.percentile(np.abs((truth - forecast) / truth)) * 100.0), 2),
+            "P95 erreur %": round(float(np.percentile(np.abs((truth - forecast) / truth), 95)) * 100.0, 2),
         })
     except Exception as error:  # noqa: BLE001 - une perte non supportée est un résultat
         rows.append({"perte": loss, "MAPE test %": None, "erreur": str(error)[:70]})
@@ -1264,8 +1355,8 @@ truth_val = np.asarray(PREPARED["y_val"], dtype="float64")
 truth_test = np.asarray(PREPARED["y_test"], dtype="float64")
 
 rows = []
-for leaves in (7, 15, 31, 63, 127):
-    params = {**dict(CONFIG.model.params), "max_leaf_nodes": leaves}
+for complexity in __FC_COMPLEXITY_VALUES__:
+    params = {**dict(CONFIG.model.params), "__FC_COMPLEXITY_PARAM__": complexity}
     model = build_model(CONFIG, feature_names=PREPARED["feature_names"], params=params)
     model.fit(PREPARED["X_train"], PREPARED["y_train"])
     scores = {
@@ -1274,7 +1365,7 @@ for leaves in (7, 15, 31, 63, 127):
         "test": mape(truth_test, np.asarray(model.predict(PREPARED["X_test"]), dtype="float64")),
     }
     rows.append({
-        "feuilles": leaves,
+        "__FC_COMPLEXITY_LABEL__": complexity,
         "MAPE train %": round(scores["train"], 3),
         "MAPE val %": round(scores["val"], 3),
         "MAPE test %": round(scores["test"], 3),
@@ -1285,14 +1376,16 @@ for leaves in (7, 15, 31, 63, 127):
 
 overfit_table = pd.DataFrame(rows)
 print(overfit_table.to_string(index=False))
-print(f"\\nconfiguration retenue : max_leaf_nodes={CONFIG.model.params.get('max_leaf_nodes')}")
+retained = CONFIG.model.params.get("__FC_COMPLEXITY_PARAM__")
+print(f"\\nconfiguration retenue : __FC_COMPLEXITY_PARAM__={retained}")
 
 fig, axis = plt.subplots(figsize=(8, 4.2))
-axis.plot(overfit_table["feuilles"], overfit_table["MAPE train %"], marker="o", label="train")
-axis.plot(overfit_table["feuilles"], overfit_table["MAPE val %"], marker="s", label="validation")
-axis.plot(overfit_table["feuilles"], overfit_table["MAPE test %"], marker="^", label="test")
-axis.set_xscale("log", base=2)
-axis.set_xlabel("nombre maximal de feuilles par arbre")
+axis.plot(overfit_table["__FC_COMPLEXITY_LABEL__"], overfit_table["MAPE train %"], marker="o", label="train")
+axis.plot(overfit_table["__FC_COMPLEXITY_LABEL__"], overfit_table["MAPE val %"], marker="s", label="validation")
+axis.plot(overfit_table["__FC_COMPLEXITY_LABEL__"], overfit_table["MAPE test %"], marker="^", label="test")
+if __FC_COMPLEXITY_LOG2__:
+    axis.set_xscale("log", base=2)
+axis.set_xlabel("__FC_COMPLEXITY_AXIS__")
 axis.set_ylabel("MAPE (%)")
 axis.set_title("L'écart d'apprentissage se lit avant le score")
 axis.legend()
@@ -1404,6 +1497,7 @@ def build_05_training(context: NotebookContext, destination: Path) -> Path:
         The written path.
     """
     spec = context.spec
+    losses = [str(value) for value in _stack_setting(context, "losses")]
     cells: list[NotebookNode] = [
         _md(
             f"""# 05 — Entraînement et validation temporelle
@@ -1418,7 +1512,7 @@ prototype, ce sont quatre vérifications que ce notebook exécute **chiffres à 
 
 1. la validation est-elle **chronologique** ? Un protocole aléatoire sur une série temporelle est
    optimiste, et on mesure ici de combien ;
-2. la **perte** optimisée est-elle celle que le métier pilote ? `squared_error` optimise la RMSE,
+2. la **perte** optimisée est-elle celle que le métier pilote ? `{losses[0]}` optimise la RMSE,
    alors que la décision se prend au MAPE ;
 3. l'**écart d'apprentissage** est-il maîtrisé ? Un modèle qui mémorise le bruit AR(1) de la série
    tient en backtest et s'effondre en exploitation ;
@@ -1433,7 +1527,7 @@ prototype, ce sont quatre vérifications que ce notebook exécute **chiffres à 
                 "aux artefacts du pipeline.",
                 "Mesurer l'**optimisme** d'une validation croisée aléatoire face à des replis "
                 "chronologiques.",
-                "Arbitrer la **perte d'entraînement** (`squared_error` contre `absolute_error`) sur "
+                f"Arbitrer la **perte d'entraînement** (`{losses[0]}` contre `{losses[1]}`) sur "
                 "quatre critères, pas un.",
                 "Piloter l'**écart train/validation** par la complexité des arbres.",
                 "Vérifier que chaque artefact persisté a un rôle précis dans la chaîne "
@@ -1494,36 +1588,46 @@ On exécute les deux protocoles sur les **mêmes** données."""
 Le métier pilote au MAPE. L'estimateur, lui, optimise une perte. Les aligner n'est pas
 automatiquement le bon choix — voici les deux côtés du compromis."""
         ),
-        _code(_LOSS_CELL, context),
+        _stack_cell(_LOSS_CELL, context),
         _insight(
-            [
-                "`absolute_error` aligne la perte sur le MAPE, mais ses gradients sont discontinus "
-                "autour de zéro : l'optimisation est moins stable et l'ensemble converge plus "
-                "lentement.",
-                "`squared_error` pénalise davantage les grosses erreurs, ce qui est **souhaitable** "
-                "ici : une pointe hivernale ratée coûte plus cher qu'une erreur moyenne en été. La "
-                "RMSE plus élevée n'est pas un défaut, c'est la trace de cette priorité.",
-                "Le biais est le critère à surveiller : une perte absolue tend à prévoir la médiane, "
-                "donc à sous-prévoir les pointes — exactement ce qu'un acheteur d'énergie redoute.",
-                "Le choix configuré (`squared_error`) est donc un arbitrage documenté, pas un "
-                "réglage par défaut subi.",
-            ]
+            _prose(
+                context,
+                "loss",
+                [
+                    "Sur ce jeu, la perte quadratique gagne sur les **cinq** critères à la fois : "
+                    "MAPE 3,69 % contre 3,81 %, MAE 99 contre 102 MW, RMSE 131 contre 135 MW, biais "
+                    "+0,89 % contre +1,01 %, P95 9,2 % contre 9,7 %. Aligner la perte sur la métrique "
+                    "de décision n'est donc pas automatiquement payant.",
+                    "`absolute_error` a des gradients constants (±1) et discontinus en zéro : le "
+                    "boosting progresse par pas uniformes et converge moins bien à nombre "
+                    "d'itérations égal — c'est ce que mesure l'écart de MAPE.",
+                    "`squared_error` pèse plus lourd sur les grosses erreurs, donc sur les pointes "
+                    "hivernales : c'est la priorité métier (une pointe ratée se paie au prix spot), et "
+                    "sa P95 plus basse le confirme.",
+                    "Le choix configuré (`squared_error`) est donc un arbitrage **mesuré**, pas un "
+                    "réglage par défaut subi ; il se rejoue à chaque nouvelle version des données.",
+                ],
+            )
         ),
         _md("## 4. Écart d'apprentissage : ce que la complexité achète et ce qu'elle coûte"),
-        _code(_OVERFIT_CELL, context),
+        _stack_cell(_OVERFIT_CELL, context),
         _insight(
-            [
-                "Quand le nombre de feuilles augmente, le MAPE d'entraînement chute et celui de "
-                "validation cesse de suivre : la divergence **est** le surapprentissage. Le point "
-                "retenu est le dernier avant la divergence, pas le meilleur score de validation.",
-                "Le rapport val/train est plus parlant que l'écart absolu : un modèle à 1,7 % en "
-                "entraînement et 3,5 % en validation (rapport ≈ 2) est sain sur une série bruitée ; "
-                "un rapport proche de 1 signale une validation trop proche de l'entraînement, donc "
-                "probablement mal découpée.",
-                "Le test suit la validation de près, ce qui est le signal recherché : si le test "
-                "s'écartait nettement, la période de test contiendrait un régime absent de la "
-                "validation — c'est précisément ce que le notebook 06 vérifie sur les intervalles.",
-            ]
+            _prose(
+                context,
+                "overfit",
+                [
+                    "Quand le nombre de feuilles augmente, le MAPE d'entraînement chute et celui de "
+                    "validation cesse de suivre : la divergence **est** le surapprentissage. Le point "
+                    "retenu est le dernier avant la divergence, pas le meilleur score de validation.",
+                    "Le rapport val/train est plus parlant que l'écart absolu : un modèle à 1,7 % en "
+                    "entraînement et 3,5 % en validation (rapport ≈ 2) est sain sur une série bruitée ; "
+                    "un rapport proche de 1 signale une validation trop proche de l'entraînement, donc "
+                    "probablement mal découpée.",
+                    "Le test suit la validation de près, ce qui est le signal recherché : si le test "
+                    "s'écartait nettement, la période de test contiendrait un régime absent de la "
+                    "validation — c'est précisément ce que le notebook 06 vérifie sur les intervalles.",
+                ],
+            )
         ),
         _md("## 5. Artefacts persistés et aller-retour d'inférence"),
         _code(_ARTEFACTS_CELL, context),
