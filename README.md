@@ -14,7 +14,7 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**27 projets** sur sept familles tabulaires, tous verts dans `tools/verify.py` (lint, formatage,
+**28 projets** sur sept familles tabulaires, tous verts dans `tools/verify.py` (lint, formatage,
 typage, tests, six notebooks exécutés, pipeline complet `data → train → evaluate → predict`).
 
 ### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks
@@ -171,16 +171,17 @@ locale est précisément ce qui redresse la couverture. La variante normalisée 
 à 86,7 % mais tombe à 0 % sur les vagues de froid : elle est documentée comme limite connue
 plutôt que livrée.
 
-### 1.6 `data-science/recommendation` — classement de catalogue e-commerce, scikit-learn
+### 1.6 `data-science/recommendation` — classement de catalogue e-commerce, deux stacks
 
 | Projet | Stack | Modèle | NDCG@10 | Precision@10 | Recall@10 | MAP@10 | Hit-rate@10 | Couverture catalogue |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| [`with-sklearn`](data-science/recommendation/with-sklearn) | scikit-learn | `hist_gradient_boosting` (15 feuilles) | **0,602** | 0,299 | 0,733 | 0,582 | 0,951 | **65,3 %** |
+| [`with-sklearn`](data-science/recommendation/with-sklearn) | scikit-learn | `hist_gradient_boosting` (15 feuilles) | 0,602 | **0,299** | **0,733** | 0,582 | **0,951** | **65,3 %** |
+| [`with-pytorch`](data-science/recommendation/with-pytorch) | PyTorch | `mlp` 32 pointwise, sigmoid (1 953 paramètres) | **0,614** | 0,297 | 0,725 | **0,606** | 0,942 | **65,4 %** |
 
 36 000 couples (1 200 utilisateurs x 30 candidats, catalogue de 900 références, ~14 % de
 pertinence), split chronologique par session, évaluation **par utilisateur** (226 utilisateurs de
 test avec au moins une intention observable) et jamais ligne à ligne. Verdict **conforme, 8/8
-objectifs**.
+objectifs** pour les deux stacks.
 
 | Référence (même test) | NDCG@10 | Couverture catalogue |
 | --- | --- | --- |
@@ -194,6 +195,14 @@ exposant quatre fois plus de catalogue. Les utilisateurs froids (une commande ou
 sont servis presque aussi bien que les autres (rapport de rappel 0,96), et le NDCG varie de 0,033
 seulement entre plis chronologiques. Le tri par popularité échoue précisément au critère de
 couverture : c'est le mécanisme par lequel la longue traîne meurt, que le NDCG seul ne voit pas.
+
+Le MLP PyTorch fait jeu égal avec le boosting : +0,012 de NDCG@10, du même ordre que l'amplitude
+entre plis chronologiques (0,029 pour le réseau), pour une couverture identique et un rapport de
+rappel des utilisateurs froids de 0,99. Il score les mêmes features, sans identifiant appris : ce
+n'est **pas** un modèle à deux tours, qui exigerait des embeddings d'identifiants et abandonnerait
+les utilisateurs froids que ce jeu met au contrat. Sa capacité (une couche de 32, dropout 0,3) est
+choisie sur 3 graines : un réseau 128-64 fait 0,001 de mieux en validation, soit moins de deux fois
+sa dispersion, pour huit fois plus de paramètres. L'arrêt anticipé tombe entre les époques 3 et 6.
 
 ### 1.7 `data-science/multiclass-classification` — diagnostic du mode de défaillance machine, cinq stacks
 
@@ -387,6 +396,10 @@ Pièges documentés dans le code (et résolus) que ces stacks partagent :
 - **`FitResult.duration_seconds` n'était renseigné que par le `Trainer`** : un appel direct à
   `model.fit` (notebooks, études) rendait 0 s, et les colonnes de coût des notebooks affichaient
   0,0 pour tous les modèles. `BaseModel.fit` chronomètre désormais lui-même (horloge monotone).
+- **Le classement pointwise de la stack PyTorch était appris en régression** : `ranking` était
+  déclaré tête binaire à sigmoïde, mais la perte retombait sur la MSE et la sortie sur le logit
+  brut, sans `predict_proba` (tests et notebooks 05/06 en échec). `ranking` partage désormais la
+  tête binaire (`BCEWithLogitsLoss`, sigmoïde, probabilités).
 
 ---
 
@@ -433,9 +446,9 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **27/27 projets conformes** (ruff check, ruff format, mypy strict,
-4 565 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les tests
-de leur couche tâche —, 162 notebooks exécutés, `python -m src.main mode=all` de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
+État au dernier passage : **28/28 projets conformes** (ruff check, ruff format, mypy strict,
+4 730 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les tests
+de leur couche tâche —, 168 notebooks exécutés, `python -m src.main mode=all` de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
 six notebooks et pipeline complet — avant d'être considéré comme livré.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
@@ -465,10 +478,14 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/` sont écrites et vérifiées : les
 **sept familles tabulaires** sont livrées. Ce qui reste, par ordre de valeur pédagogique :
 
-1. **Stacks tabulaires déclarées, pas encore livrées** — `clustering` en PyTorch et TensorFlow
-   (auto-encodeur + k-means dans l'espace latent), `recommendation` en PyTorch (modèle à deux
-   tours), `binary_classification` avec MLflow. Leurs couches `task/` et `family/` existent ; il
-   reste un manifeste par stack et, comme pour la prévision et la détection d'anomalies, des
+1. **Stacks tabulaires déclarées, pas encore livrées** — `binary_classification` avec MLflow,
+   `recommendation` en TensorFlow et à deux tours. `clustering` en PyTorch / TensorFlow est
+   **écarté après mesure** : sur les 36 features standardisées du jeu clients, un k-means dans
+   l'espace latent d'un auto-encodeur ne bat le k-means direct sur aucune métrique (silhouette
+   0,12–0,20 contre 0,206, ARI latent 0,22–0,39 contre 0,418) et sa stabilité entre graines
+   (ARI 0,54–0,83, 250 époques comprises) reste sous le critère de 0,90 — le k-means direct est à
+   0,999. Livrer ce projet obligerait à baisser un seuil. Pour les stacks restantes, les couches
+   `task/` et `family/` existent ; il reste un manifeste par stack et, comme pour la prévision et la détection d'anomalies, des
    notebooks paramétrés par stack (`extras.notebook_<famille>`) : les commentaires chiffrés d'un
    notebook doivent parler de la stack réellement mesurée.
 2. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
