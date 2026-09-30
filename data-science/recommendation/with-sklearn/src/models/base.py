@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import platform
 import sys
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -520,6 +521,8 @@ class BaseModel(ABC):
             ValueError: When a supervised task is fitted without a target.
         """
         started_at = _utc_now()
+        # Chronomètre monotone : l'horloge murale (``started_at``) peut sauter (NTP, heure d'été).
+        started = time.perf_counter()
         if self.is_supervised and y is None:
             msg = (
                 f"Task '{self.task}' is supervised but no target was provided to fit(). "
@@ -559,6 +562,7 @@ class BaseModel(ABC):
             history=dict(context.history),
             n_samples=len(features),
             n_features=int(np.shape(features)[1]),
+            duration_seconds=time.perf_counter() - started,
             started_at=started_at,
             finished_at=_utc_now(),
             params=dict(self.params),
