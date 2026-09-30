@@ -50,6 +50,10 @@ CHECKPOINT_KIND = "tabular-project.pytorch-checkpoint/v1"
 #: candidat) comme un classifieur binaire, la publication du top-K étant portée par les couches
 #: d'évaluation et d'inférence. Les étiquettes sont donc binaires et la sortie est un sigmoid.
 _CLASSIFICATION = frozenset({"binary", "multiclass", "ranking"})
+#: Tâches à tête binaire (une sortie, sigmoid, `BCEWithLogitsLoss`) : le classement pointwise en
+#: fait partie — sans cela il serait appris en régression MSE sur des 0/1 et ne rendrait aucune
+#: probabilité.
+_BINARY_HEADS = frozenset({"binary", "ranking"})
 #: Tâches apprises par les têtes de régression.
 _REGRESSION = frozenset({"regression", "forecasting"})
 #: Tâches non supervisées (auto-encodeur : l'erreur de reconstruction sert de score d'anomalie).
@@ -827,7 +831,7 @@ def _loss_function(
         The loss module.
     """
     del labels
-    if task == "binary":
+    if task in _BINARY_HEADS:
         weight = params.get("pos_weight")
         pos_weight = (
             torch.tensor([float(weight)], dtype=torch.float32, device=device) if weight else None
@@ -1589,7 +1593,7 @@ class PyTorchModel(BaseModel):
             if not space:
                 return codes.astype("int64")
             return np.asarray([space[min(int(code), len(space) - 1)] for code in codes])
-        if self.task == "binary":
+        if self.task in _BINARY_HEADS:
             scores = _sigmoid(np.asarray(outputs, dtype="float64")).ravel()
             space = self._label_list() or [0, 1]
             positive = space[-1]
@@ -1612,7 +1616,7 @@ class PyTorchModel(BaseModel):
             A ``(n_samples, n_classes)`` array for classification, ``None`` otherwise.
         """
         array = np.asarray(outputs, dtype="float64")
-        if self.task == "binary":
+        if self.task in _BINARY_HEADS:
             positive = _sigmoid(array).ravel()
             return np.column_stack([1.0 - positive, positive])
         if self.task == "multiclass":
