@@ -1,0 +1,789 @@
+"""Inference: score candidate items and publish a top-K list per user.
+
+The predictor is the *production facing* object of the project. It:
+
+1. loads the artefacts written by training (model, preprocessing, feature builder),
+2. validates the incoming payload with ``InferenceDataSchema`` (fail fast, explicit message),
+3. rebuilds the exact same features and transformations as during training,
+4. scores every (user, candidate) pair, then **publishes** a ranked list per user.
+
+The last step is what separates a ranking predictor from a classification one. A classifier
+returns one row per input; a recommender returns one *list* per user, and the list is built under
+business constraints that the model does not know: only the top-K slots exist, an unavailable item
+must not be shown, and a list made of ten items from the same category is a bad list even if each
+item scores well. Those constraints are applied **after** scoring, as explicit and testable
+filters, rather than being smuggled into the model — which is what makes them auditable and
+reversible.
+
+Nothing here knows how the model was trained: swapping scikit-learn for PyTorch only changes
+``src/models/model.py``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from src.data.generators import SyntheticDataGenerator
+from src.data.loaders import InferenceDataLoader
+from src.data.schemas import InferenceDataSchema
+from src.features.build_features import FeatureBuilder
+from src.models import load_model
+from src.models.base import BaseModel
+from src.preprocessing.pipelines import PreprocessingPipeline
+from src.utils.io import load_pickle, write_table
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+
+logger = get_logger(__name__)
+
+#: Colonne cible (absente des payloads d'inférence, présente en évaluation).
+TARGET_NAME = "relevance"
+
+#: Identifiant de l'article candidat.
+ID_COLUMN = "sample_id"
+
+#: Identifiant de l'unité de publication : l'utilisateur.
+GROUP_COLUMN = "user_id"
+
+#: Nombre d'emplacements publiés par utilisateur.
+TOP_K = 10
+
+#: Colonnes de contexte conservées dans le fichier de prédictions.
+CONTEXT_COLUMNS: tuple[str, ...] = (
+    "user_id",
+    "sample_id",
+    "user_tenure_days",
+    "user_orders_12m",
+    "user_spend_eur_12m",
+    "user_sessions_30d",
+    "user_distinct_categories_12m",
+    "user_avg_basket_eur",
+)
+
+#: Bandes de confiance attribuées selon le score, pour une lecture métier du classement.
+CONFIDENCE_BANDS: tuple[tuple[float, str], ...] = (
+    (0.15, "faible"),
+    (0.35, "moyenne"),
+    (0.60, "élevée"),
+    (1.01, "très élevée"),
+)
+
+
+def _confidence_band(score: float) -> str:
+    """Return the readable confidence band of a score.
+
+    Args:
+        score: Ranking score in ``[0, 1]``.
+
+    Returns:
+        The band label.
+    """
+    value = float(score) if score == score else 0.0
+    for upper, label in CONFIDENCE_BANDS:
+        if value < upper:
+            return label
+    return CONFIDENCE_BANDS[-1][1]
+
+
+def _jsonable(value: Any) -> Any:
+    """Coerce a value to a JSON-serialisable form.
+
+    Args:
+        value: Value to coerce (NumPy scalar, Timestamp, ...).
+
+    Returns:
+        A JSON-serialisable value.
+    """
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        number = float(value)
+        return None if np.isnan(number) else number
+    if isinstance(value, (pd.Timestamp,)):
+        return value.isoformat()
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    return value
+
+
+class Predictor:
+    """Batch and single-user recommendation, with validation and business filters."""
+
+    def __init__(
+        self,
+        *,
+        model: BaseModel,
+        preprocessing: PreprocessingPipeline,
+        feature_builder: FeatureBuilder | None = None,
+        config: Mapping[str, Any] | None = None,
+        paths: ProjectPaths | None = None,
+        top_k: int = TOP_K,
+        group_column: str = GROUP_COLUMN,
+        item_column: str = ID_COLUMN,
+        stock_column: str = "item_stock_units",
+        category_column: str | None = None,
+        filter_unavailable: bool = True,
+        max_per_category: int | None = None,
+    ) -> None:
+        """Inject the trained artefacts and the publication policy.
+
+        Args:
+            model: Fitted model.
+            preprocessing: Fitted preprocessing pipeline.
+            feature_builder: Fitted feature builder (``None`` when no derived feature is used).
+            config: Root configuration mapping (used for paths, seed and options).
+            paths: Project layout.
+            top_k: Number of slots published per user.
+            group_column: Column identifying the user.
+            item_column: Column identifying the candidate item.
+            stock_column: Column holding available units; zero means unpublishable.
+            category_column: Column used by the diversity filter (``None`` disables it).
+            filter_unavailable: Whether to drop unavailable items after scoring.
+            max_per_category: Maximum slots per category (``None`` disables the constraint).
+
+        Raises:
+            ValueError: When ``top_k`` is not a positive integer.
+        """
+        if int(top_k) <= 0:
+            msg = f"top_k must be a positive integer, got {top_k}"
+            raise ValueError(msg)
+        self.model = model
+        self.preprocessing = preprocessing
+        self.feature_builder = feature_builder or FeatureBuilder([])
+        self.config: dict[str, Any] = dict(config or {})
+        self.paths = paths or ProjectPaths.from_config(self.config)
+        self.top_k = int(top_k)
+        self.group_column = str(group_column)
+        self.item_column = str(item_column)
+        self.stock_column = str(stock_column)
+        self.category_column = str(category_column) if category_column else None
+        self.filter_unavailable = bool(filter_unavailable)
+        self.max_per_category = int(max_per_category) if max_per_category else None
+
+    # ------------------------------------------------------------------ factories -------
+    @classmethod
+    def from_config(cls, config: Any, paths: ProjectPaths | None = None) -> Predictor:
+        """Build a predictor from a validated application configuration.
+
+        Args:
+            config: ``AppConfig`` instance (or mapping).
+            paths: Optional project layout.
+
+        Returns:
+            The predictor, with every artefact loaded from disk.
+
+        Raises:
+            FileNotFoundError: When an artefact is missing (training never ran).
+        """
+        payload: Mapping[str, Any] = (
+            config.model_dump() if hasattr(config, "model_dump") else dict(config or {})
+        )
+        layout = paths or ProjectPaths.from_config(payload)
+        artifacts = (payload.get("train") or {}).get("artifacts") or {}
+
+        model_path = layout.models_dir / str(artifacts.get("model_file", "model.joblib"))
+        pipeline_path = layout.models_dir / str(
+            artifacts.get("pipeline_file", "preprocessing.joblib")
+        )
+        builder_path = layout.models_dir / str(
+            artifacts.get("feature_builder_file", "feature_builder.joblib")
+        )
+
+        for required in (model_path, pipeline_path):
+            if not required.exists():
+                msg = (
+                    f"Artefact manquant : {required}. Entraînez d'abord le modèle avec "
+                    "`python scripts/train.py` (ou `make train`)."
+                )
+                raise FileNotFoundError(msg)
+
+        model = load_model(model_path, config=config)
+        preprocessing = PreprocessingPipeline.load(pipeline_path)
+        feature_builder = load_pickle(builder_path) if builder_path.exists() else FeatureBuilder([])
+
+        family = dict(payload.get("recommendation") or {})
+        data_node = dict(payload.get("data") or {})
+        predict_node = dict(payload.get("predict") or {})
+        top_k = int(predict_node.get("top_k") or family.get("top_k") or TOP_K)
+        group_column = str(
+            family.get("group_column") or data_node.get("group_column") or GROUP_COLUMN
+        )
+        item_column = str(family.get("item_column") or data_node.get("id_column") or ID_COLUMN)
+        category_column = family.get("category_column")
+
+        logger.info(
+            "Predictor ready | model={} features={} top_k={} filtre_stock={} max/categorie={}",
+            model.summary(),
+            len(preprocessing.feature_names_out),
+            top_k,
+            bool(family.get("filter_unavailable", True)),
+            (category_column and int(family.get("max_per_category") or 0)) or None,
+        )
+        return cls(
+            model=model,
+            preprocessing=preprocessing,
+            feature_builder=feature_builder,
+            config=payload,
+            paths=layout,
+            top_k=top_k,
+            group_column=group_column,
+            item_column=item_column,
+            stock_column=str(family.get("stock_column") or "item_stock_units"),
+            category_column=str(category_column) if category_column else None,
+            filter_unavailable=bool(family.get("filter_unavailable", True)),
+            max_per_category=(
+                int(family["max_per_category"]) if family.get("max_per_category") else None
+            ),
+        )
+
+    # ------------------------------------------------------------------ inputs ----------
+    def load_inputs(self, path: str | Path) -> pd.DataFrame:
+        """Load and validate an inference file of candidate items.
+
+        Args:
+            path: Parquet / CSV / JSON file, one row per (user, candidate) pair.
+
+        Returns:
+            The validated frame.
+        """
+        loader = InferenceDataLoader(
+            self.paths,
+            dataset_name=str((self.config.get("data") or {}).get("dataset_name", "inference")),
+            validate=bool(
+                ((self.config.get("data") or {}).get("validation") or {}).get("inference", True)
+            ),
+        )
+        return loader.load_from(path)
+
+    def sample_inputs(self, n_samples: int = 5, *, seed: int | None = None) -> pd.DataFrame:
+        """Generate a synthetic inference payload (demo without preparing a file).
+
+        Args:
+            n_samples: Number of candidate rows (a user brings several candidates).
+            seed: Optional seed override.
+
+        Returns:
+            A frame without the target column.
+        """
+        data_node = dict(self.config.get("data") or {})
+        generator = SyntheticDataGenerator(
+            n_samples=max(int(n_samples) * 4, 50),
+            # ``config.get`` renvoie ``Any | None`` : on explicite le repli pour satisfaire mypy.
+            seed=int(
+                seed
+                if seed is not None
+                else (self.config.get("seed") or data_node.get("seed") or 42)
+            ),
+            dataset_name=str(data_node.get("dataset_name", SyntheticDataGenerator.__name__)),
+        )
+        frame = generator.sample(max(int(n_samples), 1), with_target=False)
+        return InferenceDataSchema.validate(frame, lazy=False)
+
+    # ------------------------------------------------------------------ prediction ------
+    def prepare(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Apply feature engineering and preprocessing to a validated payload.
+
+        Args:
+            frame: Raw records (validated).
+
+        Returns:
+            The model-ready matrix.
+        """
+        enriched = self.feature_builder.transform(frame)
+        matrix = self.preprocessing.transform(enriched)
+        logger.debug("Prepared {} record(s) -> {} feature(s)", len(matrix), matrix.shape[1])
+        return matrix
+
+    def predict(self, frame: pd.DataFrame, *, validate: bool = True) -> pd.DataFrame:
+        """Score every candidate and publish the ranked list of each user.
+
+        Args:
+            frame: Raw candidate records, one row per (user, item) pair.
+            validate: Enforce ``InferenceDataSchema`` before predicting.
+
+        Returns:
+            A frame with the context columns, ``score``, ``rank``, ``published``,
+            ``confidence_band`` and ``publication_reason``. Rows are sorted by user then by
+            descending score, so the file reads as a recommendation list.
+
+        Raises:
+            RuntimeError: When the model is not fitted.
+            ValueError: When the user column is missing from the payload.
+        """
+        self.model.check_is_fitted()
+        payload = InferenceDataSchema.validate(frame, lazy=False) if validate else frame.copy()
+        if self.group_column not in payload.columns:
+            msg = (
+                f"La colonne '{self.group_column}' est absente du payload d'inférence : sans "
+                "identifiant utilisateur, aucune liste ne peut être publiée."
+            )
+            raise ValueError(msg)
+
+        matrix = self.prepare(payload)
+        scores = self._scores(matrix)
+
+        output = self._context_frame(payload).reset_index(drop=True)
+        output["score"] = np.round(np.asarray(scores, dtype="float64"), 6)
+        if self.stock_column in payload.columns:
+            output["stock_restant"] = pd.to_numeric(
+                payload[self.stock_column].to_numpy(), errors="coerce"
+            )
+        if self.category_column and self.category_column in payload.columns:
+            output["categorie"] = payload[self.category_column].to_numpy()
+
+        output = self._rank(output)
+        if self.filter_unavailable and "stock_restant" in output.columns:
+            output = self.filter_availability(output)
+        if self.max_per_category and "categorie" in output.columns:
+            output = self.diversify(output, max_per_category=self.max_per_category)
+        output["confidence_band"] = output["score"].map(_confidence_band)
+        output["publication_reason"] = output.apply(self._publication_reason, axis=1)
+        output = output.sort_values([self.group_column, "rank"], kind="stable").reset_index(
+            drop=True
+        )
+
+        published = int(output["published"].sum()) if "published" in output.columns else 0
+        users = int(output[self.group_column].nunique())
+        logger.info(
+            "Recommandations | candidats={} utilisateurs={} publiés={} ({:.1%}) score_moyen={:.4f}",
+            len(output),
+            users,
+            published,
+            published / max(len(output), 1),
+            float(output["score"].mean()) if not output.empty else float("nan"),
+        )
+        return output
+
+    def recommend(
+        self, user_key: Any, frame: pd.DataFrame | None = None, *, top_k: int | None = None
+    ) -> pd.DataFrame:
+        """Return the published list of one user.
+
+        C'est l'appel produit : le site demande « que montrer à cet utilisateur ? » et attend une
+        liste ordonnée, pas une matrice de scores. La méthode isole un utilisateur d'un payload
+        déjà scoré, ou score un payload fourni, et ne renvoie que les emplacements publiés.
+
+        Args:
+            user_key: Identifier of the user.
+            frame: Optional candidate payload restricted to that user; when omitted, the
+                predictions must be passed by the caller through :meth:`predict` first.
+            top_k: Number of slots to return (defaults to the configured one).
+
+        Returns:
+            The published recommendations of that user, best first. An empty frame is returned
+            when the user has no candidate.
+
+        Raises:
+            ValueError: When neither a frame nor scored predictions are available.
+        """
+        if frame is None:
+            msg = (
+                "recommend() a besoin du payload de candidats de cet utilisateur : passez "
+                "`frame=` ou appelez d'abord predict() puis filtrez le résultat."
+            )
+            raise ValueError(msg)
+        cutoff = int(top_k or self.top_k)
+        candidates = frame[frame[self.group_column].astype(str) == str(user_key)]
+        if candidates.empty:
+            logger.warning("Aucun candidat pour l'utilisateur '{}'", user_key)
+            return pd.DataFrame()
+        predictions = self.predict(candidates, validate=False)
+        published = predictions[predictions["published"].astype(bool)]
+        return published.head(cutoff).reset_index(drop=True)
+
+    def recommend_batch(
+        self, user_keys: Sequence[Any], frame: pd.DataFrame, *, top_k: int | None = None
+    ) -> pd.DataFrame:
+        """Return the published lists of several users in one scored pass.
+
+        Scorer une fois puis découper par utilisateur coûte bien moins cher que scorer chaque
+        utilisateur séparément : la préparation des features et l'appel au modèle ne sont faits
+        qu'une fois pour tout le payload.
+
+        Args:
+            user_keys: Identifiers of the users to serve.
+            frame: Candidate payload covering those users.
+            top_k: Number of slots per user.
+
+        Returns:
+            The concatenated published lists, in the order of ``user_keys``.
+        """
+        cutoff = int(top_k or self.top_k)
+        wanted = {str(key) for key in user_keys}
+        candidates = frame[frame[self.group_column].astype(str).isin(wanted)]
+        if candidates.empty:
+            logger.warning("Aucun candidat pour les {} utilisateur(s) demandés", len(wanted))
+            return pd.DataFrame()
+        predictions = self.predict(candidates, validate=False)
+        published = predictions[predictions["published"].astype(bool)]
+        ordered = pd.concat(
+            [
+                published[published[self.group_column].astype(str) == key].head(cutoff)
+                for key in (str(item) for item in user_keys)
+            ],
+            ignore_index=True,
+        )
+        return ordered
+
+    def predict_one(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Score a single candidate and return a JSON-serialisable payload.
+
+        Args:
+            record: Mapping of column name to value for one (user, item) pair.
+
+        Returns:
+            The prediction payload (score, rank, publication decision, drivers).
+        """
+        frame = pd.DataFrame([dict(record)])
+        predictions = self.predict(frame, validate=True)
+        row = predictions.iloc[0]
+        drivers = self.top_drivers(frame, index=0, top_n=3)
+        return {
+            "input": {key: _jsonable(value) for key, value in record.items()},
+            "score": _jsonable(row.get("score")),
+            "rank": int(row.get("rank", 1)),
+            "published": bool(row.get("published", False)),
+            "confidence_band": str(row.get("confidence_band", "n/a")),
+            "publication_reason": str(row.get("publication_reason", "")),
+            "top_drivers": [
+                {"feature": name, "contribution": round(float(value), 4)} for name, value in drivers
+            ],
+            "top_k": self.top_k,
+        }
+
+    def top_drivers(
+        self, frame: pd.DataFrame, *, index: int = 0, top_n: int = 5
+    ) -> list[tuple[str, float]]:
+        """Return the features that push one candidate's score the most.
+
+        The contribution is a *local* approximation: feature importance (global) multiplied by the
+        standardised value of the record. It is meant for operational explainability — telling a
+        catalogue manager why an item is or is not recommended — not for exact attribution; use
+        SHAP when a formal explanation is required.
+
+        Args:
+            frame: Raw records (already validated).
+            index: Row index to explain.
+            top_n: Number of drivers returned.
+
+        Returns:
+            List of ``(feature, contribution)`` sorted by descending absolute contribution.
+        """
+        matrix = self.prepare(frame)
+        if index >= len(matrix):
+            msg = f"Row index {index} is out of range ({len(matrix)} rows)"
+            raise IndexError(msg)
+
+        importances = self._feature_importances(matrix)
+        if importances is None:
+            return []
+        values = matrix.iloc[index].to_numpy(dtype="float64")
+        contributions = np.asarray(importances, dtype="float64") * values
+        ranking = np.argsort(-np.abs(contributions))[:top_n]
+        return [
+            (str(matrix.columns[position]), float(contributions[position])) for position in ranking
+        ]
+
+    def save(self, predictions: pd.DataFrame, path: str | Path | None = None) -> Path:
+        """Persist the recommendation lists.
+
+        Args:
+            predictions: Frame produced by :meth:`predict`.
+            path: Destination file (defaults to ``artifacts/reports/predictions.csv``).
+
+        Returns:
+            The written path.
+        """
+        destination = Path(path) if path else self.paths.reports_dir / "predictions.csv"
+        return write_table(predictions, destination)
+
+    # ------------------------------------------------------------------ filters ---------
+    def filter_availability(self, predictions: pd.DataFrame) -> pd.DataFrame:
+        """Drop unavailable items from the published slots and refill them.
+
+        Filtrer *après* le classement, et non avant, est un choix délibéré. Laisser le modèle
+        apprendre la disponibilité produit un classement qui ignore la contrainte dès qu'un stock
+        change entre l'entraînement et la publication ; un filtre post-classement est explicite,
+        testable, réversible, et il reflète la réalité opérationnelle — le stock bouge toutes les
+        heures, le modèle toutes les semaines. Les emplacements libérés sont refillés par les
+        candidats disponibles suivants, si bien que le nombre de slots publiés ne change pas.
+
+        Args:
+            predictions: Ranked frame produced by :meth:`_rank`.
+
+        Returns:
+            The frame with ``published`` and ``publication_reason`` updated. Unavailable rows keep
+            their score and rank but are flagged as excluded.
+        """
+        if "stock_restant" not in predictions.columns:
+            logger.debug("Filtre de disponibilité ignoré : colonne '{}' absente", self.stock_column)
+            return predictions
+        output = predictions.copy()
+        stock = pd.to_numeric(output["stock_restant"], errors="coerce").fillna(0.0)
+        available = stock > 0
+        output["_publiable"] = available
+        output["published"] = False
+        output["publication_reason"] = np.where(
+            available, output.get("publication_reason", ""), "article indisponible"
+        )
+        output = self._publish_within_budget(output)
+        dropped = int((~available & (output["rank"] <= self.top_k)).sum())
+        if dropped:
+            logger.info(
+                "Filtre disponibilité | {} emplacement(s) du top-{} retiré(s) et refillé(s)",
+                dropped,
+                self.top_k,
+            )
+        return output
+
+    def diversify(
+        self, predictions: pd.DataFrame, *, max_per_category: int | None = None
+    ) -> pd.DataFrame:
+        """Limit the slots taken by a single category, then refill.
+
+        Une liste de dix articles d'une même catégorie peut être optimale au sens du NDCG et
+        désastreuse au sens de l'expérience : elle donne l'impression d'un moteur bloqué. La
+        contrainte de diversité est un arbitrage assumé entre pertinence mesurée et qualité
+        perçue — elle se règle donc dans la configuration de publication, pas dans le modèle, et
+        son coût en NDCG peut être mesuré exactement en la désactivant.
+
+        Args:
+            predictions: Ranked frame.
+            max_per_category: Maximum slots per category (defaults to the configured one).
+
+        Returns:
+            The frame with ``published`` and ``publication_reason`` updated.
+        """
+        limit = int(max_per_category or self.max_per_category or 0)
+        if limit <= 0 or "categorie" not in predictions.columns:
+            return predictions
+        output = predictions.copy()
+        if "_publiable" not in output.columns:
+            output["_publiable"] = True
+        output = output.sort_values([self.group_column, "rank"], kind="stable").reset_index(
+            drop=True
+        )
+        counts: dict[tuple[str, Any], int] = {}
+        published: list[bool] = []
+        for row in output.itertuples():
+            key = (str(getattr(row, self.group_column)), row.categorie)
+            used = counts.get(key, 0)
+            allowed = bool(getattr(row, "_publiable", True)) and used < limit
+            if allowed:
+                counts[key] = used + 1
+            published.append(allowed)
+        output["_diversite_ok"] = pd.Series(published, index=output.index)
+        output["_publiable"] = output["_publiable"] & output["_diversite_ok"]
+        output["published"] = False
+        output["publication_reason"] = np.where(
+            output["_diversite_ok"],
+            output.get("publication_reason", ""),
+            f"plafond de {limit} par catégorie atteint",
+        )
+        output = self._publish_within_budget(output)
+        logger.info(
+            "Filtre diversité | plafond {} par catégorie appliqué, {} emplacement(s) modifié(s)",
+            limit,
+            int((~output["_diversite_ok"]).sum()),
+        )
+        return output
+
+    def _publish_within_budget(self, output: pd.DataFrame) -> pd.DataFrame:
+        """Publish the best admissible candidates per user, up to ``top_k`` slots.
+
+        Args:
+            output: Ranked frame carrying a boolean ``_publiable`` column.
+
+        Returns:
+            The frame with ``published`` set and ``publication_reason`` completed.
+        """
+        # Chaque groupe produit des séries indexées, concaténées puis réalignées sur l'index de
+        # sortie : affecter positionnellement des listes construites dans l'ordre du groupby
+        # mélangerait les utilisateurs dès que cet ordre diffère de celui du cadre.
+        flag_parts: list[pd.Series] = []
+        reason_parts: list[pd.Series] = []
+        for _, group in output.groupby(self.group_column, observed=True, sort=False):
+            admissible = group["_publiable"].astype(bool).to_numpy()
+            order = np.argsort(-group["score"].to_numpy(dtype="float64"), kind="stable")
+            chosen = np.zeros(len(group), dtype=bool)
+            budget = self.top_k
+            for position in order:
+                if budget <= 0:
+                    break
+                if admissible[position]:
+                    chosen[position] = True
+                    budget -= 1
+            chosen_series = pd.Series(chosen, index=group.index)
+            previous = (
+                group["publication_reason"].astype(str)
+                if "publication_reason" in group
+                else pd.Series("", index=group.index)
+            )
+            promoted = pd.Series(
+                np.where(
+                    group["rank"].to_numpy() <= self.top_k,
+                    f"dans le top-{self.top_k} par score",
+                    "repêché après filtrage",
+                ),
+                index=group.index,
+            )
+            # Un candidat publié prend la raison de publication ; un candidat écarté conserve la
+            # raison de son exclusion (indisponibilité, plafond de catégorie, hors budget).
+            reasons = pd.Series(previous.where(~chosen_series, promoted), index=group.index)
+            flag_parts.append(chosen_series)
+            reason_parts.append(reasons)
+
+        if not flag_parts:
+            output["published"] = False
+            output["publication_reason"] = ""
+            return output
+        flags = pd.concat(flag_parts).reindex(output.index)
+        reasons = pd.concat(reason_parts).reindex(output.index)
+        output["published"] = flags.fillna(False).astype(bool).to_numpy()
+        output["publication_reason"] = reasons.fillna("").astype(str).to_numpy()
+        return output
+
+    def explain_ranking(self, user_key: Any, predictions: pd.DataFrame) -> str:
+        """Return a readable sentence explaining one user's published list.
+
+        Args:
+            user_key: Identifier of the user.
+            predictions: Frame produced by :meth:`predict`.
+
+        Returns:
+            The explanation, or a message saying the user has no published slot.
+        """
+        selection = predictions[predictions[self.group_column].astype(str) == str(user_key)]
+        if selection.empty:
+            return f"Aucun candidat pour l'utilisateur '{user_key}'."
+        published = selection[selection["published"].astype(bool)]
+        if published.empty:
+            excluded = selection["publication_reason"].dropna().unique()
+            return (
+                f"Aucun emplacement publié pour '{user_key}' : "
+                f"{', '.join(str(reason) for reason in excluded) or 'tous les candidats filtrés'}."
+            )
+        items = ", ".join(str(item) for item in published[self.item_column].head(5))
+        mean_score = float(published["score"].mean())
+        categories = (
+            f" sur {published['categorie'].nunique()} catégorie(s)"
+            if "categorie" in published.columns
+            else ""
+        )
+        return (
+            f"{len(published)} emplacement(s) publié(s) pour '{user_key}' — {items}"
+            f"{'' if len(published) <= 5 else ', ...'} (score moyen {mean_score:.3f}{categories})."
+        )
+
+    # ------------------------------------------------------------------ internals -------
+    def _scores(self, matrix: pd.DataFrame) -> np.ndarray:
+        """Return a ranking score per row, higher meaning more relevant.
+
+        Args:
+            matrix: Model-ready features.
+
+        Returns:
+            The score vector.
+        """
+        if bool(getattr(self.model, "supports_proba", False)):
+            try:
+                probabilities = np.asarray(self.model.predict_proba(matrix), dtype="float64")
+                if probabilities.ndim == 2:
+                    return probabilities[:, -1].ravel()
+                return probabilities.ravel()
+            except Exception as exc:
+                logger.warning("predict_proba indisponible ({}); repli sur predict", exc)
+        return np.asarray(self.model.predict(matrix), dtype="float64").ravel()
+
+    def _rank(self, output: pd.DataFrame) -> pd.DataFrame:
+        """Assign a rank per user, best score first.
+
+        Args:
+            output: Frame carrying the scores and the user column.
+
+        Returns:
+            The frame with ``rank`` and an initial ``published`` flag.
+        """
+        output = output.sort_values(
+            [self.group_column, "score"], ascending=[True, False], kind="stable"
+        ).reset_index(drop=True)
+        output["rank"] = output.groupby(self.group_column, observed=True, sort=False).cumcount() + 1
+        output["published"] = output["rank"] <= self.top_k
+        output["_publiable"] = True
+        output["publication_reason"] = np.where(
+            output["published"], f"dans le top-{self.top_k} par score", ""
+        )
+        return output
+
+    def _feature_importances(self, matrix: pd.DataFrame) -> np.ndarray | None:
+        """Return global feature importances when the model exposes them.
+
+        Args:
+            matrix: Model-ready features.
+
+        Returns:
+            The importance vector aligned with ``matrix.columns``, or ``None``.
+        """
+        estimator = getattr(self.model, "estimator_", None) or getattr(self.model, "model_", None)
+        native = getattr(estimator, "feature_importances_", None)
+        if native is None:
+            native = getattr(estimator, "coef_", None)
+            if native is not None:
+                native = np.abs(np.asarray(native, dtype="float64"))
+                if native.ndim == 2:
+                    native = native.mean(axis=0)
+        if native is None:
+            return None
+        values = np.asarray(native, dtype="float64").ravel()
+        return values if values.size == matrix.shape[1] else None
+
+    def _context_frame(self, payload: pd.DataFrame) -> pd.DataFrame:
+        """Keep the business-readable columns next to the score.
+
+        Args:
+            payload: Validated input frame.
+
+        Returns:
+            The context frame.
+        """
+        wanted = [
+            column
+            for column in dict.fromkeys(
+                (
+                    *CONTEXT_COLUMNS,
+                    self.group_column,
+                    self.item_column,
+                    self.stock_column,
+                    self.category_column or "",
+                )
+            )
+            if column and column in payload.columns
+        ]
+        return payload[wanted].copy() if wanted else payload.copy()
+
+    def _publication_reason(self, row: pd.Series) -> str:
+        """Return the readable reason behind a publication decision.
+
+        Args:
+            row: One scored candidate.
+
+        Returns:
+            The reason.
+        """
+        if bool(row.get("published", False)):
+            reason = str(row.get("publication_reason") or "")
+            return reason or f"dans le top-{self.top_k} par score"
+        reason = str(row.get("publication_reason") or "")
+        if reason:
+            return reason
+        return f"hors du top-{self.top_k} (rang {int(row.get('rank', 0))})"
+
+
+__all__ = ["CONFIDENCE_BANDS", "CONTEXT_COLUMNS", "GROUP_COLUMN", "ID_COLUMN", "Predictor", "TOP_K"]

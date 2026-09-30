@@ -1,0 +1,104 @@
+# =================================================================================================
+# Preprocessing & feature engineering
+# -------------------------------------------------------------------------------------------------
+# Décrit le pipeline appliqué aux données (nettoyage, encodage, scaling) ainsi que les features
+# dérivées construites par `src/features/build_features.py`.
+#
+# Règle d'or : tout ce qui est **appris** sur les données (moyennes, médianes, catégories,
+# encodeurs) doit être appris sur le train uniquement, puis appliqué au val/test. C'est le rôle
+# du pipeline scikit-learn encapsulé dans `src/preprocessing/pipelines.py`.
+# =================================================================================================
+
+numeric:
+  imputer: median
+  imputer_fill_value: 0.0
+  clip_outliers: true
+  clip_quantiles:
+  - 0.001
+  - 0.999
+  scaler: standard
+  log1p_columns:
+  - item_reviews_count
+  - item_views_7d
+  - user_spend_eur_12m
+categorical:
+  imputer: most_frequent
+  imputer_fill_value: unknown
+  encoder: onehot
+  handle_unknown: ignore
+  min_frequency: 0.01
+  max_categories: 12
+features:
+- type: datetime_parts
+  name: session_parts
+  column: session_date
+  prefix: session
+  parts:
+  - month
+  - dayofweek
+  - is_weekend
+- type: boolean_flag
+  name: is_cold_user
+  column: user_orders_12m
+  operator: le
+  value: 1.0
+- type: boolean_flag
+  name: is_out_of_stock
+  column: item_stock_units
+  operator: lt
+  value: 1.0
+- type: boolean_flag
+  name: item_never_viewed
+  column: user_item_views_30d
+  operator: eq
+  value: 0.0
+- type: boolean_flag
+  name: is_high_margin
+  column: item_margin_pct
+  operator: gt
+  value: 40.0
+- type: ratio
+  name: reviews_per_view
+  numerator: item_reviews_count
+  denominator: item_views_7d
+  epsilon: 50.0
+- type: product
+  name: expected_margin_eur
+  columns:
+  - item_price_eur
+  - item_margin_pct
+- type: log1p
+  name: days_since_last_view_log
+  column: days_since_last_view
+- type: bin
+  name: item_price_bucket
+  column: item_price_eur
+  method: quantile
+  bins: 5
+- type: bin
+  name: item_popularity_bucket
+  column: item_views_7d
+  method: quantile
+  bins: 5
+- type: group_stat
+  name: median_price_by_category
+  group_by: item_category
+  value_column: item_price_eur
+  agg: median
+- type: group_stat
+  name: mean_rating_by_category
+  group_by: item_category
+  value_column: item_rating_avg
+  agg: mean
+- type: group_stat
+  name: affinity_by_channel
+  group_by: user_channel
+  value_column: user_category_affinity
+  agg: mean
+columns: {}
+validation:
+  raw: true
+  processed: true
+  inference: true
+  strict: true
+  lazy: false
