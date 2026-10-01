@@ -42,6 +42,7 @@ from src.features.build_features import (
 from src.models import build_model
 from src.pipelines.base import BasePipeline, PipelineResult
 from src.preprocessing.pipelines import PreprocessingPipeline
+from src.tracking import build_tracker
 from src.training.losses_metrics import metric_extra_from_config
 from src.training.trainer import Trainer, TrainingData
 from src.utils.io import write_json
@@ -117,6 +118,15 @@ class TrainPipeline(BasePipeline):
             + ", ".join(f"{key}={value:.5f}" for key, value in list(result.metrics.items())[:5])
         )
         result.messages.append(f"Preprocessing saved to {preprocessing_artifact}")
+        # Suivi d'expériences : no-op pour la plupart des stacks, run MLflow pour la stack `mlflow`.
+        # Il reçoit ce que le pipeline a déjà écrit sur disque, qui reste la source de vérité.
+        build_tracker(config_dict, self.paths).log_training(
+            config=config_dict,
+            metrics=result.metrics,
+            model=model,
+            artifacts=result.artifacts,
+            sample=matrices["X_train"] if isinstance(matrices["X_train"], pd.DataFrame) else None,
+        )
         logger.debug("Train pipeline configuration: {}", _compact(config_dict))
         return result
 
