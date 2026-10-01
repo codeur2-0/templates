@@ -1,5 +1,5 @@
 # ===============================================================================================
-# {{ spec.title }}
+# Prédiction d'attrition client (churn télécom) avec scikit-learn et suivi MLflow
 # ------------------------------------------------------------------------------------------------
 # Raccourcis de développement. `make help` liste les cibles disponibles.
 #
@@ -10,7 +10,7 @@
 
 PYTHON      ?= python
 PIP         ?= pip
-PROJECT     := {{ spec.project_slug }}
+PROJECT     := telecom-churn-mlflow
 MODE        ?= train
 OVERRIDES   ?=
 DATA_ARGS   ?=
@@ -67,10 +67,10 @@ evaluate: ## Évalue le modèle entraîné (rapports + figures + métriques)
 predict: ## Prédit sur un échantillon ou un fichier
 	$(PYTHON) scripts/predict.py $(PRED_ARGS)
 
-{% if stack.key == 'mlflow' %}mlflow-ui: ## Ouvre l'interface MLflow sur la base locale (http://127.0.0.1:5000)
+mlflow-ui: ## Ouvre l'interface MLflow sur la base locale (http://127.0.0.1:5000)
 	$(PYTHON) -m mlflow ui --backend-store-uri sqlite:///artifacts/mlruns/mlflow.db --host 127.0.0.1
 
-{% endif %}all: ## Enchaîne : données -> train -> évaluation -> prédiction
+all: ## Enchaîne : données -> train -> évaluation -> prédiction
 	$(PYTHON) -m src.main mode=all $(OVERRIDES)
 
 smoke: ## Exécution rapide de bout en bout (petit dataset, peu d'époques)

@@ -1,5 +1,5 @@
 # ==============================================================================================
-# {{ spec.project_slug }} — ignore rules
+# telecom-churn-mlflow — ignore rules
 # ==============================================================================================
 
 # --- Python -----------------------------------------------------------------------------------
@@ -42,9 +42,9 @@ artifacts/reports/*
 artifacts/figures/*
 artifacts/metrics/*
 !artifacts/**/.gitkeep
-{% if stack.key == 'mlflow' %}# Base MLflow locale (runs, modèles journalisés) : régénérée par `make train`.
+# Base MLflow locale (runs, modèles journalisés) : régénérée par `make train`.
 artifacts/mlruns/
-{% endif %}*.joblib
+*.joblib
 *.pkl
 *.pt
 *.pth

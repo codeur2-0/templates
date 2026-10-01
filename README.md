@@ -14,10 +14,10 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**28 projets** sur sept familles tabulaires, tous verts dans `tools/verify.py` (lint, formatage,
+**29 projets** sur sept familles tabulaires, tous verts dans `tools/verify.py` (lint, formatage,
 typage, tests, six notebooks exécutés, pipeline complet `data → train → evaluate → predict`).
 
-### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks
+### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks + MLflow
 
 | Projet | Stack | Modèle | ROC AUC (test) | PR AUC | Accuracy | F1 | Log loss |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -27,6 +27,7 @@ typage, tests, six notebooks exécutés, pipeline complet `data → train → ev
 | [`with-pytorch`](data-science/classification/with-pytorch) | PyTorch | `mlp` (4 161 paramètres) | **0,8727** | **0,7365** | 0,7937 | 0,6570 | 0,4388 |
 | [`with-keras`](data-science/classification/with-keras) | Keras (API fonctionnelle) | `mlp` (4 161 paramètres) | 0,8655 | 0,7282 | 0,8137 | **0,6711** | 0,4251 |
 | [`with-tensorflow`](data-science/classification/with-tensorflow) | TensorFlow (`GradientTape`) | `mlp` (4 161 paramètres) | 0,8709 | 0,7341 | 0,7863 | 0,6517 | 0,4515 |
+| [`with-mlflow`](data-science/classification/with-mlflow) | scikit-learn + **suivi MLflow** | `random_forest` (identique à `with-sklearn`) | 0,8654 | 0,7240 | 0,8175 | 0,6636 | 0,4190 |
 
 Chiffres mesurés sur le même jeu synthétique (4 000 clients, 15 colonnes, 25,5 % de churn),
 mêmes graines, mêmes 31 features après pré-traitement, mêmes définitions de métriques, split
@@ -40,6 +41,14 @@ bruit au regard de la variance d'un split. Le choix d'une stack se justifie donc
 l'**écosystème** (serving, GPU, compétences de l'équipe) et par l'**apprentissage**, pas par la
 performance brute. C'est exactement la conclusion que le dépôt veut rendre vérifiable plutôt que
 de l'asséner.
+
+`with-mlflow` reprend **le même modèle** que `with-sklearn` et obtient exactement les mêmes métriques :
+le projet isole ce qu'apporte le suivi d'expériences. Chaque `make train` ouvre un run MLflow local
+(base SQLite, aucun serveur) avec la configuration Hydra aplatie, les métriques du `Trainer`, les
+artefacts du pipeline et la forêt journalisée (`mlflow.sklearn`, signature d'entrée, dépendances
+épinglées) ; `make evaluate` ajoute les métriques de test au **même** run, et `make mlflow-ui` les
+compare. Aucun pipeline ne connaît MLflow : ils appellent `src/tracking`, un traceur neutre dans les
+autres projets.
 
 ### 1.2 `data-science/regression` — estimation de prix immobilier (AVM), six stacks
 
@@ -337,7 +346,7 @@ Règles non négociables, appliquées partout :
 
 ---
 
-## 4. Les six stacks, ce que chacune montre
+## 4. Les six stacks (et MLflow), ce que chacune montre
 
 Même contrat `BaseModel`, mêmes callbacks de projet, mêmes noms de métriques — seule
 l'implémentation change. C'est ce qui rend la comparaison possible.
@@ -350,6 +359,7 @@ l'implémentation change. C'est ce qui rend la comparaison possible.
 | **PyTorch** | Boucle d'époques écrite à la main : `DataLoader` semé, `forward`/`backward`/`step`, instantané et restauration du meilleur `state_dict` | checkpoint `model.pt` (poids + méta, rechargé en `weights_only=True`) |
 | **Keras** | API fonctionnelle : graphe déclaré puis `compile`/`fit`, callbacks natifs (`EarlyStopping(restore_best_weights)`, `ReduceLROnPlateau`, `TerminateOnNaN`) pontés vers les callbacks du projet, `class_weight` pour le déséquilibre | archive native `model.keras` + sidecar `model.config.json` |
 | **TensorFlow** | Niveau le plus bas : modèle **subclassé**, couches maison (`DenseBlock`, `ResidualBlock`), pipeline `tf.data`, `GradientTape` + `tf.function`, pertes sur logits, écrêtage du gradient, pondération d'échantillons | poids `model.weights.h5` + sidecar `model.config.json` |
+| **MLflow** | Stack d'**outillage** qui hérite de scikit-learn (`extends: sklearn` dans `stacks.yaml`) : elle ne surcharge que `src/tracking/tracker.py`. Run par entraînement, test rattaché au même run, modèle rechargeable par `mlflow.pyfunc` | `model.joblib` + modèle MLflow (skops) dans `artifacts/mlruns/` |
 
 Pièges documentés dans le code (et résolus) que ces stacks partagent :
 
@@ -400,6 +410,11 @@ Pièges documentés dans le code (et résolus) que ces stacks partagent :
   déclaré tête binaire à sigmoïde, mais la perte retombait sur la MSE et la sortie sur le logit
   brut, sans `predict_proba` (tests et notebooks 05/06 en échec). `ranking` partage désormais la
   tête binaire (`BCEWithLogitsLoss`, sigmoïde, probabilités).
+- **MLflow 3 sérialise les modèles scikit-learn avec skops, qui refuse les types inconnus** : une
+  forêt aléatoire échoue à la journalisation sur `sklearn.tree._tree.Tree`. Passer tous les types
+  signalés reviendrait à désactiver la protection ; le traceur ne déclare de confiance que les
+  types du paquet `sklearn`. MLflow déduit aussi les dépendances du modèle des modules chargés
+  (il y ajoutait `torch`, présent dans le venv) : la liste est épinglée explicitement.
 
 ---
 
@@ -446,9 +461,9 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **28/28 projets conformes** (ruff check, ruff format, mypy strict,
-4 730 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les tests
-de leur couche tâche —, 168 notebooks exécutés, `python -m src.main mode=all` de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
+État au dernier passage : **29/29 projets conformes** (ruff check, ruff format, mypy strict,
+4 902 tests au total — 165 par projet, 187 pour les projets multi-classes et 172 pour le projet MLflow qui ajoutent les tests
+de leur couche tâche ou de suivi —, 174 notebooks exécutés, `python -m src.main mode=all` de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
 six notebooks et pipeline complet — avant d'être considéré comme livré.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
@@ -475,11 +490,11 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 **18 stacks**. Les couches `base/`, `modality/tabular/`,
 `task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking}/`,
 `family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation}/`
-et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/` sont écrites et vérifiées : les
+et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,mlflow}/` sont écrites et vérifiées : les
 **sept familles tabulaires** sont livrées. Ce qui reste, par ordre de valeur pédagogique :
 
-1. **Stacks tabulaires déclarées, pas encore livrées** — `binary_classification` avec MLflow,
-   `recommendation` en TensorFlow et à deux tours. `clustering` en PyTorch / TensorFlow est
+1. **Stacks tabulaires déclarées, pas encore livrées** — `recommendation` en TensorFlow et à deux
+   tours. `clustering` en PyTorch / TensorFlow est
    **écarté après mesure** : sur les 36 features standardisées du jeu clients, un k-means dans
    l'espace latent d'un auto-encodeur ne bat le k-means direct sur aucune métrique (silhouette
    0,12–0,20 contre 0,206, ARI latent 0,22–0,39 contre 0,418) et sa stabilité entre graines
@@ -494,7 +509,7 @@ et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/` sont écrites et
    (spaCy, Transformers). Chacune demande une nouvelle couche `modality/` (loaders,
    pré-traitement, pipelines, tests) en plus des couches `family/` et `task/`.
 3. **Stacks déjà déclarées, non implémentées** — `spacy`, `transformers`, `langchain`, `duckdb`,
-   `pandas`, `prefect`, `mlflow`, `fastapi`, `scipy`, `pandera` : l'entrée de registre existe,
+   `pandas`, `prefect`, `fastapi`, `scipy`, `pandera` : l'entrée de registre existe,
    le dossier `templates/stack/<clé>/src/models/` reste à écrire.
 
 Chaque ajout suit la même procédure : entrée de registre -> templates de stack ou de famille ->

@@ -1,43 +1,44 @@
-{#- README principal du projet : les 19 sections imposées par le standard du dépôt. -#}
-# {{ spec.title }}
+# Prédiction d'attrition client (churn télécom) avec scikit-learn et suivi MLflow
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)
-![{{ stack.display_name }}](https://img.shields.io/badge/{{ stack.display_name | replace("-", "--") | replace(" ", "%20") }}-{{ stack.category }}-orange)
+![MLflow](https://img.shields.io/badge/MLflow-mlops-orange)
 ![Hydra](https://img.shields.io/badge/config-Hydra-89b482)
 ![Pandera](https://img.shields.io/badge/validation-Pandera-16a34a)
 ![pytest](https://img.shields.io/badge/tests-pytest-2ea44f)
 ![Licence](https://img.shields.io/badge/license-MIT-lightgrey)
 
-> **Domaine** : `{{ spec.domain }}` · **Problématique** : `{{ spec.problem }}` · **Stack** : `{{ stack.display_name }}`
-> **Emplacement** : `{{ spec.relative_path }}/`
+> **Domaine** : `data-science` · **Problématique** : `classification` · **Stack** : `MLflow`
+> **Emplacement** : `data-science/classification/with-mlflow/`
 > **Temps de lecture** : ~15 min · **Temps d'exécution complet** : < 5 min sur un laptop
 
 ---
 
 ## 1. À propos / Objectifs
 
-{{ wrap(spec.summary, 100) }}
+Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature engineering
+-> forêt aléatoire -> évaluation et analyse d'erreurs) pour un cas de churn télécom, dont chaque
+entraînement est enregistré comme un run MLflow local : configuration aplatie, métriques
+d'entraînement, de validation et de test, artefacts du pipeline et modèle journalisé avec sa
+signature, rechargeable par `mlflow.pyfunc`.
 
-{{ wrap(business.context, 100) }}
+L'opérateur perd chaque mois une part significative de ses abonnés au profit de concurrents.
+Acquérir un client coûte 5 à 7 fois plus cher que d'en conserver un, et les campagnes de rétention
+actuelles sont déclenchées au feeling, trop tard et sur trop de monde (coût inutile, fatigue
+commerciale).
 
 **Ce que cet exemple démontre**
 
-{% if learning_objectives %}
-{% for objective in learning_objectives %}
-{{ loop.index }}. {{ objective }}
-{% endfor %}
-{% else %}
-1. Structurer un projet {{ spec.problem }} prêt pour la production (OOP, typage, tests, configuration déclarative).
-2. Valider les données avec des contrats exécutables **Pandera** à chaque étape critique.
-3. Configurer l'intégralité du projet avec **Hydra** (aucune valeur codée en dur).
-4. Rendre le résultat **reproductible** : graine fixée, artefacts horodatés, rapports générés.
-{% endif %}
+1. Composer un pipeline scikit-learn propre : ColumnTransformer, transformers custom, fit sur le train uniquement.
+2. Rendre chaque entraînement traçable : un run MLflow par `make train`, avec la configuration aplatie, la graine et les métriques.
+3. Rattacher l'évaluation hors échantillon au run d'entraînement, pour lire train, validation et test côte à côte.
+4. Journaliser un modèle avec sa signature d'entrée et vérifier qu'il se recharge à l'identique par `mlflow.pyfunc`.
+5. Comprendre pourquoi un journal explicite vaut mieux qu'un autolog : on enregistre ce que le pipeline décide, pas ce que l'outil devine.
+6. Isoler l'outillage de la modélisation : le suivi passe par une seule interface (`src/tracking`), aucun pipeline ne connaît MLflow.
 
-**Pourquoi {{ stack.display_name }} ici ?**
+**Pourquoi MLflow ici ?**
 
-{% for note in stack.notes %}
-- {{ note }}
-{% endfor %}
+- Suivi local (base SQLite `mlruns/mlflow.db`, ignorée par git) : aucun serveur, aucune donnée hors du poste.
+- Log explicite des paramètres, métriques, artefacts et du modèle (`mlflow.sklearn`, signature d'entrée) : pas d'autolog, pour que chaque valeur enregistrée soit lisible dans le code.
 
 ---
 
@@ -45,7 +46,7 @@
 
 | Rôle | Outil | Version minimale | Pourquoi |
 | --- | --- | --- | --- |
-| Framework ML | **{{ stack.display_name }}** | {{ stack.dependencies | last if stack.dependencies else "-" }} | {{ stack.category }} |
+| Framework ML | **MLflow** | joblib>=1.3 | mlops |
 | Configuration | **Hydra** (`hydra-core`) | 1.3 | Composition YAML, overrides CLI, multirun |
 | Validation des données | **Pandera** | 0.20 | Contrats de données exécutables (`DataFrameModel`) |
 | Typage de la config | **Pydantic** | 2.5 | Échec immédiat sur une configuration invalide |
@@ -62,32 +63,38 @@ Dépendances exactes : [`requirements.txt`](requirements.txt) et [`pyproject.tom
 
 ## 3. Cas d'usage
 
-{{ wrap(business.context, 100) }}
+L'opérateur perd chaque mois une part significative de ses abonnés au profit de concurrents.
+Acquérir un client coûte 5 à 7 fois plus cher que d'en conserver un, et les campagnes de rétention
+actuelles sont déclenchées au feeling, trop tard et sur trop de monde (coût inutile, fatigue
+commerciale).
 
 | | |
 | --- | --- |
-| **Qui** (persona / consommateur) | {{ business.persona }} |
-| **Problème** | {{ business.problem }} |
-| **Entrées** | {{ business.inputs }} |
-| **Sorties** | {{ business.outputs }} |
-| **Valeur métier** | {{ business.value }} |
-| **Cadence** | {{ business.cadence }} |
+| **Qui** (persona / consommateur) | Équipe Customer Success / Marketing d'un opérateur télécom (abonnement B2C), avec un data scientist qui industrialise le modèle et un CRM qui consomme les scores. |
+| **Problème** | Identifier, avant la résiliation, les abonnés les plus susceptibles de partir dans les 30 prochains jours, afin de cibler une action de rétention (offre, geste commercial, appel sortant) sur une population réduite et pertinente. |
+| **Entrées** | Fiche abonné : ancienneté, type de contrat, service internet, moyen de paiement, région, charges mensuelles et cumulées, tickets support des 6 derniers mois, consommation data, nombre de services souscrits, promotion active, score de satisfaction déclaré. |
+| **Sorties** | Probabilité de churn par abonné, décision binaire selon un seuil piloté par le métier, segment de risque (faible / modéré / élevé / critique) et principaux facteurs explicatifs. |
+| **Valeur métier** | Réduction du taux d'attrition, baisse du coût des campagnes de rétention (ciblage), meilleure allocation des appels sortants vers les clients à fort enjeu. |
+| **Cadence** | Score recalculé quotidiennement (batch nocturne) et exposé au CRM. |
 
-**Objectif de modélisation** — {{ wrap(business.problem, 92) }}
+**Objectif de modélisation** — Identifier, avant la résiliation, les abonnés les plus susceptibles de partir dans les 30
+prochains jours, afin de cibler une action de rétention (offre, geste commercial, appel
+sortant) sur une population réduite et pertinente.
 
 **Critères de réussite**
 
-{% for criterion in business.success_criteria %}
-- [{{ "x" if ("Mesuré :" in criterion or "Mesurée :" in criterion) else " " }}] {{ criterion }}
-{% endfor %}
-{% if business.constraints %}
+- [ ] ROC AUC ≥ 0.75 sur le split de test hors échantillon (le générateur injecte un bruit irréductible).
+- [ ] Rappel de la classe « churn » ≥ 0.55 au seuil retenu : on préfère surveiller trop que rater un départ.
+- [ ] Précision ≥ 0.50 sur la population alertée pour que le coût de rétention reste rentable.
+- [ ] Probabilités exploitables : écart de calibration moyen < 0.10 (sinon recalibrage).
+- [ ] Temps d'inférence < 50 ms pour un batch de 1 000 abonnés (contrainte CRM).
+- [ ] Reproductibilité : deux exécutions avec la même seed produisent exactement les mêmes métriques.
 
 **Contraintes**
 
-{% for constraint in business.constraints %}
-- {{ constraint }}
-{% endfor %}
-{% endif %}
+- Aucune donnée personnelle sensible : le dataset de ce dépôt est synthétique.
+- Le modèle doit tourner sur CPU, sans dépendance à un service externe.
+- Toute décision automatisée doit rester explicable (segments + facteurs clés).
 
 ---
 
@@ -100,22 +107,34 @@ métier** (corrélations réalistes, bruit, valeurs manquantes, outliers légiti
 
 | Propriété | Valeur |
 | --- | --- |
-| Jeu de données | `{{ spec.data.dataset_name }}` |
-| Volume par défaut | {{ "{:,}".format(spec.data.n_samples) | replace(",", " ") }} lignes |
-| Formats écrits | {{ spec.data.formats | join(", ") }} |
-| Emplacement | `data/raw/{{ spec.data.dataset_name }}.parquet` (et `.csv`) |
-| Cible | {{ ("`" ~ spec.data.target ~ "`") if spec.data.target else "*aucune* (apprentissage non supervisé)" }} |
-| Identifiant | {{ ("`" ~ spec.data.id_column ~ "`") if spec.data.id_column else "-" }} |
-{% if spec.data.time_column %}| Colonne temporelle | `{{ spec.data.time_column }}` |
-{% endif %}{% if spec.data.positive_rate is not none %}| Taux de classe positive | ~{{ "%.0f" | format(spec.data.positive_rate * 100) }} % |
-{% endif %}| Graine | `{{ spec.data.seed }}` (reproductible) |
+| Jeu de données | `telecom_churn` |
+| Volume par défaut | 4 000 lignes |
+| Formats écrits | parquet, csv |
+| Emplacement | `data/raw/telecom_churn.parquet` (et `.csv`) |
+| Cible | `churned` |
+| Identifiant | `customer_id` |
+| Taux de classe positive | ~26 % |
+| Graine | `42` (reproductible) |
 
 **Schéma**
 
 | Colonne | Type | Rôle | Signification métier |
 | --- | --- | --- | --- |
-{% for column in spec.data.columns %}| `{{ column.name }}` | {{ column.dtype }} | {{ column.role }} | {{ column.description }}{% if column.unit %} ({{ column.unit }}){% endif %} |
-{% endfor %}
+| `customer_id` | str | identifier | Identifiant unique de l'abonné |
+| `signup_date` | datetime | timestamp | Date de souscription de l'abonnement |
+| `tenure_months` | int | feature | Ancienneté de l'abonné (mois) |
+| `contract_type` | category | feature | Type de contrat souscrit |
+| `internet_service` | category | feature | Service internet associé à l'abonnement |
+| `payment_method` | category | feature | Moyen de paiement utilisé |
+| `region` | category | feature | Région commerciale de rattachement |
+| `monthly_charges` | float | feature | Montant mensuel facturé (EUR) |
+| `total_charges` | float | feature | Cumul facturé depuis la souscription (EUR) |
+| `support_tickets_6m` | int | feature | Nombre de tickets support ouverts sur 6 mois (tickets) |
+| `avg_monthly_data_gb` | float | feature | Consommation data mensuelle moyenne (Go) |
+| `num_products` | int | feature | Nombre de services/produits souscrits (bundle) (produits) |
+| `has_promotion` | bool | feature | Bénéficie d'une promotion active (1 = oui) |
+| `satisfaction_score` | float | feature | Score de satisfaction déclaré (enquête CSAT) (/10) |
+| `churned` | int | target | Attrition observée dans les 30 jours (1 = parti) |
 
 Détail complet (distributions attendues, remarques) : [`data/README.md`](data/README.md).
 
@@ -124,7 +143,7 @@ Détail complet (distributions attendues, remarques) : [`data/README.md`](data/R
 ## 5. Arborescence
 
 ```text
-{{ spec.relative_path }}/
+data-science/classification/with-mlflow/
 ├── README.md                    # ← ce fichier
 ├── pyproject.toml               # métadonnées, dépendances, ruff / mypy / pytest
 ├── requirements.txt             # dépendances runtime
@@ -151,7 +170,7 @@ Détail complet (distributions attendues, remarques) : [`data/README.md`](data/R
 │   ├── data/                    # loaders, schémas Pandera, générateur synthétique
 │   ├── preprocessing/           # transformers custom + pipeline (fit/transform/save)
 │   ├── features/                # feature engineering piloté par la configuration
-│   ├── models/                  # BaseModel (ABC) + implémentation {{ stack.display_name }}
+│   ├── models/                  # BaseModel (ABC) + implémentation MLflow
 │   ├── training/                # Trainer, callbacks, métriques
 │   ├── evaluation/              # Evaluator + génération de rapports
 │   ├── inference/               # Predictor (batch + enregistrement unitaire)
@@ -198,7 +217,7 @@ Détail complet (distributions attendues, remarques) : [`data/README.md`](data/R
 | Principe | Traduction concrète dans ce projet |
 | --- | --- |
 | **SRP** | Un module = une responsabilité : `data` charge, `preprocessing` transforme, `training` entraîne, `evaluation` mesure, `inference` prédit. |
-| **DIP** | Tout dépend de l'abstraction `BaseModel` ({{ '`src/models/base.py`' }}), jamais d'un framework précis. |
+| **DIP** | Tout dépend de l'abstraction `BaseModel` (`src/models/base.py`), jamais d'un framework précis. |
 | **OCP** | Ajouter un algorithme = ajouter une classe, sans modifier le trainer ni l'évaluateur. |
 | **Config as code** | Aucune constante métier dans le code : tout vient de `conf/` (Hydra) et est validé par Pydantic. |
 | **Data contracts** | Chaque DataFrame traverse un schéma Pandera avant d'être consommé. |
@@ -217,8 +236,8 @@ AppConfig (Pydantic)                 ← conf/*.yaml validé et typé
    ├── FeatureBuilder                ← features dérivées déclaratives (ratio, bin, interaction…)
    ├── PreprocessingPipeline         ← ColumnTransformer : imputation, clipping, scaling, encodage
    │
-   ├── {{ model_class }}(BaseModel)   ← implémentation {{ stack.display_name }}
-   │        fit / predict{% if stack.supports_proba %} / predict_proba{% endif %} / save / load
+   ├── SklearnModel(BaseModel)   ← implémentation MLflow
+   │        fit / predict / predict_proba / save / load
    ├── Trainer                       ← split, callbacks, métriques, artefacts
    ├── Evaluator                     ← métriques + matrice/rapport d'erreurs
    ├── ReportBuilder                 ← Markdown + figures dans artifacts/
@@ -231,7 +250,7 @@ AppConfig (Pydantic)                 ← conf/*.yaml validé et typé
 mode=generate-data → SyntheticDataGenerator → data/raw/*.parquet
 mode=train         → RawDataLoader (validation Pandera)
                      → FeatureBuilder → PreprocessingPipeline.fit_transform
-                     → {{ model_class }}.fit (callbacks)
+                     → SklearnModel.fit (callbacks)
                      → Evaluator.evaluate → ReportBuilder → artifacts/{models,metrics,reports,figures}
 mode=evaluate      → chargement des artefacts → nouvelle évaluation + rapports
 mode=predict       → InferenceDataSchema → Predictor.predict → artifacts/reports/predictions.csv
@@ -243,9 +262,13 @@ Le **même cas d'usage** est implémenté avec d'autres frameworks dans les doss
 La structure, les contrats de données et les métriques étant identiques, la comparaison est
 directe (qualité, temps d'entraînement, lisibilité du code) :
 
-{% for sibling_stack in family.allowed_stacks %}
-- `../../{{ sibling_stack if sibling_stack.startswith("with-") else "with-" ~ sibling_stack }}/` — {{ sibling_stack }}
-{% endfor %}
+- `../../with-sklearn/` — sklearn
+- `../../with-xgboost/` — xgboost
+- `../../with-lightgbm/` — lightgbm
+- `../../with-pytorch/` — pytorch
+- `../../with-tensorflow/` — tensorflow
+- `../../with-keras/` — keras
+- `../../with-mlflow/` — mlflow
 
 ---
 
@@ -263,7 +286,7 @@ directe (qualité, temps d'entraînement, lisibilité du code) :
 **Option A — venv (recommandé)**
 
 ```bash
-cd {{ spec.relative_path }}
+cd data-science/classification/with-mlflow
 python -m venv .venv
 source .venv/bin/activate        # Windows : .venv\Scripts\activate
 pip install --upgrade pip
@@ -273,7 +296,7 @@ pip install -r requirements-dev.txt   # runtime + tests + lint + notebooks
 **Option B — uv (plus rapide)**
 
 ```bash
-cd {{ spec.relative_path }}
+cd data-science/classification/with-mlflow
 uv venv && source .venv/bin/activate
 uv pip install -r requirements-dev.txt
 ```
@@ -281,7 +304,7 @@ uv pip install -r requirements-dev.txt
 **Option C — installation éditable du projet**
 
 ```bash
-cd {{ spec.relative_path }}
+cd data-science/classification/with-mlflow
 pip install -e ".[dev]"
 ```
 
@@ -310,7 +333,7 @@ python scripts/generate_data.py seed=7                        # autre tirage
 python scripts/generate_data.py data.formats=[parquet]        # Parquet uniquement
 ```
 
-Résultat : `data/raw/{{ spec.data.dataset_name }}.parquet` (+ `.csv` pour la lecture humaine)
+Résultat : `data/raw/telecom_churn.parquet` (+ `.csv` pour la lecture humaine)
 et un journal de génération détaillé (lignes, colonnes, taux de manquants, distribution de la cible).
 
 ---
@@ -328,9 +351,7 @@ python -m src.main mode=train
 
 # Overrides Hydra (aucun fichier à modifier)
 python -m src.main mode=train ++train.epochs=10 data.n_samples=2000 log_level=DEBUG
-{% if spec.model.params %}
-python -m src.main mode=train model.params.{{ (spec.model.params.keys() | list)[0] }}={{ (spec.model.params.values() | list)[0] }}
-{% endif %}
+python -m src.main mode=train model.params.n_estimators=300
 
 # Afficher la configuration composée sans rien exécuter
 python -m src.main --cfg job
@@ -346,7 +367,7 @@ python scripts/generate_data.py            # 1. données
 python scripts/train.py                    # 2. entraînement + évaluation + artefacts
 python scripts/evaluate.py                 # 3. rapports et figures
 python scripts/predict.py                  # 4. prédictions sur un échantillon
-python scripts/predict.py predict.input=data/raw/{{ spec.data.dataset_name }}.csv predict.n_samples=10
+python scripts/predict.py predict.input=data/raw/telecom_churn.csv predict.n_samples=10
 ```
 
 ### (c) Depuis un notebook (ou du code Python)
@@ -366,7 +387,7 @@ Ou directement avec les classes (sans Hydra) :
 
 ```python
 from src.data.generators import SyntheticDataGenerator
-from src.models.model import {{ model_class }}
+from src.models.model import SklearnModel
 from src.pipelines import TrainPipeline
 from src.schemas.config import validate_config
 
@@ -381,7 +402,6 @@ make all         # données → train → éval → prédiction
 make smoke       # exécution rapide (petit dataset)
 make verify      # lint + mypy + pytest + smoke
 ```
-{% if stack.key == 'mlflow' %}
 
 ### Suivi des expériences avec MLflow
 
@@ -415,7 +435,6 @@ en production. Le modèle est sérialisé au format **skops**, qui refuse de rec
 (contrairement à pickle, qui exécute ce que contient le fichier) ; seuls les types internes de
 scikit-learn sont déclarés de confiance. Pointer un serveur partagé est un changement de
 configuration (`tracking.tracking_uri`), pas de code.
-{% endif %}
 
 ---
 
@@ -427,12 +446,12 @@ Toute la configuration vit dans `conf/` et est composée par Hydra :
 | --- | --- | --- |
 | `conf/config.yaml` | racine : `mode`, `seed`, `paths`, `metrics`, `project` | `mode=evaluate`, `seed=7`, `log_level=DEBUG` |
 | `conf/data/default.yaml` | dataset, cible, colonnes ignorées, contrats de validation | `data.n_samples=5000`, `data.validation.strict=false` |
-| `conf/model/default.yaml` | algorithme et hyperparamètres | `model.params.{{ (spec.model.params.keys() | list)[0] if spec.model.params else "n_estimators" }}=…` |
+| `conf/model/default.yaml` | algorithme et hyperparamètres | `model.params.n_estimators=…` |
 | `conf/train/default.yaml` | split, epochs, callbacks, noms d'artefacts | `++train.epochs=20`, `train.split.test_size=0.25` |
 | `conf/preprocessing/default.yaml` | imputation, scaling, encodage, features dérivées | `preprocessing.numeric.scaler=robust`, `preprocessing.categorical.encoder=ordinal` |
 | `conf/hydra/local.yaml` | répertoires de sortie Hydra (`outputs/`, `multirun/`) | `hydra.run.dir=outputs/debug` |
-{% if extras.get('root_conf') %}{% for block_name, block in extras['root_conf'].items() %}{% set keys = block | list %}{% set ns = namespace(scalars=[]) %}{% for key in keys %}{% if block[key] is string or block[key] is number %}{% set ns.scalars = ns.scalars + [key] %}{% endif %}{% endfor %}{% set shown = ns.scalars[:2] if ns.scalars else keys[:1] %}| `conf/config.yaml` -> bloc `{{ block_name }}` | Réglages métier de la famille, au même niveau que `mode` et `seed` : {{ keys | length }} clés ({{ keys[:7] | join(', ') }}{% if keys | length > 7 %}, …{% endif %}), chacune commentée dans le fichier — c'est là qu'on change le métier sans toucher au code. | {% for key in shown %}`{{ block_name }}.{{ key }}={{ block[key] }}`{% if not loop.last %}, {% endif %}{% endfor %} |
-{% endfor %}{% endif %}
+| `conf/config.yaml` -> bloc `decision` | Réglages métier de la famille, au même niveau que `mode` et `seed` : 3 clés (threshold, retention_cost_eur, customer_lifetime_value_eur), chacune commentée dans le fichier — c'est là qu'on change le métier sans toucher au code. | `decision.threshold=0.5`, `decision.retention_cost_eur=25.0` |
+| `conf/config.yaml` -> bloc `tracking` | Réglages métier de la famille, au même niveau que `mode` et `seed` : 3 clés (tracking_uri, experiment_name, log_model), chacune commentée dans le fichier — c'est là qu'on change le métier sans toucher au code. | `tracking.log_model=True` |
 
 Règles appliquées :
 
@@ -450,11 +469,11 @@ Après `make all`, le dépôt local contient :
 
 | Chemin | Contenu |
 | --- | --- |
-| `data/raw/{{ spec.data.dataset_name }}.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | jeu de données synthétique, {{ "{:,}".format(spec.data.n_samples) | replace(",", " ") }} lignes |
+| `data/raw/telecom_churn.parquet` (+ `csv`) | jeu de données synthétique, 4 000 lignes |
 | `data/raw/generation_metadata.json` | recette de génération : graine, options, empreinte du jeu, fichiers écrits |
 | `data/processed/split_{train,val,test}.parquet` | splits avant transformation (l'évaluation et l'inférence rejouent exactement le même découpage) |
 | `data/processed/features_{X_train,X_val,X_test}.parquet` | matrices prêtes pour le modèle |
-| `artifacts/models/{{ train.artifacts.model_file if train and train.artifacts and train.artifacts.model_file else 'model.joblib' }}` | modèle entraîné |
+| `artifacts/models/model.joblib` | modèle entraîné |
 | `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
 | `artifacts/models/feature_builder.joblib` | construction des features dérivées, ajustée sur le train uniquement |
 | `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
@@ -462,43 +481,13 @@ Après `make all`, le dépôt local contient :
 | `artifacts/metrics/training_metrics.json` | métriques d'entraînement et de validation |
 | `artifacts/metrics/evaluation_metrics.json` | métriques sur le split de test + verdict des seuils |
 | `artifacts/reports/evaluation_report.md` | rapport lisible (métriques, analyse d'erreurs, recommandations) |
-{% if spec.metrics.task == "forecasting" %}| `artifacts/reports/per_horizon.csv` | MAPE / MAE / biais / couverture ventilés par horizon |
-| `artifacts/reports/segments.csv` | ventilation par régime extrême, week-end, jour férié, vacances |
-| `artifacts/reports/baselines.csv` | références triviales (persistance, naif saisonnier, moyennes glissantes) |
-| `artifacts/reports/intervals.csv` | bornes, largeur relative et méthode de calibration par prévision |
-| `artifacts/reports/backtest.csv` | replis chronologiques et dispersion de la performance |
-| `artifacts/reports/errors.csv` | pires erreurs, avec leurs références naïves |
-{% elif spec.metrics.task == "binary" %}| `artifacts/reports/top_errors.csv` | exemples les plus mal classés, avec leurs probabilités et les features en cause |
-{% elif spec.metrics.task == "multiclass" %}| `artifacts/reports/per_class.csv` | précision, rappel, F1, AUC un-contre-tous et équipe, pour chaque classe |
-| `artifacts/reports/decision_policies.csv` | coût et profil d'erreur de l'argmax, de la décision à coût minimal, de la revue experte et de la règle actuelle |
-| `artifacts/reports/abstention_curve.csv` | couverture, exactitude automatisée et coût selon le seuil de revue experte |
-| `artifacts/reports/top_errors.csv` | diagnostics erronés les plus confiants, avec leurs probabilités et leur contexte |
-{% elif spec.metrics.task == "anomaly" %}| `artifacts/reports/anomaly_errors.csv` | anomalies les mieux et les moins bien détectées |
-| `artifacts/reports/budget_tradeoff.csv` | précision / rappel en fonction du quota d'alertes |
-| `artifacts/reports/scheme_coverage.csv` | couverture par schéma de fraude |
-{% elif spec.metrics.task == "clustering" %}| `artifacts/reports/k_selection.csv` | critères de choix du nombre de clusters (silhouette, Calinski-Harabasz, Davies-Bouldin, inertie, stabilité) |
-| `artifacts/reports/segment_profiles.csv` | profil métier de chaque cluster |
-| `artifacts/reports/borderline_customers.csv` | individus les moins nettement rattachés à leur cluster |
-{% elif spec.metrics.task == "regression" %}| `artifacts/reports/top_errors.csv` | résidus les plus élevés, avec leurs features |
-| `artifacts/reports/error_by_segment.csv` | erreur ventilée par segment |
-{% endif %}| `artifacts/reports/predictions.csv` | prédictions sur l'échantillon de démonstration |
-| `artifacts/figures/*.png` | {{ "matrice de confusion normalisée, qualité par classe, références, ROC un-contre-tous, fiabilité, revue experte, coût des politiques de décision" if spec.metrics.task == "multiclass" else ("matrice de confusion, courbes ROC/PR, calibration" if spec.metrics.task == "binary" else ("résidus, prédit vs réel, importance des features" if spec.metrics.task == "regression" else ("prévision vs réel, erreur par horizon et par régime, couverture d'intervalle, diagnostics de résidus, biais mensuel, stabilité du backtest" if spec.metrics.task == "forecasting" else ("score par transaction, trade-off budget, couverture par schéma" if spec.metrics.task == "anomaly" else ("silhouette, projection ACP, profils de clusters" if spec.metrics.task == "clustering" else "figures spécifiques à la tâche"))))) }} |
+| `artifacts/reports/top_errors.csv` | exemples les plus mal classés, avec leurs probabilités et les features en cause |
+| `artifacts/reports/predictions.csv` | prédictions sur l'échantillon de démonstration |
+| `artifacts/figures/*.png` | matrice de confusion, courbes ROC/PR, calibration |
 | `outputs/<date>/<heure>/` | configuration composée + logs Hydra |
 
-Métrique principale : **`{{ spec.metrics.primary }}`**{% if spec.metrics.min_primary is not none %} (sens `{{ spec.metrics.direction }}`, seuil de smoke test : {{ "≤" if spec.metrics.direction == "minimize" else "≥" }} {{ spec.metrics.min_primary }}){% endif %}.
-Métriques secondaires : {{ spec.metrics.secondary | join(", ") }}.
-{% if business.measured_results %}
-
-Résultats de l'exécution de référence (`make all`, graine {{ spec.data.seed }}) :
-
-| Indicateur | Valeur mesurée |
-| --- | --- |
-{% for result in business.measured_results %}| {{ result.label }} | **{{ result.value }}** |
-{% endfor %}
-
-Ces valeurs sont reproductibles à l'identique ; elles proviennent du split de test, jamais
-du split d'entraînement, et le détail complet est dans `artifacts/reports/evaluation_report.md`.
-{% endif %}
+Métrique principale : **`roc_auc`** (sens `maximize`, seuil de smoke test : ≥ 0.7).
+Métriques secondaires : pr_auc, accuracy, balanced_accuracy, precision, recall, f1, log_loss.
 
 ---
 
@@ -507,45 +496,15 @@ du split d'entraînement, et le détail complet est dans `artifacts/reports/eval
 Tous les notebooks sont **exécutables de bout en bout** (`make notebooks`) et documentés
 cellule par cellule, comme un support de formation pour juniors.
 
-{% set lesson_04 = {
-    "supervised": "Comparaison baseline + modèles candidats en validation croisée, table de métriques, choix argumenté du modèle.",
-    "regression": "Baseline d'abord — sans elle aucune performance n'est interprétable — puis comparaison des algorithmes de la stack, distinction sous-apprentissage / sur-apprentissage par la courbe d'apprentissage, et lecture de l'importance des features.",
-    "clustering": "Choix du nombre de groupes par triangulation (silhouette, Davies-Bouldin, coude d'inertie, taille minimale), comparaison des algorithmes **à k fixé** — la comparaison n'a de sens qu'à structure égale — et stabilité des affectations entre graines.",
-    "anomaly": "Plancher aléatoire (une PR AUC égale à la prévalence) et règles métier existantes comme références à battre, comparaison des détecteurs **à données et budget égaux**, et " ~ ("effet de la contamination : elle déplace le seuil sans changer le classement, d'où le pilotage au budget." if (extras.get('notebook_anomaly') or {}).get('contamination_param', 'contamination') else "stabilité du classement entre graines, puis capacité de l'auto-encodeur : un goulot trop large apprend aussi à reconstruire la fraude."),
-    "multiclass": "Plancher (classe majoritaire), règle métier actuelle et plafond oracle installés **avant** toute comparaison, algorithmes comparés sur le macro-F1 **et** la calibration, apport chiffré des features physiques, effet de la pondération de classes sur la décision à coût minimal, grille de réglage et dispersion entre graines.",
-    "forecasting": "Plancher naïf mesuré **sur le test** avant tout modèle, comparaison des familles d'algorithmes à protocole identique, thermo-sensibilité apprise lue en MW par °C comme contrôle de cohérence métier, arbitrage modèle unique contre modèle par horizon, grille de réglage et sonde de fuite temporelle.",
-} %}
-{% set lesson_05 = {
-    "supervised": "Entraînement piloté par **objets** (`Trainer`, callbacks) plutôt que par un script monolithique, lecture d'un `TrainingOutcome` (métriques, durée, historique, artefacts), stabilité mesurée sur plusieurs graines avant de conclure, et garde-fou de qualité déclaré en configuration.",
-    "forecasting": "Entraînement avec l'objet de production dans un bac à sable — les artefacts du pipeline ne sont pas touchés —, mesure de l'**optimisme** d'une validation croisée aléatoire face à des replis chronologiques, arbitrage de la perte d'entraînement sur quatre critères plutôt qu'un, et pilotage de l'écart train/validation par la complexité des arbres.",
-} %}
-{% set lesson_06 = {
-    "supervised": "Matrice de confusion, rapport par classe, exemples mal prédits, hypothèses sur les causes et recommandations concrètes.",
-    "regression": "Métriques globales, résidus et couverture de fourchette, détection d'un **biais segmenté** (le modèle se trompe-t-il toujours dans le même sens ?), pires erreurs et leur cause probable, puis recommandations appuyées sur les chiffres observés.",
-    "clustering": "Critères internes, tailles de groupes et confiance des affectations, profilage de chaque segment **en unités brutes** (euros, jours, commandes), validité externe contre un comportement observé après coup, affectations fragiles et groupes dégénérés.",
-    "multiclass": "Verdict contractuel de l'évaluateur de production, position du modèle entre la règle actuelle et le plafond, confusions lues comme des causes physiques, **argmax contre décision à coût minimal**, choix du seuil de revue experte sur la courbe couverture / coût, calibration, plafond structurel d'une classe sans signal et plan d'action.",
-    "anomaly": "Évaluation hors échantillon contre le plancher aléatoire, traduction du score en décision de capacité (volume d'alertes -> rappel / précision / lift), couverture **par mode opératoire** — un bon score global peut masquer un schéma non détecté —, puis dissection des fraudes manquées et des fausses alertes.",
-    "forecasting": "Évaluation complète avec l'objet de production (intervalles et backtest compris), ventilation de l'erreur **par horizon, par régime et par mois** — trois lectures qui appellent trois correctifs différents —, lecture des pires journées une par une, autocorrélation des résidus, recalibrage des intervalles et recommandations opérationnelles.",
-} %}
-{% set task_key = spec.metrics.task %}
-{% set l04 = lesson_04[task_key] if task_key in lesson_04 else lesson_04["supervised"] %}
-{% set l05 = lesson_05[task_key] if task_key in lesson_05 else lesson_05["supervised"] %}
-{% set l06 = lesson_06[task_key] if task_key in lesson_06 else lesson_06["supervised"] %}
-{% set title_04 = {"anomaly": "Exploration et comparaison de détecteurs d'anomalies", "forecasting": "Exploration des modèles de prévision"} %}
-{% set title_05 = {"forecasting": "Entraînement et validation temporelle"} %}
-{% set title_06 = {"clustering": "Analyse de la segmentation et recommandations", "anomaly": "Analyse des erreurs et recommandations", "multiclass": "Analyse d'erreurs, décision et recommandations"} %}
-{% set t04 = title_04[task_key] if task_key in title_04 else "Exploration et comparaison de modèles" %}
-{% set t05 = title_05[task_key] if task_key in title_05 else "Entraînement dans les conditions de production" %}
-{% set t06 = title_06[task_key] if task_key in title_06 else "Analyse d'erreurs et recommandations" %}
 
 | Notebook | Ce qu'on y apprend |
 | --- | --- |
 | `01_eda.ipynb` | EDA structurée : types, manquants, distributions univariées et bivariées, corrélations, outliers, puis **10-15 insights** actionnables. |
 | `02_validation.ipynb` | Pourquoi des contrats de données : définition d'un `DataFrameModel` Pandera, validation réussie, puis **corruption volontaire** pour observer l'échec et le message d'erreur. |
 | `03_preprocessing.ipynb` | Construction du pipeline : imputation, clipping, scaling, encodage, features dérivées, et démonstration de l'absence de fuite (fit sur train uniquement). |
-| `04_model_exploration.ipynb` | *{{ t04 }}* — {{ l04 }} |
-| `05_training.ipynb` | *{{ t05 }}* — {{ l05 }} |
-| `06_error_analysis.ipynb` | *{{ t06 }}* — {{ l06 }} |
+| `04_model_exploration.ipynb` | *Exploration et comparaison de modèles* — Comparaison baseline + modèles candidats en validation croisée, table de métriques, choix argumenté du modèle. |
+| `05_training.ipynb` | *Entraînement dans les conditions de production* — Entraînement piloté par **objets** (`Trainer`, callbacks) plutôt que par un script monolithique, lecture d'un `TrainingOutcome` (métriques, durée, historique, artefacts), stabilité mesurée sur plusieurs graines avant de conclure, et garde-fou de qualité déclaré en configuration. |
+| `06_error_analysis.ipynb` | *Analyse d'erreurs et recommandations* — Matrice de confusion, rapport par classe, exemples mal prédits, hypothèses sur les causes et recommandations concrètes. |
 
 ---
 
@@ -565,7 +524,7 @@ Ce qui est testé :
 | `tests/test_data_schemas.py` | Les schémas Pandera acceptent les données valides **et** rejettent les données corrompues (types, bornes, valeurs autorisées, colonnes manquantes). |
 | `tests/test_loaders.py` | Chargement Parquet/CSV, validation appliquée, gestion des erreurs, split train/val/test. |
 | `tests/test_preprocessing.py` | Transformers (fit/transform), absence de fuite, cohérence des colonnes en sortie, persistance. |
-| `tests/test_models.py` | Contrat `BaseModel` : fit → predict{% if stack.supports_proba %} → predict_proba{% endif %}, shape, déterminisme, sauvegarde/rechargement, garde-fous (modèle non entraîné, colonnes manquantes). |
+| `tests/test_models.py` | Contrat `BaseModel` : fit → predict → predict_proba, shape, déterminisme, sauvegarde/rechargement, garde-fous (modèle non entraîné, colonnes manquantes). |
 | `tests/test_training.py` | Le `Trainer` produit des métriques, des callbacks fonctionnent (early stopping), les artefacts sont écrits. |
 | `tests/test_pipeline.py` | Bout en bout : chaque pipeline (`data`, `train`, `evaluation`, `inference`) s'exécute sur une configuration réduite, écrit ses artefacts et refuse une entrée invalide. |
 
@@ -578,7 +537,7 @@ et configuration réduite, donc exécution en quelques secondes.
 
 - **OOP systématique** : générateur, loaders, preprocessing, modèle, trainer, évaluateur,
   predictor et pipelines sont des classes à responsabilité unique.
-- **Classe abstraite `BaseModel`** : contrat commun `fit / predict{% if stack.supports_proba %} / predict_proba{% endif %} / save / load`, ce qui permet
+- **Classe abstraite `BaseModel`** : contrat commun `fit / predict / predict_proba / save / load`, ce qui permet
   de changer de framework sans toucher au reste du code (DIP).
 - **Type hints partout** + `mypy` configuré ; docstrings Google sur toutes les entités publiques.
 - **Hydra** pour toute la configuration, **Pydantic** pour la valider au démarrage.
@@ -586,7 +545,7 @@ et configuration réduite, donc exécution en quelques secondes.
 - **Aucune fuite de données** : le preprocessing est appris sur le train seul et persisté.
 - **Parquet** pour les données intermédiaires (typé, compressé, lecture partielle), CSV pour l'humain.
 - **Artefacts traçables** : model card JSON, métriques JSON, rapport Markdown, figures PNG.
-- **Reproductibilité** : graine propagée à Python/NumPy/{{ stack.display_name }}, données régénérables à l'identique.
+- **Reproductibilité** : graine propagée à Python/NumPy/MLflow, données régénérables à l'identique.
 - **Chemins robustes** : `pathlib.Path` uniquement, racine résolue depuis `src/`, jamais depuis le CWD.
 - **Logs structurés** avec loguru (interception du `logging` stdlib des librairies tierces).
 - **Tests unitaires concrets** (comportements, pas `assert True`) + smoke test de bout en bout.
@@ -601,7 +560,7 @@ et configuration réduite, donc exécution en quelques secondes.
 | `src/data/` | Génération synthétique, chargement, **contrats Pandera** | Le générateur est déterministe ; les schémas sont la documentation exécutable des données. |
 | `src/preprocessing/` | Transformers custom + pipeline sklearn-compatible | `fit` sur train uniquement, `transform` partout ; persistable. |
 | `src/features/` | Feature engineering **déclaratif** (recettes en YAML) | Ajouter une feature = ajouter une entrée dans `conf/preprocessing/default.yaml`. |
-| `src/models/` | `BaseModel` (ABC) + implémentation {{ stack.display_name }} | Aucune logique de training loop ici : le modèle expose un contrat. |
+| `src/models/` | `BaseModel` (ABC) + implémentation MLflow | Aucune logique de training loop ici : le modèle expose un contrat. |
 | `src/training/` | `Trainer`, callbacks, registre de métriques | Les effets de bord (logs, early stopping) sont des callbacks, pas du code inline. |
 | `src/evaluation/` | `Evaluator` + `ReportBuilder` | Les métriques sont calculées une seule fois puis sérialisées. |
 | `src/inference/` | `Predictor` | Valide l'entrée avec `InferenceDataSchema` avant de prédire. |
@@ -619,16 +578,13 @@ et configuration réduite, donc exécution en quelques secondes.
 
 | Symptôme | Cause probable | Solution |
 | --- | --- | --- |
-| `ModuleNotFoundError: No module named 'src'` | Exécution depuis un autre répertoire | `cd {{ spec.relative_path }}` puis `python -m src.main …` (ou `export PYTHONPATH=.`) |
+| `ModuleNotFoundError: No module named 'src'` | Exécution depuis un autre répertoire | `cd data-science/classification/with-mlflow` puis `python -m src.main …` (ou `export PYTHONPATH=.`) |
 | `FileNotFoundError: data/raw/...` | Données non générées | `make data` (ou `python scripts/generate_data.py`) |
 | `SchemaError` Pandera au chargement | Dataset corrompu / régénéré avec un autre schéma | `make clean-artifacts && make data` |
-| `Could not find a version that satisfies the requirement {{ stack.display_name | lower }}` | Index PyPI inaccessible / Python trop ancien | Python ≥ 3.10, `pip install --upgrade pip`, vérifier le proxy |
+| `Could not find a version that satisfies the requirement mlflow` | Index PyPI inaccessible / Python trop ancien | Python ≥ 3.10, `pip install --upgrade pip`, vérifier le proxy |
 | Erreur `Key 'X' not in ...` sur un override Hydra | Clé absente du schéma | Préfixer l'override avec `++` (ex. `++train.epochs=5`) |
 | Les chemins pointent vers `outputs/...` | Un outil a changé le CWD | `hydra.job.chdir=false` est déjà actif ; les chemins viennent de `src/utils/paths.py` |
-{% if stack.key == "pytorch" %}| `UserWarning: Deterministic behavior ...` | Algorithmes déterministes activés | Attendu : `set_seed(deterministic=True)` — peut ralentir légèrement l'entraînement |
-{% endif %}{% if stack.key in ["tensorflow", "keras"] %}| Messages `oneDNN` / `TF-TRT` au démarrage | Logs d'optimisation TensorFlow | Cosmétique ; `export TF_CPP_MIN_LOG_LEVEL=2` pour les masquer |
-{% endif %}{% if stack.key in ["xgboost", "lightgbm"] %}| Avertissement sur les features catégorielles | Encodage déjà numérique en entrée | Normal : le pipeline livre une matrice numérique |
-{% endif %}| Tests lents | Entraînement complet dans les tests | Les fixtures utilisent un petit dataset ; `pytest -m "not slow"` |
+| Tests lents | Entraînement complet dans les tests | Les fixtures utilisent un petit dataset ; `pytest -m "not slow"` |
 
 Pour rejouer une configuration exacte : Hydra sauvegarde la config composée dans
 `outputs/<date>/<heure>/.hydra/config.yaml` — copiez-la avec `--config-path`/`--config-name`.
@@ -637,9 +593,8 @@ Pour rejouer une configuration exacte : Hydra sauvegarde la config composée dan
 
 ## 18. Références
 
-{% for doc in stack.docs %}
-- [{{ doc.name }}]({{ doc.url }})
-{% endfor %}
+- [MLflow Tracking](https://mlflow.org/docs/latest/tracking.html)
+- [MLflow Models](https://mlflow.org/docs/latest/models.html)
 - [Hydra — Documentation officielle](https://hydra.cc/docs/intro/)
 - [Pandera — Data validation](https://pandera.readthedocs.io/)
 - [Pydantic v2 — Data validation](https://docs.pydantic.dev/latest/)
@@ -655,4 +610,4 @@ Pour rejouer une configuration exacte : Hydra sauvegarde la config composée dan
 Code fourni à des fins pédagogiques, licence MIT. Pour proposer une amélioration : conserver la
 structure imposée, ajouter des tests, mettre à jour ce README et vérifier `make verify`.
 
-*Dernière génération : {{ today }} · projet `{{ spec.key }}`*
+*Dernière génération : 2026-09-30 · projet `ds-classification-mlflow`*
