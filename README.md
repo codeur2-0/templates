@@ -605,8 +605,8 @@ strict, 4 235 tests au total — 165 par projet, 187 pour les projets multi-clas
 tests de leur couche tâche —, 150 notebooks exécutés, `python -m src.main mode=all` de bout en
 bout) et **6/6 projets `ai-eng` conformes** : `rag/with-tfidf` (85,4 s, 107 tests),
 `rag/with-langchain` (168,3 s, 112 tests), `question-answering/with-tfidf` (56,1 s, 107 tests),
-`question-answering/with-langchain` (90,5 s, 112 tests), `embeddings/with-embedding` (46,0 s,
-109 tests) et `embeddings/with-tfidf` (39,2 s, 107 tests) — mêmes six notebooks et même pipeline
+`question-answering/with-langchain` (90,5 s, 112 tests), `embeddings/with-embedding` (42,9 s,
+109 tests) et `embeddings/with-tfidf` (38,5 s, 107 tests) — mêmes six notebooks et même pipeline
 complet. Chaque projet est rejoué intégralement — lint, typage, tests, exécution des six notebooks
 et pipeline complet — avant d'être considéré comme livré.
 

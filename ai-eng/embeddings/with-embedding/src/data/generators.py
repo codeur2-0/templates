@@ -422,9 +422,9 @@ class SyntheticCorpusGenerator(BaseCorpusGenerator):
     def _document_row(
         self, number: int, reference: Reference, fact: Fact, style: Style
     ) -> dict[str, Any]:
-        """Build one fiche: the planted sentence, its consequence, the style and the reference.
+        """Build one fiche: the planted sentence, its conditions, the style and the reference.
 
-        The planted sentence comes first, then its consequence, then the sentence that identifies
+        The planted sentence comes first, then its conditions of application, then the sentence that identifies
         the style, and the fiche closes on the reference of its own folder. Order matters: the
         sentence a question has the most words in common with must stay the planted one, otherwise
         an extractive answer would quote another sentence and the measured exact match would say
