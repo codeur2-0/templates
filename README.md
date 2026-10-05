@@ -14,9 +14,10 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**27 projets** — 25 sur sept familles tabulaires (sections 1.1 à 1.7) et 2 sur la famille RAG
-texte `ai-eng/rag` (section 1.8) — tous verts dans `tools/verify.py` (lint, formatage, typage,
-tests, six notebooks exécutés, pipeline complet `data → train → evaluate → predict`).
+**29 projets** — 25 sur sept familles tabulaires (sections 1.1 à 1.7) et 4 sur les deux familles
+texte `ai-eng/rag` (section 1.8) et `ai-eng/question-answering` (section 1.9) — tous verts dans
+`tools/verify.py` (lint, formatage, typage, tests, six notebooks exécutés, pipeline complet
+`data → train → evaluate → predict`).
 
 ### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks
 
@@ -287,7 +288,77 @@ p50/p95, plus les planchers triviaux et les segments.
 
 ---
 
+### 1.9 `ai-eng/question-answering` — support client sur fiches produit, deux stacks
+
+Deuxième cas d'usage texte, et deuxième contrat de réponse : ici la réponse attendue n'est pas
+« une réponse appuyée sur un passage », c'est **la phrase exacte de la fiche** qui fait foi. Le
+corpus synthétique compte 120 fiches produit (vingt produits x six articles : garantie, retour,
+frais de retour, prise en charge SAV, compatibilité, mise à jour du firmware) et 200 questions
+annotées dont 14 hors corpus. Chaque fiche porte une phrase canonique qui contient la valeur citée
+et chaque question est écrite à partir d'elle : l'exact match mesure donc la sélection de la bonne
+phrase, pas l'élégance d'une reformulation. Le vocabulaire est réparti par article — délai et
+réception pour le retour, montant et frais pour les frais, prise en charge et panne pour le SAV —
+car sans cette séparation une question aurait plusieurs bonnes fiches et la métrique ne dirait plus
+rien du modèle. Les questions mono-document portent le nom du produit (le seul discriminant lexical
+entre vingt fiches qui se ressemblent), les paraphrases gardent ce nom et s'éloignent du vocabulaire
+de la fiche, les questions multi-document demandent deux valeurs à la fois (une garantie *et* un
+délai d'intervention) et les questions hors corpus portent sur un fait voisin mais absent.
+
+| Projet | Stack | Réponse | Exact match (test) | F1 réponse | recall@1 | Précision des citations | Abstention (équilibrée) | Latence p95 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-tfidf`](ai-eng/question-answering/with-tfidf) | scikit-learn | phrase copiée du meilleur passage | **0,6212** | **0,7381** | **0,8258** | **0,9808** | **0,8106** | **5,3 ms** |
+| [`with-langchain`](ai-eng/question-answering/with-langchain) | LangChain (LCEL) | chaîne prompt + retriever + ancrage | **0,6212** | **0,7381** | **0,8258** | **0,9808** | **0,8106** | 11,0 ms |
+
+Les deux projets partagent le corpus, les questions, le découpage et l'index BM25 : les chiffres de
+qualité sont identiques par construction, et le coût de l'orchestration est la seule différence
+mesurable (+5,3 ms en médiane, +5,6 ms en p95). Les deux verdicts sont **conformes**
+(`recall_at_1 = 0,8258 >= 0,70`, la métrique principale de la famille : une réponse ne peut être
+exacte que si le *meilleur* passage est le bon).
+
+Deux garde-fous du générateur de réponse valent d'être nommés, parce qu'ils expliquent l'essentiel
+des chiffres. `min_overlap = 2` interdit de citer une phrase qui ne partage qu'un mot avec la
+question — sans lui, la phrase d'ouverture de chaque fiche (« Cette fiche est publiée par le service
+client… ») suffisait à compléter une réponse exacte. `support_ratio = 0,8` écarte les passages dont
+le score tombe sous 80 % du meilleur : sans lui, une question sur les *frais de retour* recevait la
+phrase du *délai de retour*, deux fois moins bien classée, et perdait son exact match. Les deux
+réglages sont mesurés dans le projet (exact match sur le segment facile 0,60 → 0,81, précision des
+citations 0,89 → 0,98) et publiés dans la fiche de modèle avec le seuil d'abstention calibré
+(41,36, appris sur le split de calibration, jamais sur le test).
+
+| Segment (test) | Questions | Exact match | F1 réponse | recall@1 | Rang moyen du 1er pertinent | Abstention |
+| --- | --- | --- | --- | --- | --- | --- |
+| `facile` (phrase canonique) | 43 | **0,8140** | **0,8140** | **1,0000** | 1,00 | 0,1860 |
+| `paraphrase` (autre formulation) | 12 | 0,5000 | 0,5323 | 0,5000 | 2,17 | 0,4167 |
+| `multi_document` (deux fiches) | 11 | 0,0000 | 0,6664 | 0,5000¹ | 1,00 | 0,0909 |
+| `hors_corpus` | 6 | n/a | 0,0139 | n/a | n/a | **0,8333** |
+
+¹ Deux fiches d'or : le recall@1 est mécaniquement plafonné à 0,5 sur ce segment — le rang moyen du
+premier document pertinent, lui, vaut 1,00.
+
+**Lecture honnête** : sur les questions factuelles, 4 réponses sur 5 sont la phrase exacte de la
+bonne fiche, et les citations ne se trompent jamais (précision 0,98) — la part du contrat que le
+projet sait tenir. Trois limites sont mesurées plutôt que cachées. D'abord, 19 questions sur 72 sont
+refusées, dont 5 des 6 questions hors corpus : le seuil calibré préfère le refus, et la couverture
+(0,79) est publiée à côté de l'abstention. Ensuite, la paraphrase divise le recall@1 par deux
+(1,00 → 0,50) : c'est la limite structurelle du lexical, mesurée ici sur un contrat où elle coûte
+vraiment des points. Enfin, une question multi-document reçoit la phrase du mieux classé des deux
+fiches (F1 0,67, abstention 0,09) : le `support_ratio` qui protège les questions factuelles est
+exactement ce qui empêche d'aller chercher la seconde fiche, et le rapport le dit au lieu de le
+taire. Trois références donnent un sens au 0,8258 : tirage aléatoire 0,0000, ordre du corpus 0,0076,
+et 93 % des questions ont une réponse dans le corpus (plafond annoté publié dans les métadonnées de
+génération).
+
+Comme pour la famille RAG, la variante LangChain ne change pas le retrieval : elle change ce qui est
+**explicite et testable** — le prompt de copie est un objet de configuration, l'adaptateur LLM reste
+une couture (extractif hors ligne par défaut, client OpenAI-compatible optionnel), et les citations
+traversent le graphe jusqu'au rapport. La même stack sert trois stratégies interchangeables
+(`langchain_lexical`, `langchain_dense`, `langchain_hybrid`) que le notebook 04 compare sur le split
+de validation.
+
+---
+
 ## 2. Démarrage rapide (cinq commandes)
+
 
 ```bash
 git clone https://github.com/codeur2-0/templates.git && cd templates/data-science/classification/with-sklearn
@@ -379,6 +450,10 @@ l'implémentation change. C'est ce qui rend la comparaison possible.
 | **Keras** | API fonctionnelle : graphe déclaré puis `compile`/`fit`, callbacks natifs (`EarlyStopping(restore_best_weights)`, `ReduceLROnPlateau`, `TerminateOnNaN`) pontés vers les callbacks du projet, `class_weight` pour le déséquilibre | archive native `model.keras` + sidecar `model.config.json` |
 | **TensorFlow** | Niveau le plus bas : modèle **subclassé**, couches maison (`DenseBlock`, `ResidualBlock`), pipeline `tf.data`, `GradientTape` + `tf.function`, pertes sur logits, écrêtage du gradient, pondération d'échantillons | poids `model.weights.h5` + sidecar `model.config.json` |
 
+Deux stacks texte complètent la liste, documentées avec leurs projets : **scikit-learn
+(TF-IDF / BM25)** et **LangChain (LCEL)** — même contrat `BaseModel`, même index lexical, une chaîne
+d'orchestration en plus pour la seconde (sections 1.8 et 1.9).
+
 Pièges documentés dans le code (et résolus) que ces stacks partagent :
 
 - **Les schedules Keras se paramètrent en pas d'optimiseur, pas en époques.** Avec
@@ -440,7 +515,9 @@ tools/
 │   │   ├── global.yaml           # valeurs par défaut de tous les projets (train, preprocessing…)
 │   │   └── family/<famille>.yaml # cas d'usage : données, métriques, seuils de qualité
 │   ├── manifests/*.yaml          # UN manifeste = UN projet livré
-│   ├── notebooks/tabular.py      # générateur des six notebooks (prose française + code)
+│   ├── notebooks/
+│   │   ├── tabular.py            # six notebooks des familles tabulaires
+│   │   └── text.py               # six notebooks des familles texte (RAG, questions-réponses)
 │   └── templates/
 │       ├── base/                 # partagé par tous : Makefile, conf/, utils, schemas, models/base.py
 │       ├── modality/tabular/     # data, preprocessing, features, training, evaluation, inference…
@@ -465,10 +542,11 @@ python -m tools.verify data-science/classification/with-pytorch
 État au dernier passage : **25/25 projets tabulaires conformes** (ruff check, ruff format, mypy
 strict, 4 235 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les
 tests de leur couche tâche —, 150 notebooks exécutés, `python -m src.main mode=all` de bout en
-bout) et **2/2 projets `ai-eng/rag` conformes** (`with-tfidf` en 81,5 s avec 104 tests,
-`with-langchain` en 165,1 s avec 110 tests, mêmes six notebooks et même pipeline complet). Chaque
-projet est rejoué intégralement — lint, typage, tests, exécution des six notebooks et pipeline
-complet — avant d'être considéré comme livré.
+bout) et **4/4 projets `ai-eng` conformes** : `rag/with-tfidf` (84,4 s, 106 tests),
+`rag/with-langchain` (156,6 s, 111 tests), `question-answering/with-tfidf` (48,8 s, 106 tests) et
+`question-answering/with-langchain` (85,4 s, 111 tests) — mêmes six notebooks et même pipeline
+complet. Chaque projet est rejoué intégralement — lint, typage, tests, exécution des six notebooks
+et pipeline complet — avant d'être considéré comme livré.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
 reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capture d'écran.
@@ -493,10 +571,11 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 État du générateur : `registry/families.yaml` déclare **29 familles** et `registry/stacks.yaml`
 **18 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
 `task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval}/`,
-`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation}/`
+`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering}/`
 et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,tfidf,langchain}/` sont écrites et
-vérifiées : les **sept familles tabulaires** et la **famille RAG** sont livrées (deux projets
-`ai-eng/rag`, section 1.8). Ce qui reste, par ordre de valeur pédagogique :
+vérifiées : les **sept familles tabulaires**, la **famille RAG** (section 1.8) et la **famille
+questions-réponses** (section 1.9) sont livrées — quatre projets `ai-eng`, tous mesurés sur un
+corpus synthétique et un split de test dédié. Ce qui reste, par ordre de valeur pédagogique :
 
 1. **Stacks tabulaires déclarées, pas encore livrées** — `clustering` et `anomaly_detection` en
    PyTorch et TensorFlow (auto-encodeurs), `recommendation` en PyTorch (modèle à deux tours),
@@ -504,19 +583,20 @@ vérifiées : les **sept familles tabulaires** et la **famille RAG** sont livré
    manifeste par stack et, comme pour la prévision, des notebooks paramétrés par stack
    (`extras.notebook_<famille>`) : les commentaires chiffrés d'un notebook doivent parler de la
    stack réellement mesurée.
-2. **Suite du périmètre ai-eng et nlp** — la modalité texte, la tâche `retrieval` et la famille
-   `retrieval_augmented_generation` sont en place : la suite réutilise cette couche.
-   Restent `ai-eng/` (agents : Deepagents, Strands, CrewAI ; embeddings ; Transformers ;
-   serving FastAPI) et `nlp/` (classification de texte, NER avec spaCy, résumé, fine-tuning LLM).
-   Les familles `question_answering`, `embedding_pipeline` et `agent_tools` réutilisent
-   `modality/text/` + `task/generation/` ; `nlp/` ajoute ses propres couches `family/`.
+2. **Suite du périmètre ai-eng et nlp** — la modalité texte, la tâche `retrieval` et les familles
+   `retrieval_augmented_generation` et `question_answering` sont en place (sections 1.8 et 1.9) :
+   la suite réutilise ces couches. Restent `ai-eng/` (agents : Deepagents, Strands, CrewAI ;
+   embeddings ; Transformers ; serving FastAPI) et `nlp/` (classification de texte, NER avec spaCy,
+   résumé, fine-tuning LLM). Les familles `embedding_pipeline` et `agent_tools` réutilisent
+   `modality/text/` + `task/retrieval/` ; `nlp/` ajoute ses propres couches `family/`.
 3. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
    GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
    `computer-vision/`. Chacune demande une nouvelle couche `modality/` (loaders, pré-traitement,
    pipelines, tests) en plus des couches `family/` et `task/`.
 4. **Stacks déjà déclarées, non implémentées** — `spacy`, `transformers`, `duckdb`, `pandas`,
    `prefect`, `mlflow`, `fastapi`, `scipy`, `pandera` : l'entrée de registre existe, le dossier
-   `templates/stack/<clé>/src/models/` reste à écrire.
+   `templates/stack/<clé>/` reste à écrire ; elles serviront `nlp/`, `data-eng/`, `mlops/` et le
+   serving.
 
 Chaque ajout suit la même procédure : entrée de registre -> templates de stack ou de famille ->
 manifeste -> `build` -> `verify` -> commit.

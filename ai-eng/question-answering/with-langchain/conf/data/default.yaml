@@ -1,0 +1,55 @@
+# =================================================================================================
+# Données : Fiches produit et questions du support client (garantie, retour, SAV)
+# -------------------------------------------------------------------------------------------------
+# Un corpus synthétique de 120 fiches produit — vingt produits x six articles (garantie, retour,
+# frais de retour, prise en charge SAV, compatibilité, mise à jour) — et les questions du support
+# qui s'y rapportent. Chaque fiche contient une **phrase canonique** qui porte la valeur (une
+# durée, un montant, une compatibilité) et les questions sont écrites à partir d'elle : la réponse
+# de référence est donc la phrase du corpus, mot pour mot, et l'exact match mesure la sélection de
+# la bonne phrase plutôt que l'élégance d'une reformulation. Les questions couvrent quatre
+# difficultés — factuelle, paraphrase, multi-document, hors corpus — et la difficulté d'une
+# paraphrase tient à la question, jamais à la réponse.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: product_support_faq
+n_samples: 120
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: null              # apprentissage non supervisé : pas de cible
+id_column: doc_id
+time_column: published_at
+group_column: null
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['doc_id', 'title', 'published_at', 'n_tokens']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+corpus:
+  reference_date: '2025-01-06'
+  paraphrase_share: 0.35
+  multi_document_share: 0.15
+  hors_corpus_share: 0.08
+  val_size: 0.2
+  test_size: 0.35

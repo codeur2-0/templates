@@ -1,0 +1,83 @@
+# ==============================================================================================
+# ai-eng / question-answering / with-langchain
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/question_answering.yaml` (support client sur fiches
+# produit). Le corpus, les questions annotées et les métriques sont ceux de la famille : ce qui
+# change ici est l'orchestration (chaîne LCEL), le prompt de réponse et les stratégies de retrieval
+# servies par la stack.
+# ==============================================================================================
+
+key: ai-eng-qa-langchain
+title: "Support client sur fiches produit orchestré avec LangChain (LCEL) — prompt + retriever + citations"
+summary: >-
+  Le même support client que la variante scikit-learn, mais assemblé avec LangChain : un retriever
+  (`BaseRetriever`) sur les fiches produit, un prompt lu dans la configuration
+  (`PromptTemplate`) qui impose la phrase exacte, un adaptateur LLM interchangeable (sélection
+  extractive hors ligne par défaut, client OpenAI-compatible optionnel) et un graphe LCEL qui
+  rattache la réponse à la fiche citée. Le corpus de 120 fiches est indexé par BM25, par embeddings
+  hachés (SVD tronquée apprise sur le train) ou par fusion des deux classements (RRF) : notebook 04
+  chiffre ce que chaque stratégie apporte sur le split de validation, et l'évaluation mesure le
+  rappel, l'exact match, le F1 de réponse et l'abstention sur les questions hors corpus. Aucun
+  appel réseau, aucune clé API : tout est hors ligne et à graine fixée.
+
+family: question_answering
+domain: ai-eng
+problem: question-answering
+stack: langchain
+project_slug: product-support-assistant-langchain
+package_name: product_support_langchain
+
+model:
+  display_name: "Chaîne LCEL + retriever lexical BM25 (réponse copiée de la fiche)"
+  algorithm: langchain_lexical
+  rationale: >-
+    Le retrieval reste BM25 — rapide, explicable, sans entraînement — mais la réponse traverse
+    désormais un graphe LCEL : le contexte est assemblé à partir des fiches retrouvées, un prompt de
+    configuration impose la copie de la phrase exacte, l'adaptateur LLM reste interchangeable et les
+    citations traversent toute la chaîne sans être perdues. C'est ce que cette variante apporte à la
+    famille : le contrat « phrase exacte » devient une consigne vérifiable plutôt qu'une propriété
+    implicite du générateur, et la précision des citations devient une métrique suivie.
+  params:
+    abstention_threshold: 0.0
+    calibrate_abstention: true
+    calibration_min_gain: 0.05
+    lexical:
+      k1: 1.5
+      b: 0.75
+      ngram_range: [1, 1]
+      min_df: 1
+    embedding:
+      n_features: 4096
+      n_components: 192
+    rrf_constant: 60
+  alternatives:
+    - "`langchain_dense` : embeddings n-grammes hachés compressés par une SVD tronquée apprise sur le train — seul bras qui rapproche deux formulations sans mot commun."
+    - "`langchain_hybrid` : fusion par rangs réciproques du lexical et du dense, la pratique industrielle quand aucune des deux familles ne suffit seule."
+    - "Variante `with-tfidf` : la même indexation BM25 sans orchestration — témoin pour chiffrer l'apport de la chaîne."
+    - "Adaptateur distant : remplacer `llm.provider: extractive` par un client OpenAI-compatible pour envoyer le même prompt à un vrai modèle, sans changer une ligne de la chaîne."
+
+extras:
+  model_conf:
+    llm:
+      provider: extractive
+      max_sentences: 2
+      min_overlap: 2
+      support_ratio: 0.8
+    prompt:
+      max_context_chars: 2400
+      template: |-
+        Tu réponds à une question du support client à partir des fiches produit fournies.
+        Copie la phrase exacte de la fiche qui répond, sans la reformuler ni la compléter.
+        Si aucune fiche ne contient la réponse, réponds exactement 'ABSTENTION'.
+        Termine ta réponse par 'SOURCES: ' suivi des identifiants des fiches utilisées.
+
+        Fiches produit:
+        {context}
+
+        Question: {question}
+        Réponse:
+  root_conf:
+    retrieval:
+      answer_k: 5
+      abstention_threshold: 0.0
+      rerank: false

@@ -1,0 +1,766 @@
+{#- Générateur du corpus de fiches produit et des questions de support (famille QA). -#}
+"""Synthetic corpus generator of the question answering family.
+
+{{ wrap(spec.data.description, 98) }}
+
+The generator plants **canonical sentences** in the corpus — one per (product, article) pair —
+and writes the questions from those sentences. The QA contract is different from the RAG one, and
+the data says so:
+
+* the reference answer of an answerable question is the **exact sentence** of the fiche, so
+  ``answer_exact_match`` is reachable and measures something: a system that paraphrases the
+  sentence loses points even when it is right;
+* the questions carry the product name (the discriminating entity), so a *paraphrase* question is
+  harder to *answer* while staying answerable at all — a paraphrase that dropped the entity would
+  not be a hard question, it would be an ambiguous one;
+* multi-document questions ask two things at once (a return window and its cost, a warranty and a
+  repair delay): the reference answer concatenates the two sentences and a system that returns a
+  single passage is structurally capped on that segment;
+* a share of the questions is **absent** from the corpus (``hors_corpus``): the only correct
+  behaviour is to abstain, and the schema refuses to let such a question carry a fake gold span.
+
+Everything is seeded: two calls with the same configuration produce byte-identical frames.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from src.data.generator_base import BaseCorpusGenerator, GeneratedCorpus
+from src.preprocessing.transformers import tokenize
+from src.utils.config_access import as_mapping
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class Product:
+    """A product of the catalogue, with the values its fiches quote.
+
+    Attributes:
+        code: Four-letter product code (identifies the SAV folder).
+        name: Name used inside the sentences and the questions.
+        gender: Grammatical gender (``m`` or ``f``), used to agree the articles.
+        category: Product family (audio, maison, informatique, mobilite).
+        price: Catalogue price in euros (the return fee is a share of it).
+        warranty_months: Warranty duration, in months.
+        return_days: Return window, in days.
+        sav_hours: Service level of the repair desk, in working hours.
+        update_months: Firmware release cadence, in months.
+        compat: Compatibility note quoted by the compatibility fiche.
+    """
+
+    code: str
+    name: str
+    gender: str
+    category: str
+    price: float
+    warranty_months: int
+    return_days: int
+    sav_hours: int
+    update_months: int
+    compat: str
+
+    @property
+    def article(self) -> str:
+        """Definite article that agrees with the name (``le``, ``la`` or ``l'``)."""
+        if self.name[:1].lower() in "aeiouéèêàâîïôû":
+            return "l'"
+        return "le" if self.gender == "m" else "la"
+
+    @property
+    def of_the(self) -> str:
+        """Contraction of ``de`` with the article (``du``, ``de la``, ``de l'``)."""
+        return {"le": "du", "la": "de la", "l'": "de l'"}[self.article]
+
+    @property
+    def to_the(self) -> str:
+        """Contraction of ``à`` with the article (``au``, ``à la``, ``à l'``)."""
+        return {"le": "au", "la": "à la", "l'": "à l'"}[self.article]
+
+    @property
+    def with_article(self) -> str:
+        """Name preceded by its article (``la souris Sour``, ``l'enceinte Onda``)."""
+        separator = "" if self.article.endswith("'") else " "
+        return f"{self.article}{separator}{self.name}"
+
+    @property
+    def of_name(self) -> str:
+        """Name preceded by the contraction of ``de`` (``du casque Aria``, ``de l'enceinte``)."""
+        return f"{self.of_the}{self.with_article.removeprefix(self.article)}"
+
+    @property
+    def to_name(self) -> str:
+        """Name preceded by the contraction of ``à`` (``au casque Aria``, ``à l'enceinte``)."""
+        return f"{self.to_the}{self.with_article.removeprefix(self.article)}"
+
+    @property
+    def titled(self) -> str:
+        """Name preceded by its article, sentence-initial (``La souris Sour``, ``L'enceinte``)."""
+        return self.with_article[:1].upper() + self.with_article[1:]
+
+
+@dataclass(frozen=True, slots=True)
+class ArticleKind:
+    """One kind of fiche (warranty, returns, fees, repair desk, compatibility, firmware).
+
+    Attributes:
+        key: Stable identifier of the kind.
+        label: Lower-case label, used in prose.
+        title_label: Title-case label, used in the title of the fiche.
+        section: Editorial section declared in the contract.
+        source: Wiki space the fiche belongs to.
+        intent: Business intent of the questions written about this fiche.
+        statement: Canonical sentence of the fiche; ``{value}`` holds the quoted value.
+        question: Factual question whose answer is the canonical sentence.
+        paraphrasis: Alternative wording of that question. The product name is kept - it is what
+            makes the question answerable by a *single* fiche - and the vocabulary is deliberately
+            moved away from the fiche, which is what makes the paraphrase hard.
+        conditions: Generic sentence recalling the scope of the fiche.
+    """
+
+    key: str
+    label: str
+    title_label: str
+    section: str
+    source: str
+    intent: str
+    statement: str
+    question: str
+    paraphrasis: str
+    conditions: str
+
+
+#: The catalogue: five categories, four products each. Every name carries the word a customer
+#: would use ("casque", "souris", "imprimante"): it is the term the questions repeat, and the one
+#: the retrieval has to weigh against the five other fiches of the same product.
+PRODUCTS: tuple[Product, ...] = (
+    Product("ARIA", "casque Aria", "m", "audio", 149.0, 24, 30, 48, 6, "Bluetooth 5.3 et USB-C"),
+    Product("ONDA", "enceinte Onda", "f", "audio", 199.0, 24, 30, 48, 6, "Bluetooth 5.3 et Wi-Fi 6"),
+    Product("PIKO", "kit d'écouteurs Piko", "m", "audio", 79.0, 12, 14, 72, 12, "Bluetooth 5.2"),
+    Product("VELA", "barre de son Vela", "f", "audio", 349.0, 36, 30, 24, 6, "HDMI eARC et Bluetooth"),
+    Product("MIRA", "montre Mira", "f", "mobilite", 229.0, 24, 30, 48, 3, "iOS 16 et Android 12"),
+    Product("TRAC", "traceur Trac", "m", "mobilite", 59.0, 12, 14, 72, 12, "Bluetooth 5.1 et GPS"),
+    Product("ROAM", "trottinette Roam", "f", "mobilite", 549.0, 24, 14, 24, 6, "batterie 48 V"),
+    Product("GALA", "vélo Gala", "m", "mobilite", 1290.0, 36, 30, 24, 12, "batterie 36 V"),
+    Product("NEXA", "clavier Nexa", "m", "informatique", 119.0, 24, 30, 48, 12, "Windows, macOS"),
+    Product("SOUR", "souris Sour", "f", "informatique", 69.0, 24, 30, 72, 12, "Windows et macOS"),
+    Product("VIA", "webcam Via", "f", "informatique", 99.0, 12, 30, 48, 6, "Windows 11 et macOS 14"),
+    Product("ROUT", "routeur Rout", "m", "informatique", 159.0, 36, 30, 24, 3, "fibre ADSL et Wi-Fi 6"),
+    Product("IMPR", "imprimante Impr", "f", "informatique", 249.0, 24, 14, 24, 6, "Wi-Fi et USB"),
+    Product("CAFE", "cafetière Cafe", "f", "maison", 189.0, 24, 14, 48, 12, "cartouches Cafe"),
+    Product("MIXE", "robot Mixe", "m", "maison", 299.0, 36, 30, 24, 12, "bols Mixe d'origine"),
+    Product("ASPI", "aspirateur Aspi", "m", "maison", 329.0, 24, 30, 24, 6, "batterie 25 V"),
+    Product("PUR", "purificateur Pur", "m", "maison", 279.0, 24, 30, 48, 6, "filtres Pur H13"),
+    Product("LAMP", "lampe Lamp", "f", "maison", 89.0, 12, 30, 72, 12, "ampoules E27"),
+    Product("JARD", "robot d'arrosage Jard", "m", "maison", 139.0, 24, 14, 48, 12, "robinets Gardena"),
+    Product("SPA", "spa gonflable Spa", "m", "maison", 699.0, 24, 14, 24, 6, "installation extérieure 220 V"),
+)
+
+#: The six fiches written for every product. Each one quotes its value in a sentence whose
+#: vocabulary is *not* shared with the five others: "retour" leads the return fiche, "montant" and
+#: "frais" the fees, "prise en charge", "panne" and "SAV" the repair desk. The questions reuse that
+#: vocabulary and nothing else, for two reasons: an ambiguous question measures the generator rather
+#: than the model, and a question word living in *another* fiche is what makes an extractive
+#: generator append a second, wrong sentence to a correct answer.
+ARTICLE_KINDS: tuple[ArticleKind, ...] = (
+    ArticleKind(
+        key="garantie",
+        label="garantie",
+        title_label="Garantie",
+        section="definition",
+        source="wiki_juridique",
+        intent="definition",
+        statement=(
+            "La durée de garantie {of_name} est de {value} à compter de la date de facture."
+        ),
+        question="Quelle est la durée de garantie {of_name} ?",
+        paraphrasis="Quelle protection couvre {with_article} après l'achat ?",
+        conditions="La garantie s'applique hors usure normale et hors dommages accidentels.",
+    ),
+    ArticleKind(
+        key="retour",
+        label="retour",
+        title_label="Retour",
+        section="politique",
+        source="wiki_support",
+        intent="politique",
+        statement=(
+            "Le délai de retour {of_name} est de {value} après réception, emballage d'origine."
+        ),
+        question="Quel est le délai de retour {of_name} ?",
+        paraphrasis="Jusqu'à quand puis-je renvoyer {with_article} ?",
+        conditions="Le retour suppose un produit complet et un justificatif d'achat.",
+    ),
+    ArticleKind(
+        key="frais",
+        label="frais de retour",
+        title_label="Frais de retour",
+        section="calcul",
+        source="wiki_finance",
+        intent="calcul",
+        statement="Le montant des frais de retour {of_name} s'élève à {value}.",
+        question="Quel est le montant des frais de retour {of_name} ?",
+        paraphrasis="Quelle somme est retenue si je renvoie {with_article} ?",
+        conditions="Les frais couvrent le transport et le contrôle technique.",
+    ),
+    ArticleKind(
+        key="sav",
+        label="prise en charge SAV",
+        title_label="Prise en charge SAV",
+        section="procedure",
+        source="wiki_support",
+        intent="procedure",
+        statement=(
+            "Le délai de prise en charge d'une panne {of_name} par le SAV est de {value} ouvrées."
+        ),
+        question="Quel est le délai de prise en charge d'une panne {of_name} par le SAV ?",
+        paraphrasis="Si {with_article} tombe en panne, quand le SAV intervient-il ?",
+        conditions=(
+            "La prise en charge court à partir de l'ouverture du dossier et hors pièces "
+            "indisponibles."
+        ),
+    ),
+    ArticleKind(
+        key="compatibilite",
+        label="compatibilité",
+        title_label="Compatibilité",
+        section="definition",
+        source="wiki_it",
+        intent="definition",
+        statement="{titled} est compatible avec {value}.",
+        question="Quel équipement est compatible avec {with_article} ?",
+        paraphrasis="Quels équipements fonctionnent avec {with_article} ?",
+        conditions="La compatibilité est vérifiée à la date de publication de la fiche.",
+    ),
+    ArticleKind(
+        key="mise_a_jour",
+        label="mise à jour",
+        title_label="Mise à jour",
+        section="procedure",
+        source="wiki_it",
+        intent="procedure",
+        statement="La mise à jour du firmware {of_name} est publiée tous les {value}.",
+        question="À quelle fréquence le firmware {of_name} est-il mis à jour ?",
+        paraphrasis="Quand une nouvelle version du logiciel {of_name} sort-elle ?",
+        conditions=(
+            "Les mises à jour sont distribuées par le portail support et l'application mobile."
+        ),
+    ),
+)
+
+#: Sentinels of the questions the corpus cannot answer: (question template, intent). The first
+#: three stay on the vocabulary of the corpus (the topic exists, the fact does not) and are the
+#: hard half of the abstention measurement; the last three only mention the product and must be
+#: rejected by every model.
+HORS_CORPUS_QUESTIONS: tuple[tuple[str, str], ...] = (
+    ("Proposez-vous une garantie de cinq ans sur {with_article} ?", "politique"),
+    ("Le SAV {of_name} répond-il le dimanche ?", "contact"),
+    ("Livrez-vous {with_article} en Corse sans frais supplémentaires ?", "calcul"),
+    ("Reprenez-vous {with_article} à l'achat ?", "politique"),
+    ("Peut-on acheter {with_article} en magasin physique ?", "politique"),
+    ("Puis-je payer {with_article} en plusieurs fois sans frais ?", "calcul"),
+)
+
+#: Pairs of fiches asked together, with the combined question. The two sentences are quoted by
+#: different fiches: the reference answer concatenates them, so the segment is a ceiling.
+MULTI_DOCUMENT_PAIRS: tuple[tuple[str, str, str], ...] = (
+    (
+        "garantie",
+        "sav",
+        (
+            "Quelle est la durée de garantie {of_name} et quel est le délai de prise en charge "
+            "d'une panne par le SAV ?"
+        ),
+    ),
+    (
+        "retour",
+        "frais",
+        (
+            "Quel est le délai de retour {of_name} et quel est le montant des frais de retour "
+            "correspondants ?"
+        ),
+    ),
+    (
+        "compatibilite",
+        "mise_a_jour",
+        (
+            "Quel équipement est compatible avec {with_article} et à quelle fréquence la mise "
+            "à jour du firmware est-elle publiée ?"
+        ),
+    ),
+)
+
+#: Generic sentences that pad a fiche without competing with its canonical sentence: none of them
+#: mentions a warranty, a delay, a fee, a compatibility or a firmware release.
+FILLERS: tuple[str, ...] = (
+    "Cette fiche récapitule les conditions commerciales publiées cette année.",
+    "Le dossier correspondant est archivé dans le portail support.",
+    "Les conditions générales de vente restent la référence en cas de litige.",
+    "La fiche est révisée à chaque évolution du catalogue.",
+)
+
+#: Neutral sentence: it opens every fiche and must not steal the answer from the canonical
+#: sentence, so it avoids the vocabulary of the six kinds.
+NEUTRAL: str = "Cette fiche est publiée par le service client et révisée chaque trimestre."
+
+
+@dataclass
+class SyntheticCorpusGenerator(BaseCorpusGenerator):
+    """Generate the product-support corpus and its annotated questions.
+
+    Attributes:
+        dataset_name: Name of the generated dataset.
+        n_documents: Target number of documents (``n_documents // 6`` products are kept).
+        seed: Seed of every random draw.
+        reference_date: Date used as "today" for the publication dates.
+        paraphrase_share: Share of the questions written as paraphrases.
+        multi_document_share: Share of the questions asking two things at once.
+        hors_corpus_share: Share of the questions the corpus cannot answer.
+        val_size: Share of questions in the validation split.
+        test_size: Share of questions in the test split.
+    """
+
+    dataset_name: str = "{{ spec.data.dataset_name }}"
+    n_documents: int = {{ spec.data.n_samples }}
+    seed: int = {{ spec.data.seed }}
+    reference_date: date = date(2025, 1, 6)
+    paraphrase_share: float = 0.35
+    multi_document_share: float = 0.15
+    hors_corpus_share: float = 0.08
+    val_size: float = 0.20
+    test_size: float = 0.35
+    products: tuple[Product, ...] = field(default=PRODUCTS, repr=False)
+    kinds: tuple[ArticleKind, ...] = field(default=ARTICLE_KINDS, repr=False)
+    multi_document_pairs: tuple[tuple[str, str, str], ...] = field(
+        default=MULTI_DOCUMENT_PAIRS, repr=False
+    )
+    hors_corpus_questions: tuple[tuple[str, str], ...] = field(
+        default=HORS_CORPUS_QUESTIONS, repr=False
+    )
+    random_state: np.random.Generator = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Seed the random generator and validate the shares."""
+        self.random_state = np.random.default_rng(self.seed)
+        total = self.paraphrase_share + self.multi_document_share + self.hors_corpus_share
+        if total >= 1.0:
+            msg = (
+                "paraphrase_share + multi_document_share + hors_corpus_share must stay below 1, "
+                f"got {total:.2f}"
+            )
+            raise ValueError(msg)
+
+    @classmethod
+    def from_config(cls, config: Any, *, seed: int | None = None) -> SyntheticCorpusGenerator:
+        """Build the generator from the ``data`` node of the configuration.
+
+        Args:
+            config: ``data`` configuration node (``seed``, ``n_samples`` and the ``corpus``
+                sub-node are read).
+            seed: Optional seed override.
+
+        Returns:
+            The configured generator.
+        """
+        settings = as_mapping(config)
+        corpus = as_mapping(settings.get("corpus"))
+        return cls(
+            dataset_name=str(settings.get("dataset_name", "product_support_faq")),
+            n_documents=int(settings.get("n_samples", 120)),
+            seed=int(seed if seed is not None else settings.get("seed", 42)),
+            reference_date=_parse_date(corpus.get("reference_date")) or date(2025, 1, 6),
+            paraphrase_share=float(corpus.get("paraphrase_share", 0.35)),
+            multi_document_share=float(corpus.get("multi_document_share", 0.15)),
+            hors_corpus_share=float(corpus.get("hors_corpus_share", 0.08)),
+            val_size=float(corpus.get("val_size", 0.20)),
+            test_size=float(corpus.get("test_size", 0.35)),
+        )
+
+    # ------------------------------------------------------------------ génération --------
+    def generate(self) -> GeneratedCorpus:
+        """Generate the corpus, the questions and the metadata.
+
+        Returns:
+            The :class:`GeneratedCorpus`.
+        """
+        documents = self._documents()
+        questions = self._questions(documents)
+        metadata = self._metadata(documents, questions)
+        logger.info(
+            "Corpus '{}' generated | {} documents | {} questions | {} unanswerable",
+            self.dataset_name,
+            len(documents),
+            len(questions),
+            int((questions["answer_type"] == "unanswerable").sum()),
+        )
+        return GeneratedCorpus(documents=documents, queries=questions, metadata=metadata)
+
+    def _catalogue(self) -> tuple[Product, ...]:
+        """Return the products kept by the configuration (one fiche per article kind and product)."""
+        wanted = max(min(self.n_documents // len(self.kinds), len(self.products)), 4)
+        return self.products[:wanted]
+
+    def _documents(self) -> pd.DataFrame:
+        """Build the corpus: one fiche per (product, article kind).
+
+        Returns:
+            The corpus frame, validated by :class:`src.data.schemas.DocumentsSchema`.
+        """
+        rows: list[dict[str, Any]] = []
+        number = 0
+        for product in self._catalogue():
+            for kind in self.kinds:
+                number += 1
+                rows.append(self._document_row(number, product, kind))
+        frame = pd.DataFrame(rows)
+        return frame.sort_values("doc_id", kind="stable").reset_index(drop=True)
+
+    @staticmethod
+    def _title(product: Product, kind: ArticleKind) -> str:
+        """Return the title of a fiche (the identity used to annotate the questions)."""
+        return f"{kind.title_label} — {product.name} ({product.code})"
+
+    def _document_row(self, number: int, product: Product, kind: ArticleKind) -> dict[str, Any]:
+        """Build one fiche: a neutral opening, the canonical sentence, its scope, some filler.
+
+        The opening deliberately avoids the product name and the vocabulary of the fiche: the
+        canonical sentence must be the sentence a question has the most words in common with,
+        otherwise the extractive answer would pick the opening and the measured exact match would
+        say more about the generator than about the model.
+        """
+        statement = _render(kind.statement, product, value=self._value(product, kind))
+        text = " ".join(
+            [
+                NEUTRAL,
+                statement,
+                _render(kind.conditions, product),
+                str(self.random_state.choice(FILLERS)),
+                f"Le dossier de suivi porte la référence {product.code}-2025.",
+            ]
+        )
+        published = self.reference_date - timedelta(days=int(self.random_state.integers(15, 400)))
+        return {
+            "doc_id": f"DOC-{number:04d}",
+            "title": self._title(product, kind),
+            "section": kind.section,
+            "source": kind.source,
+            "published_at": pd.Timestamp(published),
+            "n_tokens": len(tokenize(text)),
+            "text": text,
+        }
+
+    @staticmethod
+    def _value(product: Product, kind: ArticleKind) -> str:
+        """Return the value quoted by the canonical sentence of a fiche.
+
+        The value is a *phrase* — "24 mois", "30 jours", "12,45 EUR" — so that the sentence reads
+        like a real fiche and the extractive answer reproduces it verbatim.
+        """
+        values = {
+            "garantie": f"{product.warranty_months} mois",
+            "retour": f"{product.return_days} jours",
+            "frais": f"{product.price * 0.05:.2f} EUR, soit 5 % du prix d'achat",
+            "sav": f"{product.sav_hours} heures",
+            "compatibilite": product.compat,
+            "mise_a_jour": f"{product.update_months} mois",
+        }
+        return values[kind.key]
+
+    def _questions(self, documents: pd.DataFrame) -> pd.DataFrame:
+        """Write the annotated questions from the planted sentences.
+
+        Args:
+            documents: Generated corpus.
+
+        Returns:
+            The questions, with their split and their reference answer.
+        """
+        sentences = self._sentence_index(documents)
+        rows: list[dict[str, Any]] = []
+        rows.extend(self._factual_questions(sentences))
+        rows.extend(self._paraphrase_questions(sentences))
+        frame = pd.DataFrame(rows)
+        frame = self._append_multi_document(frame, sentences)
+        frame = self._append_hors_corpus(frame)
+        return self._assign_splits(frame)
+
+    def _sentence_index(
+        self, documents: pd.DataFrame
+    ) -> dict[tuple[str, str], tuple[str, str]]:
+        """Map every ``(product, kind)`` pair to its document id and its canonical sentence.
+
+        The canonical sentence is read back **from the generated text** and not from the template:
+        the reference answer is therefore, character for character, what the corpus contains. That
+        is the whole point of an extractive contract — it is what makes an exact match reachable —
+        and it is also what guarantees that a fiche whose sentence failed to render is left out of
+        the annotations instead of being annotated with a sentence it does not contain.
+        """
+        rows = documents.to_dict(orient="records")
+        by_title = {str(row["title"]): str(row["doc_id"]) for row in rows}
+        texts = {str(row["doc_id"]): str(row["text"]) for row in rows}
+        index: dict[tuple[str, str], tuple[str, str]] = {}
+        for product in self._catalogue():
+            for kind in self.kinds:
+                doc_id = by_title.get(self._title(product, kind))
+                statement = _render(kind.statement, product, value=self._value(product, kind))
+                if doc_id is None or statement not in texts.get(doc_id, ""):
+                    continue
+                index[(product.code, kind.key)] = (doc_id, statement)
+        return index
+
+    def _factual_questions(
+        self, sentences: Mapping[tuple[str, str], tuple[str, str]]
+    ) -> list[dict[str, Any]]:
+        """Write one factual question per fiche (the ``facile`` difficulty)."""
+        rows: list[dict[str, Any]] = []
+        for product in self._catalogue():
+            for kind in self.kinds:
+                entry = sentences.get((product.code, kind.key))
+                if entry is None:
+                    continue
+                doc_id, statement = entry
+                rows.append(
+                    {
+                        "query_id": "",
+                        "question": _render(kind.question, product),
+                        "reference_answer": statement,
+                        "answer_type": "extractive",
+                        "difficulty": "facile",
+                        "intent": kind.intent,
+                        "split": "",
+                        "gold_doc_ids": doc_id,
+                        "gold_span": statement,
+                        "n_gold_docs": 1,
+                    }
+                )
+        return rows
+
+    def _paraphrase_questions(
+        self, sentences: Mapping[tuple[str, str], tuple[str, str]]
+    ) -> list[dict[str, Any]]:
+        """Write the paraphrase questions (same answer, other wording)."""
+        candidates = [
+            (product, kind, sentences[(product.code, kind.key)])
+            for product in self._catalogue()
+            for kind in self.kinds
+            if (product.code, kind.key) in sentences
+        ]
+        count = min(int(len(candidates) * self.paraphrase_share), len(candidates))
+        drawn = self.random_state.permutation(len(candidates))[:count]
+        rows: list[dict[str, Any]] = []
+        for position in drawn:
+            product, kind, (doc_id, statement) = candidates[int(position)]
+            rows.append(
+                {
+                    "query_id": "",
+                    "question": _render(kind.paraphrasis, product),
+                    "reference_answer": statement,
+                    "answer_type": "extractive",
+                    "difficulty": "paraphrase",
+                    "intent": kind.intent,
+                    "split": "",
+                    "gold_doc_ids": doc_id,
+                    "gold_span": statement,
+                    "n_gold_docs": 1,
+                }
+            )
+        return rows
+
+    def _append_multi_document(
+        self,
+        questions: pd.DataFrame,
+        sentences: Mapping[tuple[str, str], tuple[str, str]],
+    ) -> pd.DataFrame:
+        """Add the questions that ask two things at once.
+
+        The reference answer concatenates the two canonical sentences and both fiches are annotated
+        relevant: a system that returns a single passage is capped on this segment by construction.
+        """
+        candidates: list[tuple[Product, str, str, str]] = []
+        for product in self._catalogue():
+            for left_key, right_key, template in self.multi_document_pairs:
+                if (product.code, left_key) in sentences and (product.code, right_key) in sentences:
+                    candidates.append((product, left_key, right_key, template))
+        count = min(int(len(questions) * self.multi_document_share), len(candidates))
+        rows: list[dict[str, Any]] = []
+        for position in self.random_state.permutation(len(candidates))[:count]:
+            product, left_key, right_key, template = candidates[int(position)]
+            left = sentences[(product.code, left_key)]
+            right = sentences[(product.code, right_key)]
+            rows.append(
+                {
+                    "query_id": "",
+                    "question": _render(template, product),
+                    "reference_answer": f"{left[1]} {right[1]}",
+                    "answer_type": "abstractive",
+                    "difficulty": "multi_document",
+                    "intent": _kind_intent(left_key),
+                    "split": "",
+                    "gold_doc_ids": f"{left[0]},{right[0]}",
+                    "gold_span": f"{left[1]}||{right[1]}",
+                    "n_gold_docs": 2,
+                }
+            )
+        if not rows:
+            return questions
+        return pd.concat([questions, pd.DataFrame(rows)], ignore_index=True)
+
+    def _append_hors_corpus(self, questions: pd.DataFrame) -> pd.DataFrame:
+        """Add the questions the corpus cannot answer.
+
+        ``gold_doc_ids`` points at the fiche a lexical retriever will return (the nearest one)
+        while ``gold_span`` stays empty and ``answer_type`` says ``unanswerable``: the only correct
+        behaviour is to abstain, and answering is counted as a hallucination.
+        """
+        catalogue = self._catalogue()
+        count = max(int(len(questions) * self.hors_corpus_share), 1)
+        rows: list[dict[str, Any]] = []
+        for position in range(count):
+            product = catalogue[position % len(catalogue)]
+            template, intent = self.hors_corpus_questions[
+                position % len(self.hors_corpus_questions)
+            ]
+            nearest = questions.loc[
+                (questions["difficulty"] == "facile")
+                & (questions["question"].str.contains(product.name, regex=False))
+            ]
+            doc_id = (
+                str(nearest.iloc[position % len(nearest)]["gold_doc_ids"])
+                if not nearest.empty
+                else "DOC-0001"
+            )
+            rows.append(
+                {
+                    "query_id": "",
+                    "question": _render(template, product),
+                    "reference_answer": "Aucune réponse dans le corpus.",
+                    "answer_type": "unanswerable",
+                    "difficulty": "hors_corpus",
+                    "intent": intent,
+                    "split": "",
+                    "gold_doc_ids": doc_id,
+                    "gold_span": "",
+                    "n_gold_docs": 1,
+                }
+            )
+        return pd.concat([questions, pd.DataFrame(rows)], ignore_index=True)
+
+    def _assign_splits(self, questions: pd.DataFrame) -> pd.DataFrame:
+        """Assign an identifier and a split to every question.
+
+        Unanswerable questions are stratified on purpose — each split must hold some of them,
+        otherwise abstention would only be measured on the test split.
+        """
+        frame = questions.reset_index(drop=True).copy()
+        draws = self.random_state.random(len(frame))
+        splits = np.where(
+            draws < self.test_size,
+            "test",
+            np.where(draws < self.test_size + self.val_size, "val", "calibration"),
+        )
+        frame["split"] = splits
+        frame["query_id"] = [f"QRY-{index + 1:04d}" for index in range(len(frame))]
+        return frame
+
+    def _metadata(self, documents: pd.DataFrame, questions: pd.DataFrame) -> dict[str, Any]:
+        """Build the generation metadata archived next to the corpus."""
+        by_difficulty = questions["difficulty"].value_counts().to_dict()
+        answerable = questions.loc[questions["answer_type"] != "unanswerable"]
+        extractive = questions.loc[questions["answer_type"] == "extractive"]
+        return {
+            "dataset_name": self.dataset_name,
+            "seed": self.seed,
+            "reference_date": self.reference_date.isoformat(),
+            "n_documents": int(len(documents)),
+            "n_questions": int(len(questions)),
+            "n_answerable": int(len(answerable)),
+            "n_unanswerable": int(len(questions) - len(answerable)),
+            "n_products": int(len(self._catalogue())),
+            "n_article_kinds": int(len(self.kinds)),
+            "n_sources": int(documents["source"].nunique()),
+            "mean_document_tokens": float(documents["n_tokens"].mean()),
+            "extractive_share": round(float(len(extractive) / max(len(questions), 1)), 4),
+            "questions_by_difficulty": {
+                str(key): int(value) for key, value in by_difficulty.items()
+            },
+            "questions_by_split": {
+                str(key): int(value)
+                for key, value in questions["split"].value_counts().to_dict().items()
+            },
+            "retrievable_ceiling": round(
+                float(len(answerable) / max(len(questions), 1)) * 100.0, 2
+            ),
+            "generator": "SyntheticCorpusGenerator",
+            "notes": [
+                "Les réponses de référence sont les phrases exactes du corpus : l'exact match est "
+                "atteignable, il mesure la sélection de la bonne phrase et non la reformulation.",
+                "Les questions paraphrases conservent le nom du produit : sans lui, la question "
+                "serait ambiguë (plusieurs fiches y répondent) et non plus difficile.",
+                "Les questions multi-document demandent deux choses à la fois : la réponse de "
+                "référence concatène deux phrases et tout système qui s'arrête au premier passage "
+                "est plafonné sur ce segment.",
+                "Les questions hors corpus annotent la fiche la plus proche sans extrait "
+                "répondant : seule l'abstention y est correcte.",
+            ],
+        }
+
+
+def _render(template: str, product: Product, *, value: str | None = None) -> str:
+    """Render a template of the catalogue for a given product.
+
+    Every sentence and every question of the family goes through this helper: the agreement and
+    the elision of the articles are written once, and a template can never produce a sentence the
+    product does not agree with.
+
+    Args:
+        template: Template using the ``{name}``, ``{with_article}``, ``{of_name}``,
+            ``{to_name}`` and ``{titled}`` placeholders, plus ``{value}`` when the sentence
+            quotes a value. The placeholders carry the article, including its elision
+            (``de l'enceinte Onda``): a template can never glue an article to a bare name.
+        product: Product the sentence is written for.
+        value: Value quoted by a canonical sentence, when the template quotes one.
+
+    Returns:
+        The rendered sentence.
+    """
+    placeholders: dict[str, str] = {
+        "name": product.name,
+        "with_article": product.with_article,
+        "of_name": product.of_name,
+        "to_name": product.to_name,
+        "titled": product.titled,
+    }
+    if value is not None:
+        placeholders["value"] = value
+    return template.format(**placeholders)
+
+
+def _kind_intent(left_key: str) -> str:
+    """Return the intent of a question asking two fiches at once (the first one leads)."""
+    for kind in ARTICLE_KINDS:
+        if kind.key == left_key:
+            return kind.intent
+    return "procedure"
+
+
+def _parse_date(value: Any) -> date | None:
+    """Parse an ISO date coming from the configuration."""
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+__all__ = ["ARTICLE_KINDS", "ArticleKind", "PRODUCTS", "Product", "SyntheticCorpusGenerator"]

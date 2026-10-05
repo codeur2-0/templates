@@ -130,7 +130,51 @@ templates/
 | Tranche | Contenu | État |
 | --- | --- | --- |
 | 1 | `stacks` tfidf + langchain, `modality/text`, `task/retrieval`, famille `retrieval_augmented_generation`, notebooks texte, deux manifests, vérification verte | **livrée** : `ai-eng/rag/with-tfidf` (104 tests, 81,5 s) et `ai-eng/rag/with-langchain` (110 tests, 165,1 s), recall@5 de test 0,7194 dans les deux cas |
-| 2 | `embedding_pipeline`, `agent_tools`, `question_answering` (familles restantes de la modalité texte) | à venir |
+| 2 | `question_answering` (mutualise `modality/text`, `task/retrieval`, `stack/{tfidf,langchain}`) | **livrée** : `ai-eng/question-answering/with-tfidf` (106 tests, 48,8 s) et `with-langchain` (111 tests, 85,4 s), exact match 0,6212 et F1 0,7381 dans les deux cas |
+| 2b | `embedding_pipeline`, `agent_tools` (familles restantes de la modalité texte) | à venir |
 | 3 | `nlp/` : `text_classification` (tfidf, transformers), `named_entity_recognition` (spacy) | à venir |
 | 4 | `nlp/` : `summarization`, `llm_finetuning` (transformers, architecture minuscule, poids aléatoires) | à venir |
 | 5 | `mlops/model_serving` (fastapi) au-dessus d'un modèle entraîné | à venir |
+
+## 7. Tranche 2 — famille `question_answering`
+
+Le contrat de cette famille est la **phrase exacte** de la fiche, pas une réponse appuyée sur un
+passage : `answer_exact_match` devient donc une métrique de pilotage, et le corpus est écrit pour la
+rendre atteignable (chaque question est rédigée à partir de la phrase canonique de sa fiche, qui est
+sa réponse de référence mot pour mot). Les questions mono-document portent le nom du produit — seul
+discriminant lexical entre vingt fiches qui se ressemblent —, les paraphrases le gardent et
+s'éloignent du vocabulaire de la fiche, les questions multi-document demandent deux valeurs à la
+fois et les questions hors corpus portent sur un fait voisin mais absent.
+
+### Ce que la tranche a appris (et corrigé)
+
+1. **Un artefact qui oublie son générateur répond autrement que le modèle entraîné.** La
+   configuration `model.llm` (`min_overlap`, `support_ratio`) décide du nombre de phrases citées :
+   au rechargement, le modèle retombait sur les défauts et annexait des phrases parasites. Les deux
+   stacks texte archivent désormais le nœud `model.llm` (jamais la clé API) et le fusionnent à la
+   lecture ; `load_model(path)` sans configuration répond exactement comme le modèle ajusté.
+2. **`min_overlap = 2` : une phrase ne complète une réponse que si elle partage deux mots de
+   contenu avec la question.** La phrase d'ouverture commune à toutes les fiches ne peut plus être
+   citée « au titre d'un mot » (l'exact match du segment facile passe de 0,6047 à 0,8140).
+3. **`support_ratio = 0,8` : les passages dont le score tombe sous 80 % du meilleur sont écartés du
+   choix de phrase.** Sans ce garde-fou, une question sur les *frais de retour* recevait la phrase
+   du *délai de retour* (ratio 0,68) et perdait son exact match ; avec lui, la précision des
+   citations passe de 0,8854 à 0,9808. Le coût est mesuré et publié : la seconde fiche d'une
+   question multi-document (ratio 0,69-0,74) est écartée elle aussi, donc le modèle répond avec la
+   fiche la mieux classée (F1 0,6664 contre 0,9090 sans le garde-fou) — le rapport l'explique au
+   lieu de le taire.
+4. **Le seuil d'abstention calibré et la couverture se lisent ensemble.** Le seuil appris sur le
+   split de calibration (41,36) refuse 19 des 72 questions de test, dont 5 des 6 hors corpus : la
+   couverture (0,7879) et l'exactitude équilibrée (0,8106) sont publiées côte à côte, et la fiche
+   de modèle expose désormais le seuil **effectif**, pas le placeholder de la configuration.
+
+### Mesures finales (split de test, identiques sur les deux stacks)
+
+| Métrique | Valeur | Lecture |
+| --- | --- | --- |
+| `recall_at_1` (principale) | 0,8258 | la bonne fiche est première ; plancher de non-régression 0,70 |
+| `answer_exact_match` | 0,6212 | 4 réponses faciles sur 5 sont la phrase exacte de la fiche |
+| `answer_f1` | 0,7381 | le F1 pardonne la troncature, l'exact match non |
+| `citation_precision` | 0,9808 | une citation ne pointe presque jamais à côté |
+| `abstention_balanced_accuracy` | 0,8106 | refuser reste une décision mesurée, pas un aveu |
+| Latence p95 | 5,3 ms (tfidf) / 11,0 ms (langchain) | l'orchestration coûte ~6 ms, hors réseau |
