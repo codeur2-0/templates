@@ -26,12 +26,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import Runnable
 
 from src.features.build_features import ChunkFeatureBuilder
 from src.models.base import BaseModel, RetrievedChunk
 from src.models.chain import (
+    DEFAULT_MAX_CONTEXT_CHARS,
     ChunkRetriever,
     GroundedAnswer,
     LangChainGroundedLLM,
@@ -209,8 +209,10 @@ class LangChainModel(BaseModel):
         """Persist the index and the learned state (passages, vocabulary, embeddings).
 
         The LCEL chain is **not** serialised: it holds closures and is rebuilt at load time from
-        the configuration. Persisting state instead of objects is what keeps a reloaded artefact
-        independent from the library version that wrote it.
+        the configuration. The prompt template and the adapter knobs are archived with the state,
+        because they are the configuration of the chain: reloading without passing a configuration
+        must rebuild the same generator. Persisting state instead of objects is what keeps a
+        reloaded artefact independent from the library version that wrote it.
 
         Args:
             path: Destination file.
@@ -227,6 +229,7 @@ class LangChainModel(BaseModel):
             "name": self.name,
             "prompt_template": self._prompt.template,
             "max_context_chars": int(self._max_context_chars),
+            "llm": _llm_node(self.config),
             "lexical": self._lexical,
             "lexical_matrix": self._lexical_matrix,
             "embedder": self._embedder,
@@ -255,12 +258,9 @@ class LangChainModel(BaseModel):
             params=dict(payload.get("params", {})),
             task=str(payload.get("task", "retrieval")),
             random_state=int(payload.get("random_state", 42)),
-            config=dict(config or {}),
+            config=_merge_config(_artifact_config(payload), config),
             name=str(payload.get("name", "langchain_lexical")),
         )
-        if "prompt_template" in payload and not _configured_prompt(config):
-            model._prompt = PromptTemplate.from_template(str(payload["prompt_template"]))
-        model._max_context_chars = int(payload.get("max_context_chars", model._max_context_chars))
         model._lexical = payload["lexical"]
         model._lexical_matrix = payload["lexical_matrix"]
         model._embedder = payload["embedder"]
@@ -469,6 +469,9 @@ class LangChainModel(BaseModel):
         """Return the resolved hyper-parameters (both retrieval arms included)."""
         return {
             **dict(self.params),
+            # The calibrated threshold is *learned*: the card must publish the value the
+            # model actually applies, not the placeholder the configuration declared.
+            "abstention_threshold": float(self.abstention_threshold),
             "lexical": {
                 "mode": self._lexical.mode,
                 "ngram_range": list(self._lexical.ngram_range),
@@ -486,15 +489,56 @@ class LangChainModel(BaseModel):
         }
 
 
-def _configured_prompt(config: Mapping[str, Any] | None) -> bool:
-    """Whether a configuration carries an explicit prompt template."""
-    if not config:
-        return False
-    model_node = config.get("model")
-    if not isinstance(model_node, Mapping):
-        return False
-    prompt_node = model_node.get("prompt")
-    return isinstance(prompt_node, Mapping) and bool(prompt_node.get("template"))
+def _llm_node(config: Any) -> dict[str, Any]:
+    """Return the ``model.llm`` node of a configuration as a plain mapping."""
+    model_node = config.get("model") if isinstance(config, Mapping) else None
+    node = model_node.get("llm") if isinstance(model_node, Mapping) else None
+    return dict(node) if isinstance(node, Mapping) else {}
+
+
+def _artifact_config(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild the ``model`` node archived in an artefact (prompt and adapter knobs).
+
+    Args:
+        payload: Artefact payload read from disk.
+
+    Returns:
+        A configuration carrying ``model.prompt`` and ``model.llm``, so that a reload without an
+        explicit configuration rebuilds the *same* generator. The API key is never archived: it
+        stays in the environment.
+    """
+    model_node: dict[str, Any] = {}
+    llm = payload.get("llm")
+    if isinstance(llm, Mapping) and llm:
+        model_node["llm"] = dict(llm)
+    if payload.get("prompt_template"):
+        model_node["prompt"] = {
+            "template": str(payload["prompt_template"]),
+            "max_context_chars": int(payload.get("max_context_chars", DEFAULT_MAX_CONTEXT_CHARS)),
+        }
+    return {"model": model_node} if model_node else {}
+
+
+def _merge_config(
+    archived: Mapping[str, Any], provided: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Merge the configuration archived in an artefact with the one the caller passes.
+
+    Args:
+        archived: Configuration rebuilt from the artefact.
+        provided: Configuration passed to :meth:`LangChainModel.load` (it wins).
+
+    Returns:
+        The effective configuration; ``model`` is merged key by key, every other node is replaced.
+    """
+    merged: dict[str, Any] = {str(key): value for key, value in archived.items()}
+    for key, value in dict(provided or {}).items():
+        current = merged.get(str(key))
+        if str(key) == "model" and isinstance(value, Mapping) and isinstance(current, Mapping):
+            merged["model"] = {**current, **dict(value)}
+        else:
+            merged[str(key)] = value
+    return merged
 
 
 def _json_scalar(value: Any) -> Any:

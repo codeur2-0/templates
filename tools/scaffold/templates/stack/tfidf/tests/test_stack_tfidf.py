@@ -6,8 +6,8 @@ ne les connaissent pas, ce qui permet à une seconde stack de servir la même fa
 réécrire.
 
 Ce qui est vérifié ici n'est pas le contrat (la modalité le teste déjà) mais ce qui **distingue**
-cette stack : les deux scorers qu'elle sert, la persistance du vocabulaire appris, et la
-traçabilité de l'algorithme dans la fiche de modèle.
+cette stack : les deux scorers qu'elle sert, la persistance du vocabulaire appris, celle de la
+configuration du générateur, et la traçabilité de l'algorithme dans la fiche de modèle.
 """
 
 from __future__ import annotations
@@ -59,6 +59,42 @@ def test_the_vocabulary_is_persisted_with_the_index(
         [passage.score for passage in reloaded.retrieve(question, 5)],
         [passage.score for passage in model.retrieve(question, 5)],
     )
+
+
+def test_the_generator_configuration_survives_a_reload(
+    documents: pd.DataFrame, tmp_path: Path
+) -> None:
+    """Un index rechargé sans configuration garde le générateur qui l'a produit.
+
+    C'est le test qui manquait quand ``load_model(path)`` reconstruisait un ``ExtractiveLLM`` par
+    défaut : le modèle rechargé répondait avec ``min_overlap = 1`` alors que l'entraînement
+    exigeait 2, et il annexait donc des phrases qu'il n'aurait jamais dû citer. Rien dans les
+    métriques du pipeline ne trahissait la différence — seule une question posée au modèle
+    rechargé le faisait.
+    """
+    model = build_model(
+        {
+            "model": {
+                "algorithm": "bm25",
+                "llm": {
+                    "provider": "extractive",
+                    "max_sentences": 2,
+                    "min_overlap": 2,
+                    "support_ratio": 0.8,
+                },
+            }
+        }
+    )
+    model.fit(documents)
+    path = model.save(tmp_path / "index.joblib")
+
+    reloaded = load_model(path)
+    assert reloaded.llm.describe() == {
+        "provider": "extractive",
+        "max_sentences": 2,
+        "min_overlap": 2,
+        "support_ratio": 0.8,
+    }
 
 
 def test_the_model_card_names_the_configured_algorithm(fitted_model: BaseModel) -> None:

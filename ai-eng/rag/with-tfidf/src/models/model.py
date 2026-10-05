@@ -20,8 +20,10 @@ The scoring is implemented in :class:`src.preprocessing.transformers.LexicalVect
 * ``bm25`` — Okapi BM25, term-frequency saturation plus document-length normalisation;
 * ``tfidf_cosine`` — the classic cosine similarity on L2-normalised TF-IDF vectors.
 
-The model persists the chunk table, the learned vocabulary/IDF and the document metadata, so a
-reloaded artefact ranks exactly like the fitted one (a round-trip test asserts it).
+The model persists the chunk table, the learned vocabulary/IDF, the document metadata *and* the
+generator configuration (``model.llm``), so a reloaded artefact ranks *and answers* exactly like
+the fitted one (two round-trip tests assert it: an artefact that forgets its
+``min_overlap``/``support_ratio`` is a model that was never trained).
 """
 
 from __future__ import annotations
@@ -44,6 +46,55 @@ logger = get_logger(__name__)
 
 #: Columns of the document metadata kept in the artefact.
 DOCUMENT_COLUMNS: tuple[str, ...] = ("doc_id", "title", "section", "source", "published_at")
+
+
+def _llm_node(config: Any) -> dict[str, Any]:
+    """Return the ``model.llm`` node of a configuration as a plain mapping."""
+    model_node = config.get("model") if isinstance(config, Mapping) else None
+    node = model_node.get("llm") if isinstance(model_node, Mapping) else None
+    return dict(node) if isinstance(node, Mapping) else {}
+
+
+def _artifact_config(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild the ``model`` node archived in an artefact (the generator knobs).
+
+    The generator is part of the trained artefact: ``min_overlap`` and ``support_ratio`` decide
+    how many sentences an answer may quote, so a reload that falls back on the defaults answers
+    differently from the model that was fitted and evaluated. The API key is never archived: it
+    stays in the environment.
+
+    Args:
+        payload: Artefact payload read from disk.
+
+    Returns:
+        A configuration carrying ``model.llm`` when the artefact archived one.
+    """
+    llm = payload.get("llm")
+    if isinstance(llm, Mapping) and llm:
+        return {"model": {"llm": dict(llm)}}
+    return {}
+
+
+def _merge_config(
+    archived: Mapping[str, Any], provided: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Merge the configuration archived in an artefact with the one the caller passes.
+
+    Args:
+        archived: Configuration rebuilt from the artefact.
+        provided: Configuration passed to :meth:`TfidfModel.load` (it wins).
+
+    Returns:
+        The effective configuration; ``model`` is merged key by key, every other node is replaced.
+    """
+    merged: dict[str, Any] = {str(key): value for key, value in archived.items()}
+    for key, value in dict(provided or {}).items():
+        current = merged.get(str(key))
+        if str(key) == "model" and isinstance(value, Mapping) and isinstance(current, Mapping):
+            merged["model"] = {**current, **dict(value)}
+        else:
+            merged[str(key)] = value
+    return merged
 
 
 def _balanced_accuracy(answered: Any, abstained: Any) -> float:
@@ -184,6 +235,7 @@ class TfidfModel(BaseModel):
             "matrix": self._matrix,
             "chunks": self._chunks,
             "documents": self._documents,
+            "llm": _llm_node(self.config),
             "fit_result": None if self.fit_result_ is None else self.fit_result_.to_dict(),
             **self._state_to_save(),
         }
@@ -206,7 +258,7 @@ class TfidfModel(BaseModel):
             params=dict(payload.get("params", {})),
             task=str(payload.get("task", "retrieval")),
             random_state=int(payload.get("random_state", 42)),
-            config=dict(config or {}),
+            config=_merge_config(_artifact_config(payload), config),
             name=str(payload.get("name", "bm25")),
         )
         model._vectorizer = payload["vectorizer"]
@@ -376,6 +428,9 @@ class TfidfModel(BaseModel):
         """Return the resolved hyper-parameters (vocabulary size included)."""
         return {
             **dict(self.params),
+            # The calibrated threshold is *learned*: the card must publish the value the
+            # model actually applies, not the placeholder the configuration declared.
+            "abstention_threshold": float(self.abstention_threshold),
             "lexical": {
                 "mode": self._vectorizer.mode,
                 "ngram_range": list(self._vectorizer.ngram_range),

@@ -30,7 +30,22 @@ from src.models.chain import (
     format_documents,
 )
 
-QUESTION = "Quel est le solde annuel de congés payés pour les salariés en CDI ?"
+@pytest.fixture(scope="session")
+def corpus_question(queries: pd.DataFrame) -> str:
+    """Une question factuelle du corpus du projet, lue dans les données et jamais codée en dur.
+
+    La même suite de tests sert plusieurs familles (RAG, questions-réponses, ...) : une question
+    littérale ne testerait que le corpus de l'une d'elles. La question est tirée des questions
+    annotées par la famille — la première « facile », dont la réponse est un fait planté — pour que
+    le test vérifie bien ce qu'il annonce : une question que le corpus peut trancher ne doit pas
+    être une abstention.
+    """
+    factual = queries.loc[queries["difficulty"] == "facile"]
+    if factual.empty:
+        factual = queries.loc[queries["answer_type"] != "unanswerable"]
+    if factual.empty:  # pragma: no cover - le contrat des questions interdit ce cas
+        pytest.skip("le corpus du projet n'annote aucune question factuelle")
+    return str(factual.iloc[0]["question"])
 
 
 def test_the_stack_serves_three_retrieval_strategies() -> None:
@@ -40,28 +55,32 @@ def test_the_stack_serves_three_retrieval_strategies() -> None:
     )
 
 
-def test_the_retriever_is_a_langchain_base_retriever(fitted_model: BaseModel) -> None:
+def test_the_retriever_is_a_langchain_base_retriever(
+    fitted_model: BaseModel, corpus_question: str
+) -> None:
     """Le retrieval passe par le point d'extension du framework, pas par une méthode maison."""
     retriever = fitted_model.retriever  # type: ignore[attr-defined]
     assert isinstance(retriever, BaseRetriever)
-    documents = retriever.invoke(QUESTION)
+    documents = retriever.invoke(corpus_question)
     assert documents, "le retriever doit rendre au moins un passage"
     assert all(isinstance(document, Document) for document in documents)
     first = documents[0]
     assert set(first.metadata) >= {"chunk_id", "doc_id", "rank", "score"}
     assert first.metadata["rank"] == 1
-    assert first.page_content == fitted_model.retrieve(QUESTION, 1)[0].text
+    assert first.page_content == fitted_model.retrieve(corpus_question, 1)[0].text
 
 
-def test_the_chain_answers_with_its_citations(fitted_model: BaseModel) -> None:
+def test_the_chain_answers_with_its_citations(
+    fitted_model: BaseModel, corpus_question: str
+) -> None:
     """Chaîne de bout en bout : une question, une réponse fondée sur les passages retrouvés."""
-    answer: GroundedAnswer = fitted_model.chain.invoke(QUESTION)  # type: ignore[attr-defined]
+    answer: GroundedAnswer = fitted_model.chain.invoke(corpus_question)  # type: ignore[attr-defined]
     assert isinstance(answer, GroundedAnswer)
     assert not answer.abstained, "la question porte sur un fait planté du corpus"
     assert answer.citations, "une réponse sans citation n'est pas traçable"
     known = {str(document.metadata["chunk_id"]) for document in answer.documents}
     assert set(answer.citations) <= known
-    assert QUESTION in answer.prompt
+    assert corpus_question in answer.prompt
     assert answer.context in answer.prompt
     assert answer.to_generation().cited_chunk_ids == answer.citations
 
@@ -95,38 +114,47 @@ def test_the_context_budget_drops_the_excess_passages() -> None:
     assert context.count("[") < len(documents)
 
 
-def test_the_hybrid_arm_fuses_ranks_of_both_arms(documents: pd.DataFrame) -> None:
+def test_the_hybrid_arm_fuses_ranks_of_both_arms(
+    documents: pd.DataFrame, corpus_question: str
+) -> None:
     """RRF combine les *rangs* des deux bras : le score recalculé ici doit être celui du modèle."""
     model = build_model({"model": {"algorithm": "langchain_hybrid"}})
     model.fit(documents)
     retriever = model.retriever  # type: ignore[attr-defined]
 
-    lexical = np.asarray(retriever.lexical.score(QUESTION, retriever.lexical_matrix))
-    dense = np.asarray(retriever.embedder.transform([QUESTION])[0]) @ np.asarray(
-        retriever.embedding_matrix
-    ).T
+    # Les deux bras sont lus *sur le retriever* plutôt que recalculés : un ordre d'opérations
+    # différent suffit à permuter deux passages à égalité stricte (des corpus très templés en
+    # produisent beaucoup), et la fusion compare des rangs, pas des valeurs.
+    lexical = np.asarray(
+        retriever.lexical.score(corpus_question, retriever.lexical_matrix), dtype="float64"
+    )
+    arms = (lexical, retriever._dense_scores(corpus_question))
     expected = np.zeros(len(retriever.chunks))
-    for scores in (lexical, dense):
+    for scores in arms:
         for rank, index in enumerate(np.argsort(-scores, kind="stable"), start=1):
             expected[int(index)] += 1.0 / (retriever.rrf_constant + rank)
 
-    np.testing.assert_allclose(retriever.score_query(QUESTION), expected, rtol=1e-12)
-    fused = [document.metadata["chunk_id"] for document in retriever.invoke(QUESTION)]
+    np.testing.assert_allclose(retriever.score_query(corpus_question), expected, rtol=1e-12)
+    fused = [document.metadata["chunk_id"] for document in retriever.invoke(corpus_question)]
     assert len(fused) == len(set(fused))
 
 
-def test_the_dense_arm_does_not_rank_like_the_lexical_one(documents: pd.DataFrame) -> None:
+def test_the_dense_arm_does_not_rank_like_the_lexical_one(
+    documents: pd.DataFrame, corpus_question: str
+) -> None:
     """Deux représentations distinctes, deux classements distincts : sinon l'une des deux ment."""
     lexical = build_model({"model": {"algorithm": "langchain_lexical"}})
     lexical.fit(documents)
     dense = build_model({"model": {"algorithm": "langchain_dense"}})
     dense.fit(documents)
-    lexical_ids = [passage.chunk_id for passage in lexical.retrieve(QUESTION, 10)]
-    dense_ids = [passage.chunk_id for passage in dense.retrieve(QUESTION, 10)]
+    lexical_ids = [passage.chunk_id for passage in lexical.retrieve(corpus_question, 10)]
+    dense_ids = [passage.chunk_id for passage in dense.retrieve(corpus_question, 10)]
     assert lexical_ids != dense_ids
 
 
-def test_the_chain_is_rebuilt_at_load_time(fitted_model: BaseModel, tmp_path: Path) -> None:
+def test_the_chain_is_rebuilt_at_load_time(
+    fitted_model: BaseModel, corpus_question: str, tmp_path: Path
+) -> None:
     """L'artefact ne contient pas le graphe : il est reconstruit, et répond à l'identique.
 
     Sérialiser un `Runnable` LCEL serait fragile (fermetures, versions) : l'état est persisté et la
@@ -136,8 +164,11 @@ def test_the_chain_is_rebuilt_at_load_time(fitted_model: BaseModel, tmp_path: Pa
     reloaded = load_model(path)
     assert isinstance(reloaded.llm, LangChainGroundedLLM)
     assert isinstance(reloaded.retriever, BaseRetriever)  # type: ignore[attr-defined]
-    before = fitted_model.chain.invoke(QUESTION)  # type: ignore[attr-defined]
-    after = reloaded.chain.invoke(QUESTION)  # type: ignore[attr-defined]
+    # Le générateur est de la *configuration*, pas de l'état : il doit être reconstruit à
+    # l'identique, sinon l'artefact recharge répondrait sous une autre règle que celle entraînée.
+    assert reloaded.llm.describe()["adapter"] == fitted_model.llm.describe()["adapter"]
+    before = fitted_model.chain.invoke(corpus_question)  # type: ignore[attr-defined]
+    after = reloaded.chain.invoke(corpus_question)  # type: ignore[attr-defined]
     assert after.citations == before.citations
     assert after.text == before.text
     assert [document.metadata["chunk_id"] for document in after.documents] == [
@@ -146,7 +177,7 @@ def test_the_chain_is_rebuilt_at_load_time(fitted_model: BaseModel, tmp_path: Pa
 
 
 def test_the_adapter_receives_the_prompt_rendered_by_the_chain(
-    fitted_model: BaseModel, monkeypatch: pytest.MonkeyPatch
+    fitted_model: BaseModel, corpus_question: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """L'adaptateur LLM est un Runnable branché sur le prompt : il reçoit le texte rendu."""
     captured: dict[str, str] = {}
@@ -158,6 +189,8 @@ def test_the_adapter_receives_the_prompt_rendered_by_the_chain(
         return original(question, passages, prompt=prompt)  # type: ignore[arg-type]
 
     monkeypatch.setattr(adapter, "generate", spy)
-    fitted_model.chain.invoke(QUESTION)  # type: ignore[attr-defined]
-    assert "Contexte:" in captured["prompt"]
-    assert QUESTION in captured["prompt"]
+    answer = fitted_model.chain.invoke(corpus_question)  # type: ignore[attr-defined]
+    # Le texte du prompt appartient à la configuration du projet : le test vérifie que ce que la
+    # chaîne a rendu contient bien le contexte assemblé et la question, pas un libellé littéral.
+    assert corpus_question in captured["prompt"]
+    assert answer.context in captured["prompt"]

@@ -107,11 +107,15 @@ class ExtractiveLLM(BaseLLM):
 
     The algorithm is a scoring of the sentences of the retrieved passages:
 
-    1. each sentence is scored by the share of the question's content words it contains,
-       weighted by the passage's retrieval score and penalised by its position in the passage;
-    2. the best sentence is kept, then a second one is appended only if it adds new question
+    1. the passages whose score is far below the best one are dropped first (see
+       ``support_ratio``): a sentence rescued from a marginal passage is how a correct answer
+       gets a second, wrong sentence appended to it;
+    2. each remaining sentence is scored by the share of the question's content words it
+       contains, weighted by the passage's retrieval score and penalised by its position in the
+       passage;
+    3. the best sentence is kept, then a second one is appended only if it adds new question
        words (answers that need two facts are common in procedures);
-    3. the answer is the concatenation of the kept sentences, and the cited passages are those
+    4. the answer is the concatenation of the kept sentences, and the cited passages are those
        the sentences come from.
 
     When no sentence shares a minimum number of question words, the generator refuses to
@@ -121,11 +125,14 @@ class ExtractiveLLM(BaseLLM):
     Attributes:
         max_sentences: Maximum number of sentences in the answer.
         min_overlap: Minimum number of shared content words for a sentence to be usable.
+        support_ratio: Minimum score of a passage, as a share of the best passage score
+            (``0.0`` disables the filter and lets every retrieved passage contribute).
         max_chars: Hard cap on the answer length.
     """
 
     max_sentences: int = 2
     min_overlap: int = 1
+    support_ratio: float = 0.0
     max_chars: int = 480
     provider = "extractive"
 
@@ -148,6 +155,13 @@ class ExtractiveLLM(BaseLLM):
         question_tokens = [token for token in tokenize(question) if len(token) > 2]
         if not question_tokens or not passages:
             return Generation(text="", rationale="no passage or no content word in the question")
+        best_passage_score = max(passage.score for passage in passages)
+        if self.support_ratio > 0.0 and best_passage_score > 0.0:
+            passages = [
+                passage
+                for passage in passages
+                if passage.score >= self.support_ratio * best_passage_score
+            ]
 
         scored: list[tuple[float, int, str, str]] = []
         for passage in passages:
@@ -190,6 +204,7 @@ class ExtractiveLLM(BaseLLM):
             "provider": self.provider,
             "max_sentences": self.max_sentences,
             "min_overlap": self.min_overlap,
+            "support_ratio": self.support_ratio,
         }
 
 
@@ -372,6 +387,7 @@ def build_llm(config: Any, *, env: dict[str, str] | None = None) -> BaseLLM:
     return ExtractiveLLM(
         max_sentences=int(settings.get("max_sentences", 2)),
         min_overlap=int(settings.get("min_overlap", 1)),
+        support_ratio=float(settings.get("support_ratio", 0.0)),
     )
 
 

@@ -16,6 +16,7 @@ import pytest
 from src.data.schemas import validate_predictions
 from src.models import available_algorithms, build_model, load_model
 from src.models.base import BaseModel, ModelCard
+from src.models.llm import ExtractiveLLM, Passage
 
 
 def test_unfitted_model_refuses_to_retrieve() -> None:
@@ -100,6 +101,40 @@ def test_hors_corpus_questions_are_abstained_or_flagged(
     assert answer.top_score >= 0.0
     if answer.abstained:
         assert answer.text.strip() == ""
+
+
+def test_extractive_llm_ignores_marginal_passages() -> None:
+    """Une phrase d'un passage nettement moins bien classé n'est pas annexée à la réponse.
+
+    C'est l'échec que la famille questions-réponses a mesuré sur pièces : le bon passage était
+    premier, mais une fiche voisine, deux fois moins bien classée, fournissait une phrase contenant
+    un mot de la question (« retour », « garantie ») que le générateur ajoutait à la réponse — et
+    l'exact match tombait à zéro pour une question que le modèle savait traiter.
+    """
+    question = "Quel est le montant des frais de retour et le délai de réception ?"
+    passages = [
+        Passage(
+            chunk_id="c1",
+            doc_id="d1",
+            text="Le montant des frais de retour est de 10 EUR.",
+            score=50.0,
+            rank=1,
+        ),
+        Passage(
+            chunk_id="c2",
+            doc_id="d2",
+            text="Le délai de réception est de 30 jours.",
+            score=20.0,
+            rank=2,
+        ),
+    ]
+    strict = ExtractiveLLM(max_sentences=2, min_overlap=2, support_ratio=0.8)
+    generation = strict.generate(question, passages)
+    assert generation.text == "Le montant des frais de retour est de 10 EUR."
+    assert generation.cited_chunk_ids == ["c1"]
+
+    permissive = ExtractiveLLM(max_sentences=2, min_overlap=2)
+    assert permissive.generate(question, passages).cited_chunk_ids == ["c1", "c2"]
 
 
 def test_abstention_threshold_is_respected() -> None:
