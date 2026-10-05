@@ -102,13 +102,13 @@ class DataConfig(BaseModel):
     dataset_name: str = "internal_knowledge_base"
     n_samples: int = Field(default=128, ge=50)
     seed: int = 42
-    formats: list[str] = Field(default_factory=lambda: ['parquet', 'csv'])
+    formats: list[str] = Field(default_factory=lambda: ["parquet", "csv"])
     raw_dir: Path = Path("data/raw")
     processed_dir: Path = Path("data/processed")
     external_dir: Path = Path("data/external")
     target: str | None = None
-    id_column: str | None = 'doc_id'
-    time_column: str | None = 'published_at'
+    id_column: str | None = "doc_id"
+    time_column: str | None = "published_at"
     group_column: str | None = None
     positive_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     drop_columns: list[str] = Field(default_factory=list)

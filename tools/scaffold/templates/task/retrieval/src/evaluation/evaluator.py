@@ -222,16 +222,20 @@ class Evaluator:
                 str(record["question"]), max(self.ks) * self.chunks_per_document
             )
             relevant_chunks = query_relevance(record, retrieved, span_overlap=self.span_overlap)
-            gold_documents = {
-                item for item in str(record.get("gold_doc_ids", "")).split(",") if item
-            }
+            # Une question hors corpus n'a **aucun** document pertinent : le générateur lui laisse
+            # un document leurre pour que l'annotation reste vérifiable, mais le compter comme
+            # pertinent ferait dépendre le rappel de ce leurre — et la ligne de la question
+            # contredirait l'agrégat, qui l'exclut déjà du dénominateur.
+            gold_documents = (
+                set()
+                if record.get("answer_type") == "unanswerable"
+                else {item for item in str(record.get("gold_doc_ids", "")).split(",") if item}
+            )
             document_ranking = list(dict.fromkeys(passage.doc_id for passage in retrieved))[
                 : max(self.ks)
             ]
             doc_rankings.append(document_ranking)
-            doc_relevances.append(
-                set() if record.get("answer_type") == "unanswerable" else gold_documents
-            )
+            doc_relevances.append(gold_documents)
             chunk_rankings.append([passage.chunk_id for passage in retrieved])
             chunk_relevances.append(relevant_chunks)
 

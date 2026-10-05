@@ -886,6 +886,10 @@ class LexicalVectorizer:
             "vocabulary": self._vectorizer.vocabulary_,
             "idf": None if self._idf is None else self._idf.tolist(),
             "length_norm": getattr(self, "_length_norm", None),
+            # L'estimateur est persisté tel quel : réinjecter une simple liste de vocabulaire
+            # laisse ``TfidfVectorizer`` sans son transformeur interne (``_tfidf``), et le
+            # premier ``transform`` échoue alors que l'artefact paraît valide.
+            "estimator": self._vectorizer,
         }
         return save_pickle(payload, path)
 
@@ -909,8 +913,11 @@ class LexicalVectorizer:
             k1=float(payload["k1"]),
             b=float(payload["b"]),
         )
-        vectorizer._vectorizer.vocabulary_ = dict(payload["vocabulary"])
-        vectorizer._vectorizer.fixed_vocabulary_ = True
+        if "estimator" in payload:
+            vectorizer._vectorizer = payload["estimator"]
+        else:  # artefact antérieur : on reconstruit un état minimal, sans transformeur interne
+            vectorizer._vectorizer.vocabulary_ = dict(payload["vocabulary"])
+            vectorizer._vectorizer.fixed_vocabulary_ = True
         vectorizer._idf = (
             None if payload["idf"] is None else np.asarray(payload["idf"], dtype="float64")
         )

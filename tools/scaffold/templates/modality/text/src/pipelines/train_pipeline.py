@@ -108,10 +108,10 @@ class TrainPipeline(BasePipeline):
         )
         return PipelineResult(
             name=self.name,
-            metrics={
-                "val_" + key if not key.startswith("val_") else key: value
-                for key, value in outcome.metrics.items()
-            },
+            # Le trainer nomme déjà ses métriques (``val_*`` pour la validation, ``index_*``
+            # pour l'index) : les renommer ici transformerait un compteur d'index en métrique de
+            # validation, et le rapport publierait deux fois la même grandeur.
+            metrics=dict(outcome.metrics),
             artifacts=artifacts,
             payload=outcome,
             messages=[

@@ -116,8 +116,8 @@ class ChunksSchema(pa.DataFrameModel):
         coerce = True
         ordered = False
 
-    @classmethod
     @pa.dataframe_check
+    @classmethod
     def end_after_start(cls, data: pd.DataFrame) -> pd.Series:
         """A passage must span a strictly positive character range."""
 
@@ -163,8 +163,8 @@ class QueriesSchema(pa.DataFrameModel):
         coerce = True
         ordered = False
 
-    @classmethod
     @pa.dataframe_check
+    @classmethod
     def unanswerable_has_two_sentinels(cls, data: pd.DataFrame) -> pd.Series:
         """Enforce the sentinel convention of unanswerable questions.
 

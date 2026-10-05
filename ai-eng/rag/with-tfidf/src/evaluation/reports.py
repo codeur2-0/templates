@@ -197,12 +197,8 @@ class ReportBuilder:
                 directory / "score_separation.png",
                 threshold=None if threshold is None else float(threshold),
             ),
-            "latency": lambda: plots.plot_latency(
-                result.per_question, directory / "latency.png"
-            ),
-            "segments": lambda: plots.plot_segments(
-                result.segments, directory / "segments.png"
-            ),
+            "latency": lambda: plots.plot_latency(result.per_question, directory / "latency.png"),
+            "segments": lambda: plots.plot_segments(result.segments, directory / "segments.png"),
         }
         written: dict[str, Path] = {}
         for name, factory in candidates.items():
@@ -217,10 +213,7 @@ class ReportBuilder:
 
     def _segments_frame(self, result: EvaluationResult) -> pd.DataFrame:
         """Turn the segment metrics into a table."""
-        rows = [
-            {"segment": key, **dict(values)}
-            for key, values in result.segments.items()
-        ]
+        rows = [{"segment": key, **dict(values)} for key, values in result.segments.items()]
         return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["segment"])
 
     # ------------------------------------------------------------------ rendu ------------
@@ -248,8 +241,7 @@ class ReportBuilder:
             f"- Objectif contractuel : **{PRIMARY_METRIC} ≥ {MIN_PRIMARY}**.",
             f"- Mesuré : **{_format(result.metrics.get(PRIMARY_METRIC))}** → verdict "
             f"**{self._verdict(result)}**.",
-            f"- Références triviales sur la même métrique : "
-            f"{self._baselines_line(result)}.",
+            f"- Références triviales sur la même métrique : {self._baselines_line(result)}.",
             "",
             *self._notes(result),
             "",
@@ -391,8 +383,7 @@ class ReportBuilder:
                 rows.append([name, _format(result.metrics.get(name))])
         if not rows:
             return (
-                "Aucune métrique de réponse : le manifeste ne les a pas demandées "
-                "(retriever pur)."
+                "Aucune métrique de réponse : le manifeste ne les a pas demandées (retriever pur)."
             )
         return _markdown_table(["Métrique", "Valeur"], rows)
 
