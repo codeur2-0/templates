@@ -1,0 +1,949 @@
+{#- Générateur du corpus documentaire synthétique + questions annotées (famille RAG). -#}
+"""Synthetic corpus generator of the retrieval-augmented generation family.
+
+{{ wrap(spec.data.description, 98) }}
+
+The generator is *not* a random text generator: it plants **facts** (a sentence carrying a
+value) into documents, then writes the questions from those facts. That is what makes the
+evaluation meaningful:
+
+* each question knows which document answers it, and which sentence contains the answer, so
+  recall@k and citation precision measure something real;
+* some questions are paraphrases that share almost no word with the source sentence, which is
+  where a lexical retriever must fail and a good embedding must win;
+* some questions are answered by **two** documents (a procedure and its exception), which
+  punishes any system that stops at the first plausible passage;
+* a share of the questions has **no answer** in the corpus (``hors_corpus``): the only correct
+  behaviour is to abstain, and the schema refuses to let such a question carry a fake gold span.
+
+Everything is seeded: two calls with the same configuration produce byte-identical frames.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from src.data.generator_base import BaseCorpusGenerator, GeneratedCorpus
+from src.preprocessing.transformers import tokenize
+from src.utils.config_access import as_mapping
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class FactTemplate:
+    """A planted fact: the sentence that answers, and how to ask a question about it.
+
+    Attributes:
+        topic: Business topic of the fact.
+        section: Editorial section of the document that will host the fact.
+        source: Wiki space of the document.
+        statement: Sentence inserted in the corpus; ``{value}`` is replaced by a value.
+        question: Question template; ``{label}`` is replaced by the fact label.
+        label: Human label of the fact, used inside the question.
+        answer: Reference answer, ``{value}`` replaced by the value.
+        values: Admissible values (one document per value).
+        paraphrasable: Whether a "paraphrase" question can be written for this fact (a question
+            that shares almost no content word with the statement).
+        paraphrase: Alternative wording of the statement, used to write the paraphrase question.
+    """
+
+    topic: str
+    section: str
+    source: str
+    statement: str
+    question: str
+    label: str
+    answer: str
+    values: tuple[str, ...]
+    paraphrasable: bool = True
+    paraphrase: str = ""
+
+
+#: Facts of the six wiki spaces. A dozen facts per topic is enough for the retrieval problem to
+#: be non-trivial (hundreds of passages compete) while staying readable.
+FACTS: tuple[FactTemplate, ...] = (
+    FactTemplate(
+        topic="conges",
+        section="politique",
+        source="wiki_rh",
+        statement="Le solde de congés payés est de {value} jours ouvrables par an pour un temps plein.",
+        question="Combien de jours de congés payés par an ?",
+        label="le solde annuel de congés payés",
+        answer="{value} jours ouvrables par an.",
+        values=("25", "27", "28", "30"),
+        paraphrase="La durée annuelle des vacances acquises atteint {value} journées travaillables.",
+    ),
+    FactTemplate(
+        topic="conges",
+        section="procedure",
+        source="wiki_rh",
+        statement="Une demande de congé doit être déposée au moins {value} jours avant le départ.",
+        question="Quel est le délai minimum pour poser une demande de congé ?",
+        label="le délai de dépôt d'une demande de congé",
+        answer="{value} jours avant le départ.",
+        values=("14", "21", "30"),
+        paraphrase="Le salarié doit anticiper sa demande de vacances d'au moins {value} journées.",
+    ),
+    FactTemplate(
+        topic="teletravail",
+        section="politique",
+        source="wiki_rh",
+        statement="Le télétravail est autorisé jusqu'à {value} jours par semaine.",
+        question="Combien de jours de télétravail par semaine sont autorisés ?",
+        label="le nombre de jours de télétravail hebdomadaire",
+        answer="{value} jours par semaine.",
+        values=("2", "3", "4"),
+        paraphrase="Le travail à distance est plafonné à {value} journées hebdomadaires.",
+    ),
+    FactTemplate(
+        topic="teletravail",
+        section="conformite",
+        source="wiki_juridique",
+        statement="Le télétravail impose une connexion chiffrée et un écran verrouillé après {value} minutes.",
+        question="Quel est le délai de verrouillage automatique exigé en télétravail ?",
+        label="le délai de verrouillage de l'écran",
+        answer="Verrouillage après {value} minutes d'inactivité.",
+        values=("5", "10", "15"),
+        paraphrase="En situation de travail à distance, l'écran doit se verrouiller au bout de {value} minutes.",
+    ),
+    FactTemplate(
+        topic="achats",
+        section="procedure",
+        source="wiki_finance",
+        statement="Tout achat supérieur à {value} euros hors taxes exige trois devis.",
+        question="À partir de quel montant trois devis sont-ils obligatoires ?",
+        label="le seuil des trois devis",
+        answer="Au-delà de {value} euros HT.",
+        values=("5000", "10000", "15000"),
+        paraphrase="Les commandes dépassant {value} euro hors taxe nécessitent une mise en concurrence.",
+    ),
+    FactTemplate(
+        topic="achats",
+        section="contact",
+        source="wiki_finance",
+        statement="Toute facture fournisseur doit être transmise au service achats sous {value} jours.",
+        question="Sous quel délai faut-il transmettre une facture fournisseur ?",
+        label="le délai de transmission d'une facture",
+        answer="Sous {value} jours.",
+        values=("5", "10", "15"),
+        paraphrase="Le fournisseur dispose de {value} journées pour faire parvenir sa facture.",
+    ),
+    FactTemplate(
+        topic="incidents",
+        section="procedure",
+        source="wiki_it",
+        statement="Un incident critique doit être déclaré dans l'heure et escaladé après {value} heures.",
+        question="Après combien d'heures un incident critique est-il escaladé ?",
+        label="le délai d'escalade d'un incident critique",
+        answer="Escalade après {value} heures.",
+        values=("2", "4", "8"),
+        paraphrase="L'escalade d'une panne majeure intervient au bout de {value} heures.",
+    ),
+    FactTemplate(
+        topic="incidents",
+        section="definition",
+        source="wiki_it",
+        statement="On appelle incident majeur une indisponibilité de service supérieure à {value} minutes.",
+        question="À partir de quelle durée parle-t-on d'incident majeur ?",
+        label="la définition de l'incident majeur",
+        answer="Une indisponibilité supérieure à {value} minutes.",
+        values=("30", "60", "120"),
+        paraphrase="Une coupure de plus de {value} minutes qualifie un incident majeur.",
+    ),
+    FactTemplate(
+        topic="securite",
+        section="conformite",
+        source="wiki_juridique",
+        statement="Les données personnelles sont conservées au maximum {value} mois après la fin du contrat.",
+        question="Quelle est la durée de conservation des données après la fin du contrat ?",
+        label="la durée de conservation des données clients",
+        answer="{value} mois après la fin du contrat.",
+        values=("12", "24", "36"),
+        paraphrase="Après la résiliation, les informations nominatives sont conservées {value} mois.",
+    ),
+    FactTemplate(
+        topic="securite",
+        section="procedure",
+        source="wiki_it",
+        statement="Un mot de passe doit contenir au moins {value} caractères et être renouvelé chaque année.",
+        question="Quelle est la longueur minimale exigée pour un mot de passe ?",
+        label="la longueur minimale d'un mot de passe",
+        answer="Au moins {value} caractères.",
+        values=("12", "14", "16"),
+        paraphrase="La politique de sécurité impose {value} signes au minimum pour un secret personnel.",
+    ),
+    FactTemplate(
+        topic="onboarding",
+        section="procedure",
+        source="wiki_rh",
+        statement="La période d'essai d'un cadre est de {value} mois renouvelable une fois.",
+        question="Quelle est la durée de la période d'essai ?",
+        label="la période d'essai des cadres",
+        answer="{value} mois renouvelable une fois.",
+        values=("3", "4", "6"),
+        paraphrase="Un cadre est soumis à une période initiale de {value} mois.",
+    ),
+    FactTemplate(
+        topic="onboarding",
+        section="contact",
+        source="wiki_support",
+        statement="Le référent informatique d'un nouveau salarié est joignable à l'adresse support-{value}@exemple.fr.",
+        question="Quelle adresse contacter pour le matériel d'un nouvel arrivant ?",
+        label="l'adresse du référent matériel",
+        answer="support-{value}@exemple.fr.",
+        values=("nord", "sud", "est", "ouest"),
+        paraphrasable=False,
+    ),
+    FactTemplate(
+        topic="calcul",
+        section="calcul",
+        source="wiki_finance",
+        statement="L'indemnité kilométrique est de {value} euros par kilomètre pour un véhicule de 5 CV.",
+        question="Quel est le barème kilométrique pour un véhicule de 5 CV ?",
+        label="le barème kilométrique 5 CV",
+        answer="{value} euro par kilomètre.",
+        values=("0,35", "0,42", "0,55"),
+        paraphrase="Pour une automobile de cinq chevaux fiscaux, le remboursement s'élève à {value} euro du kilomètre.",
+    ),
+    FactTemplate(
+        topic="calcul",
+        section="calcul",
+        source="wiki_ops",
+        statement="Le taux de service cible est de {value} pour cent sur les commandes livrées en 48 heures.",
+        question="Quel est le taux de service cible sur les commandes livrées en 48 heures ?",
+        label="le taux de service cible",
+        answer="{value} % des commandes livrées en 48 heures.",
+        values=("92", "95", "97"),
+        paraphrase="L'objectif de disponibilité logistique s'établit à {value} pour cent.",
+    ),
+    FactTemplate(
+        topic="support",
+        section="procedure",
+        source="wiki_support",
+        statement="Un ticket de niveau 2 non résolu en {value} jours est réaffecté automatiquement.",
+        question="Après combien de jours un ticket de niveau 2 est-il réaffecté ?",
+        label="le délai de réaffectation des tickets",
+        answer="{value} jours.",
+        values=("3", "5", "7"),
+        paraphrase="La réaffectation automatique intervient au bout de {value} journées pour un ticket N2.",
+    ),
+    FactTemplate(
+        topic="support",
+        section="politique",
+        source="wiki_support",
+        statement="Le support répond aux demandes prioritaires en moins de {value} heures ouvrées.",
+        question="Quel est l'engagement de réponse pour une demande prioritaire ?",
+        label="l'engagement de réponse prioritaire",
+        answer="Moins de {value} heures ouvrées.",
+        values=("2", "4", "6"),
+        paraphrase="Les sollicitations urgentes obtiennent une réponse sous {value} heures ouvrées.",
+    ),
+)
+
+#: Filler sentences, inserted in documents to make retrieval non-trivial (they share the topic's
+#: vocabulary without containing any answer).
+FILLERS: tuple[str, ...] = (
+    "Cette règle s'applique à l'ensemble des collaborateurs, quel que soit leur site de rattachement.",
+    "Le document de référence reste la charte interne, révisée chaque année par la direction.",
+    "En cas de doute, l'équipe de direction tranche au cas par cas et documente sa décision.",
+    "Les exceptions doivent être motivées par écrit et validées par le responsable hiérarchique.",
+    "Un rappel de ces dispositions est envoyé à chaque nouvel arrivant lors de la session d'accueil.",
+    "Les indicateurs associés sont revus chaque trimestre pendant le comité de pilotage.",
+    "La mesure s'applique sans préjudice des dispositions légales ou conventionnelles en vigueur.",
+    "Les équipes opérationnelles disposent d'une procédure détaillée sur l'intranet.",
+)
+
+@dataclass(frozen=True, slots=True)
+class Population:
+    """Scope of a document edition: the population the rule applies to.
+
+    Attributes:
+        label: Short label used in the report and in the answers.
+        question_phrase: The scope, phrased identically in the corpus and in the question —
+            « pour les cadres au forfait ». Writing it the same way on both sides is what makes
+            the annotated span discriminating instead of merely plausible.
+    """
+
+    label: str
+    question_phrase: str
+
+
+#: Périmètres des éditions d'un document. Chaque document porte **un** périmètre : c'est lui qui
+#: rend une question non ambiguë (« pour les cadres » départage les éditions qui portent des
+#: valeurs différentes). Sans cette dimension, plusieurs passages répondraient également bien à la
+#: même question et le rappel mesurerait du hasard.
+POPULATIONS: tuple[Population, ...] = (
+    Population("salariés en CDI", "pour les salariés en CDI"),
+    Population("cadres", "pour les cadres au forfait"),
+    Population("période d'essai", "pendant la période d'essai"),
+    Population("temps partiel", "pour les temps partiels"),
+    Population("site de Lyon", "pour le site de Lyon"),
+    Population("site de Nantes", "pour le site de Nantes"),
+    Population("équipes de nuit", "pour les équipes de nuit"),
+    Population("alternance interne", "pour l'alternance interne"),
+)
+
+#: Populations absentes du corpus, utilisées pour fabriquer des questions sans réponse.
+HORS_CORPUS_ENTITIES: tuple[str, ...] = (
+    "les alternants",
+    "les prestataires externes",
+    "l'équipe de nuit",
+    "le comité de direction",
+    "la filiale espagnole",
+    "les stagiaires",
+    "le site de Marseille",
+)
+
+#: Questions hors corpus « écrites à la main » : elles portent sur des dispositifs qui n'existent
+#: dans aucun document (prime de vacances, dotation en actions…).
+HORS_CORPUS_QUESTIONS: tuple[str, ...] = (
+    "Quelle est la dotation en actions attribuée aux salariés de plus de dix ans d'ancienneté ?",
+    "Quel est le montant de la prime de vacances versée au mois de juin ?",
+    "Combien de jours de congés supplémentaires pour un salarié de nuit ?",
+    "Quelle est la limite de dépenses pour un repas avec un client étranger ?",
+    "Quel est le tarif de la salle de sport partenaire située à Lyon ?",
+    "Quelle est la procédure d'achat d'un véhicule de fonction électrique ?",
+)
+
+#: Titles of the documents (one per topic and per block of facts).
+TITLE_TEMPLATES: dict[str, tuple[str, ...]] = {
+    "conges": ("Politique de congés et d'absences", "Demandes d'absence : mode d'emploi"),
+    "teletravail": ("Charte du télétravail", "Travail à distance : règles et sécurité"),
+    "achats": ("Procédure d'achat et de mise en concurrence", "Cycle fournisseur : facturation"),
+    "incidents": ("Gestion des incidents de production", "Astreinte et escalade"),
+    "securite": ("Conformité et protection des données", "Politique de sécurité des accès"),
+    "onboarding": ("Parcours d'intégration", "Rôles et contacts de l'arrivée"),
+    "calcul": ("Barèmes et indicateurs", "Indicateurs de service et de performance"),
+    "support": ("Support client : engagements et niveaux", "Traitement des tickets"),
+}
+
+
+@dataclass
+class SyntheticCorpusGenerator(BaseCorpusGenerator):
+    """Generate the synthetic knowledge base and its annotated questions.
+
+    Attributes:
+        dataset_name: Name of the generated dataset.
+        n_documents: Target number of documents.
+        seed: Seed of every random draw.
+        reference_date: Date used as "today" for the publication dates.
+        paraphrase_share: Share of questions written as paraphrases.
+        multi_document_share: Share of questions requiring two documents.
+        hors_corpus_share: Share of questions the corpus cannot answer.
+        documents_per_topic: Documents generated per topic (they reuse the same facts with
+            different values, which is what creates the near-duplicate competition).
+        val_size: Share of questions in the validation split.
+        test_size: Share of questions in the test split.
+    """
+
+    dataset_name: str = "{{ spec.data.dataset_name }}"
+    n_documents: int = {{ spec.data.n_samples }}
+    seed: int = {{ spec.data.seed }}
+    reference_date: date = date(2025, 1, 6)
+    paraphrase_share: float = 0.30
+    multi_document_share: float = 0.15
+    hors_corpus_share: float = 0.10
+    documents_per_topic: int = 24
+    val_size: float = 0.20
+    test_size: float = 0.35
+    facts: tuple[FactTemplate, ...] = field(default=FACTS, repr=False)
+    random_state: np.random.Generator = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Seed the random generator and validate the shares."""
+        self.random_state = np.random.default_rng(self.seed)
+        total = self.paraphrase_share + self.multi_document_share + self.hors_corpus_share
+        if total >= 1.0:
+            msg = (
+                "paraphrase_share + multi_document_share + hors_corpus_share must stay below 1, "
+                f"got {total:.2f}"
+            )
+            raise ValueError(msg)
+
+    @classmethod
+    def from_config(cls, config: Any, *, seed: int | None = None) -> SyntheticCorpusGenerator:
+        """Build the generator from the ``data`` node of the configuration.
+
+        Args:
+            config: ``data`` configuration node (``seed``, ``n_samples`` and the
+                ``corpus`` sub-node are read).
+            seed: Optional seed override.
+
+        Returns:
+            The configured generator.
+        """
+        settings = as_mapping(config)
+        corpus = as_mapping(settings.get("corpus"))
+        return cls(
+            dataset_name=str(settings.get("dataset_name", "internal_knowledge_base")),
+            n_documents=int(settings.get("n_samples", 360)),
+            seed=int(seed if seed is not None else settings.get("seed", 42)),
+            reference_date=_parse_date(corpus.get("reference_date")) or date(2025, 1, 6),
+            paraphrase_share=float(corpus.get("paraphrase_share", 0.30)),
+            multi_document_share=float(corpus.get("multi_document_share", 0.15)),
+            hors_corpus_share=float(corpus.get("hors_corpus_share", 0.10)),
+            documents_per_topic=int(corpus.get("documents_per_topic", 24)),
+            val_size=float(corpus.get("val_size", 0.20)),
+            test_size=float(corpus.get("test_size", 0.35)),
+        )
+
+    # ------------------------------------------------------------------ génération --------
+    def generate(self) -> GeneratedCorpus:
+        """Generate the corpus, the questions and the metadata.
+
+        Returns:
+            The :class:`GeneratedCorpus`.
+        """
+        documents = self._documents()
+        questions = self._questions(documents)
+        metadata = self._metadata(documents, questions)
+        logger.info(
+            "Corpus '{}' generated | {} documents | {} questions | {} unanswerable",
+            self.dataset_name,
+            len(documents),
+            len(questions),
+            int((questions["answer_type"] == "unanswerable").sum()),
+        )
+        return GeneratedCorpus(documents=documents, queries=questions, metadata=metadata)
+
+    def _documents(self) -> pd.DataFrame:
+        """Build the corpus, one row per document.
+
+        Each document is an *edition*: it carries all the facts of its topic, filled with the
+        values of **its scope** (a population), plus generic filler sentences. Republishing the
+        same procedure for another population is exactly what happens in a real wiki — and it is
+        what makes the retrieval question well posed, since the scope is the discriminator that
+        tells two editions apart.
+
+        Returns:
+            The corpus frame, validated by :class:`src.data.schemas.DocumentsSchema`.
+        """
+        rows: list[dict[str, Any]] = []
+        for topic in sorted({fact.topic for fact in self.facts}):
+            topic_facts = [fact for fact in self.facts if fact.topic == topic]
+            for index, population in enumerate(self._editions()):
+                block = self._fact_block(topic_facts, population)
+                rows.append(self._document_row(topic, population, block, index))
+        frame = pd.DataFrame(rows)
+        return frame.sort_values("doc_id", kind="stable").reset_index(drop=True)
+
+    def _editions(self) -> list[Population]:
+        """Return the scope of each document of a topic.
+
+        The corpus is a cross product: every topic is declined for every population, and each of
+        those editions is republished ``editions_per_population`` times (same rules, other date).
+        That structure is what makes a question answerable *and* discriminating: the scope narrows
+        the corpus to one edition, the duplicate editions are annotated together as relevant.
+        """
+        return [population for _ in range(self.editions_per_population) for population in POPULATIONS]
+
+    @property
+    def editions_per_population(self) -> int:
+        """Number of republications of each (topic, population) edition.
+
+        Derived from ``n_documents`` — the contract asserted by the tests and quoted in the README
+        — so that the declared dataset size and the generated one cannot drift apart.
+        """
+        n_topics = len({fact.topic for fact in self.facts})
+        per_edition = max(n_topics * len(POPULATIONS), 1)
+        return max(round(self.n_documents / per_edition), 1)
+
+    @staticmethod
+    def _fact_block(
+        topic_facts: Sequence[FactTemplate], population: Population
+    ) -> list[tuple[FactTemplate, str]]:
+        """Bind every fact of a topic to the value of one scope.
+
+        The value depends on the scope and not on the edition, so the documents that share a scope
+        are genuine duplicates (same rules, same values, other date). They are annotated together
+        as relevant, which is the honest judgement: no user distinguishes two identical pages.
+
+        Args:
+            topic_facts: Facts of the topic.
+            population: Scope of the document.
+
+        Returns:
+            The (fact, value) pairs of the document.
+        """
+        index = POPULATIONS.index(population)
+        return [(fact, fact.values[index % len(fact.values)]) for fact in topic_facts]
+
+    def _title(self, topic: str, index: int) -> str:
+        """Return a document title (alternating templates, plus a version marker)."""
+        candidates = TITLE_TEMPLATES.get(topic, (f"Note interne {topic}",))
+        return f"{candidates[index % len(candidates)]} — édition {index + 1}"
+
+    def _document_row(
+        self,
+        topic: str,
+        population: Population,
+        block: Sequence[tuple[FactTemplate, str]],
+        index: int,
+    ) -> dict[str, Any]:
+        """Build one document row: the scoped rules and the filler sentences.
+
+        The scope is glued to the rule (« …, pour les cadres au forfait. ») rather than written in a
+        separate sentence. It is what makes the annotated span *discriminating*: the same rule
+        appears in every edition of the topic, so a span that does not carry its scope would be
+        relevant for eight documents at once and the evaluation would measure a coin flip.
+        """
+        sentences: list[str] = []
+        for fact, value in block:
+            statement = fact.statement.format(value=value).rstrip(".")
+            sentences.append(f"{statement}, {population.question_phrase}.")
+        for _ in range(4):
+            sentences.append(str(self.random_state.choice(FILLERS)))
+        text = " ".join(sentences)
+        published = self.reference_date - timedelta(days=int(self.random_state.integers(30, 900)))
+        return {
+            "doc_id": f"DOC-{self._next_document_number(topic, index):04d}",
+            "title": self._title(topic, index),
+            "section": block[0][0].section,
+            "source": block[0][0].source,
+            "published_at": pd.Timestamp(published),
+            "n_tokens": len(tokenize(text)),
+            "text": text,
+        }
+
+    def _next_document_number(self, topic: str, index: int) -> int:
+        """Return a stable, unique document number."""
+        topics = sorted({fact.topic for fact in self.facts})
+        return topics.index(topic) * 100 + index + 1
+
+    def _questions(self, documents: pd.DataFrame) -> pd.DataFrame:
+        """Build the annotated questions from the planted facts.
+
+        Args:
+            documents: Generated corpus.
+
+        Returns:
+            The question frame, validated by :class:`src.data.schemas.QueriesSchema`.
+        """
+        rows: list[dict[str, Any]] = []
+        for record in documents.itertuples(index=False):
+            population = self._population_in(str(record.text))
+            for fact, statement in self._facts_in(str(record.text)):
+                rows.append(
+                    self._question_row(str(record.doc_id), fact, statement, population)
+                )
+                if fact.paraphrasable:
+                    rows.append(
+                        self._question_row(
+                            str(record.doc_id), fact, statement, population, paraphrase=True
+                        )
+                    )
+        questions = self._merge_twins(pd.DataFrame(rows))
+        questions = self._append_multi_document(questions, documents)
+        questions = self._append_hors_corpus(questions, documents)
+        questions = self._assign_splits(questions)
+        questions = questions.sort_values("query_id", kind="stable").reset_index(drop=True)
+        return questions
+
+    def _merge_twins(self, questions: pd.DataFrame) -> pd.DataFrame:
+        """Merge the questions whose answer appears in several twin documents.
+
+        The same fact is planted in several editions of a document. Two questions that share their
+        wording *and* their reference answer are the same question, annotated with several relevant
+        documents: leaving them as separate rows would punish a retriever that returns the right
+        rule from the « wrong » edition — a distinction no user would ever make. The merged row
+        carries every relevant document identifier, which is also what makes recall@k meaningful
+        on a duplicated corpus.
+
+        Args:
+            questions: Raw question rows.
+
+        Returns:
+            The deduplicated frame, one row per distinct question.
+        """
+        if questions.empty:
+            return questions
+        grouped = (
+            questions.groupby(["question", "reference_answer"], sort=True, as_index=False)
+            .agg(
+                {
+                    "answer_type": "first",
+                    "difficulty": "first",
+                    "intent": "first",
+                    "split": "first",
+                    "gold_doc_ids": lambda values: ",".join(sorted({item for value in values for item in str(value).split(",") if item})),
+                    "gold_span": "first",
+                    "n_gold_docs": lambda values: int(sum(int(value) for value in values)),
+                }
+            )
+            .reset_index(drop=True)
+        )
+        grouped["query_id"] = ""
+        grouped["split"] = ""
+        return grouped
+
+    def _facts_in(self, text: str) -> list[tuple[FactTemplate, str]]:
+        """Return the (fact, sentence) pairs actually planted in a document.
+
+        The match is done on the *stable prefix* of the statement (everything before the value):
+        it is what identifies the fact, independently of the value it was filled with.
+
+        Args:
+            text: Document text.
+
+        Returns:
+            The facts found, in reading order of their sentence.
+        """
+        found: list[tuple[FactTemplate, str]] = []
+        sentences = [sentence.strip() for sentence in text.split(".") if sentence.strip()]
+        for fact in self.facts:
+            marker = fact.statement.split("{value}")[0].strip()
+            if not marker:
+                continue
+            for sentence in sentences:
+                if marker in sentence and all(sentence != existing for _, existing in found):
+                    found.append((fact, sentence))
+                    break
+        return found
+
+    def _question_row(
+        self,
+        doc_id: str,
+        fact: FactTemplate,
+        statement: str,
+        population: Population,
+        *,
+        paraphrase: bool = False,
+    ) -> dict[str, Any]:
+        """Build one annotated question for one scoped rule.
+
+        The question carries the scope — « … pour les cadres au forfait ? » — because it is what
+        makes it answerable by a single rule. A question without its scope would be answered by
+        eight editions equally well, and the evaluation would measure a coin flip.
+
+        Args:
+            doc_id: Identifier of the document that hosts the rule.
+            fact: Fact the question is about.
+            statement: Sentence of the corpus that contains the answer.
+            population: Scope of the document.
+            paraphrase: Whether to write a paraphrase question instead of the factual one.
+
+        Returns:
+            The annotated question row.
+        """
+        span = statement.strip()
+        if not span.endswith("."):
+            span += "."
+        value = self._value_of(span, fact)
+        question = (
+            self._paraphrase_question(fact, population)
+            if paraphrase
+            else f"{fact.question.rstrip(' ?')} {population.question_phrase} ?"
+        )
+        return {
+            "query_id": "",
+            "question": question,
+            "reference_answer": f"{fact.answer.format(value=value)} ({population.question_phrase})",
+            "answer_type": "abstractive" if paraphrase else "extractive",
+            "difficulty": "paraphrase" if paraphrase else "facile",
+            "intent": self._intent(fact.section),
+            "split": "",
+            "gold_doc_ids": doc_id,
+            "gold_span": span,
+            "n_gold_docs": 1,
+        }
+
+    @staticmethod
+    def _population_in(text: str) -> Population:
+        """Identify the scope of a document from its text.
+
+        The document writes its scope with the same phrase as the question (« …, pour les cadres
+        au forfait. »): the scope is the discriminator of the edition, so reading it back from the
+        text is both the simplest and the most honest way to annotate the question.
+
+        Args:
+            text: Document text.
+
+        Returns:
+            The matching population; the first one when no scope phrase is found (defensive).
+        """
+        for population in POPULATIONS:
+            if population.question_phrase in text:
+                return population
+        return POPULATIONS[0]
+
+    @staticmethod
+    def _paraphrase_question(fact: FactTemplate, population: Population) -> str:
+        """Return a paraphrase question sharing almost no content word with the statement.
+
+        The scope is preserved: without it, the question would target eight editions at once, and
+        the « paraphrase » segment would measure ambiguity instead of paraphrase.
+        """
+        if fact.paraphrase:
+            marker = fact.paraphrase.split("{value}")[0].strip()
+            return f"Que prévoit la règle suivante : « {marker} … » {population.question_phrase} ?"
+        return f"Que dit la règle sur {fact.label} {population.question_phrase} ?"
+
+    @staticmethod
+    def _value_of(statement: str, fact: FactTemplate) -> str:
+        """Extract the value that fills a statement.
+
+        The sentence carries its scope after the rule (« …, pour les cadres au forfait. »), so the
+        value stops at the first delimiter met after the prefix — the statement suffix, the comma
+        of the scope or the final period, whichever comes first. Reading up to the last period
+        would return the scope as part of the value.
+        """
+        prefix, _, suffix = fact.statement.partition("{value}")
+        start = statement.find(prefix)
+        if start < 0:
+            return "n/a"
+        start += len(prefix)
+        # Le suffixe du gabarit se termine par un point ou une virgule que la phrase scopée
+        # déplace : on cherche son cœur («  heures »), pas sa ponctuation.
+        suffix_core = suffix.strip().rstrip(".,;")
+        candidates = [
+            position
+            for position in (
+                statement.find(suffix_core, start) if suffix_core else -1,
+                statement.find(",", start),
+                statement.find(".", start),
+            )
+            if position >= 0
+        ]
+        end = min(candidates) if candidates else len(statement)
+        return statement[start:end].strip()
+
+    @staticmethod
+    def _intent(section: str) -> str:
+        """Map an editorial section onto a question intent."""
+        return {
+            "politique": "politique",
+            "procedure": "procedure",
+            "definition": "definition",
+            "contact": "contact",
+            "calcul": "calcul",
+            "conformite": "politique",
+        }.get(section, "procedure")
+
+    def _append_multi_document(
+        self, questions: pd.DataFrame, documents: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Add questions whose answer requires exactly two documents.
+
+        They are built by pairing two questions of the same intent: the reference answer
+        concatenates both facts and both documents are annotated relevant. Any system that
+        returns a single passage is structurally capped on these questions, which is exactly the
+        point of the segment.
+        """
+        if questions.empty:
+            return questions
+        # Les questions composées sont bâties sur les formulations courtes (« facile ») : une
+        # question multi-document est la concaténation de deux questions, et le contrat de données
+        # plafonne la longueur d'une question à 240 caractères.
+        pool = questions.loc[questions["difficulty"] == "facile"].reset_index(drop=True)
+        if len(pool) < 4:
+            pool = questions.reset_index(drop=True)
+        count = max(int(len(questions) * self.multi_document_share), 1)
+        count = min(count, max(len(pool) // 2, 1))
+        first = pool.iloc[::2].head(count).reset_index(drop=True)
+        second = pool.iloc[1::2].head(count).reset_index(drop=True)
+        rows: list[dict[str, Any]] = []
+        for left, right in zip(first.to_dict(orient="records"), second.to_dict(orient="records"), strict=False):
+            if left["gold_doc_ids"] == right["gold_doc_ids"]:
+                continue
+            rows.append(
+                {
+                    "query_id": "",
+                    "question": _combine_questions(
+                        str(left["question"]), str(right["question"])
+                    ),
+                    "reference_answer": f"{left['reference_answer']} {right['reference_answer']}",
+                    "answer_type": "abstractive",
+                    "difficulty": "multi_document",
+                    "intent": left["intent"],
+                    "split": "",
+                    "gold_doc_ids": f"{left['gold_doc_ids']},{right['gold_doc_ids']}",
+                    "gold_span": _merge_spans(left["gold_span"], right["gold_span"]),
+                    "n_gold_docs": 2,
+                }
+            )
+        if not rows:
+            return questions
+        return pd.concat([questions, pd.DataFrame(rows)], ignore_index=True)
+
+    def _append_hors_corpus(
+        self, questions: pd.DataFrame, documents: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Add questions that the corpus cannot answer.
+
+        The ``gold_doc_ids`` column points at the *nearest* document — the one a lexical
+        retriever will return — while ``gold_span`` stays empty and ``answer_type`` is
+        ``unanswerable``. The evaluator treats those questions separately: the only correct
+        behaviour is to abstain, and answering them is counted as a hallucination.
+        """
+        count = max(int(len(questions) * self.hors_corpus_share), 1)
+        rows: list[dict[str, Any]] = []
+        # Les questions hors corpus sont construites par combinaison d'un fait réel et d'une
+        # population absente du corpus (« les alternants », « la filiale espagnole »…) : la
+        # question paraît anodine, le vocabulaire est celui du corpus, et pourtant aucun document
+        # n'y répond. C'est le seul moyen d'obtenir un volume suffisant d'exemples d'abstention,
+        # là où une liste écrite à la main plafonnerait à quelques unités.
+        combinations = [
+            (fact, entity)
+            for fact in self.facts
+            for entity in HORS_CORPUS_ENTITIES
+        ]
+        indices = self.random_state.permutation(len(combinations))[:count]
+        topic_document = {
+            fact.topic: str(
+                documents.loc[
+                    documents["title"].str.contains(TITLE_TEMPLATES[fact.topic][0].split(" :")[0], regex=False)
+                ].iloc[0]["doc_id"]
+            )
+            if not documents.loc[
+                documents["title"].str.contains(TITLE_TEMPLATES[fact.topic][0].split(" :")[0], regex=False)
+            ].empty
+            else str(documents.iloc[0]["doc_id"])
+            for fact in self.facts
+        }
+        for position in indices:
+            fact, entity = combinations[int(position)]
+            rows.append(
+                {
+                    "query_id": "",
+                    "question": f"Quel est {fact.label} pour {entity} ?",
+                    "reference_answer": "Aucune réponse dans le corpus.",
+                    "answer_type": "unanswerable",
+                    "difficulty": "hors_corpus",
+                    "intent": self._intent(fact.section),
+                    "split": "",
+                    "gold_doc_ids": topic_document.get(fact.topic, str(documents.iloc[0]["doc_id"])),
+                    "gold_span": "",
+                    "n_gold_docs": 1,
+                }
+            )
+        for index, question in enumerate(HORS_CORPUS_QUESTIONS[: max(count // 4, 1)]):
+            rows.append(
+                {
+                    "query_id": "",
+                    "question": question,
+                    "reference_answer": "Aucune réponse dans le corpus.",
+                    "answer_type": "unanswerable",
+                    "difficulty": "hors_corpus",
+                    "intent": "politique",
+                    "split": "",
+                    "gold_doc_ids": str(documents.iloc[index % len(documents)]["doc_id"]),
+                    "gold_span": "",
+                    "n_gold_docs": 1,
+                }
+            )
+        if not rows:
+            return questions
+        return pd.concat([questions, pd.DataFrame(rows)], ignore_index=True)
+
+    def _assign_splits(self, questions: pd.DataFrame) -> pd.DataFrame:
+        """Assign an identifier and a split to every question.
+
+        The split is drawn per question with the configured proportions, but the *unanswerable*
+        questions are stratified on purpose: each split must contain some, otherwise the
+        abstention metric would be measured on the test split only.
+        """
+        frame = questions.reset_index(drop=True).copy()
+        draws = self.random_state.random(len(frame))
+        splits = np.where(
+            draws < self.test_size,
+            "test",
+            np.where(draws < self.test_size + self.val_size, "val", "calibration"),
+        )
+        frame["split"] = splits
+        frame["query_id"] = [f"QRY-{index + 1:04d}" for index in range(len(frame))]
+        return frame
+
+    def _metadata(self, documents: pd.DataFrame, questions: pd.DataFrame) -> dict[str, Any]:
+        """Build the generation metadata archived next to the corpus."""
+        by_difficulty = questions["difficulty"].value_counts().to_dict()
+        answerable = questions.loc[questions["answer_type"] != "unanswerable"]
+        return {
+            "dataset_name": self.dataset_name,
+            "seed": self.seed,
+            "reference_date": self.reference_date.isoformat(),
+            "n_documents": int(len(documents)),
+            "n_questions": int(len(questions)),
+            "n_answerable": int(len(answerable)),
+            "n_unanswerable": int(len(questions) - len(answerable)),
+            "n_sources": int(documents["source"].nunique()),
+            "mean_document_tokens": float(documents["n_tokens"].mean()),
+            "questions_by_difficulty": {str(key): int(value) for key, value in by_difficulty.items()},
+            "questions_by_split": {
+                str(key): int(value) for key, value in questions["split"].value_counts().to_dict().items()
+            },
+            "retrievable_ceiling": round(
+                float(len(answerable) / max(len(questions), 1)) * 100.0, 2
+            ),
+            "generator": "SyntheticCorpusGenerator",
+            "notes": [
+                "Les questions multi-document exigent deux documents : tout système qui s'arrête "
+                "au premier passage est plafonné sur ce segment.",
+                "Les questions hors corpus annotent le document le plus proche sans extrait "
+                "répondant : seule l'abstention y est correcte.",
+                "Les documents paraphrases ne partagent presque aucun mot de contenu avec leur "
+                "source : c'est là qu'un retriever purement lexical décroche.",
+            ],
+        }
+
+
+def _combine_questions(left: str, right: str, *, limit: int = 232) -> str:
+    """Combine two questions into one multi-document question.
+
+    Args:
+        left: First question.
+        right: Second question.
+        limit: Maximum length (the data contract caps a question at 240 characters).
+
+    Returns:
+        The combined question, truncated on word boundaries when both do not fit.
+    """
+    left_clean = str(left).strip().rstrip(" ?")
+    right_clean = str(right).strip().rstrip(" ?")
+    combined = f"{left_clean}, et {right_clean} ?"
+    if len(combined) <= limit:
+        return combined
+    budget = max((limit - 8) // 2, 40)
+    return f"{left_clean[:budget].rstrip()} … et {right_clean[:budget].rstrip()} ?"
+
+
+def _merge_spans(*spans: str) -> str:
+    """Join several annotated extracts with the multi-span separator.
+
+    A question answered by two documents has two answering passages; the contract keeps them in
+    one column, separated by ``||``, so that a retrieved passage counts as relevant when it covers
+    *any* of them. An empty span means "no extract", which is reserved for the unanswerable
+    questions and verified by the schema.
+    """
+    cleaned = [str(span).strip() for span in spans if str(span).strip()]
+    return " || ".join(cleaned)
+
+
+def _parse_date(value: Any) -> date | None:
+    """Parse a configuration date (``YYYY-MM-DD`` or ``None``)."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
+
+
+__all__ = [
+    "FACTS",
+    "HORS_CORPUS_ENTITIES",
+    "POPULATIONS",
+    "Population",
+    "_combine_questions",
+    "_merge_spans",
+    "FILLERS",
+    "HORS_CORPUS_QUESTIONS",
+    "SyntheticCorpusGenerator",
+    "TITLE_TEMPLATES",
+]

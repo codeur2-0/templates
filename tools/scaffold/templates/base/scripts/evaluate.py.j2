@@ -16,8 +16,8 @@ testable (pytest) et réutilisable (notebooks, API, orchestrateur).
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 #: Racine du projet (le dossier qui contient `src/` et `conf/`).
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

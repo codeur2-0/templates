@@ -1,0 +1,36 @@
+# =================================================================================================
+# Modèle : Index lexical BM25 + réponse extractive sourcée
+# -------------------------------------------------------------------------------------------------
+# BM25 est le score de référence de la recherche documentaire : rareté du terme, saturation de sa
+# fréquence dans le passage et normalisation par la longueur. Sur un corpus d'entreprise structuré
+# — un vocabulaire métier stable, des formulations répétées d'une édition à l'autre — il est très
+# difficile à battre, et il offre trois propriétés qu'un modèle dense n'offre pas gratuitement :
+# il est instantané, il s'explique terme par terme, et il n'a besoin d'aucun entraînement ni
+# d'aucun téléchargement. Ses limites sont mesurées plutôt que cachées : le segment « paraphrase »
+# de l'évaluation chiffre exactement ce qu'il ne sait pas faire, et c'est cette mesure qui
+# justifie (ou non) de payer un embedding dense dans la variante LangChain.
+#
+# Alternatives considérées : tfidf_cosine : même index, scoring cosinus normalisé — plus simple à expliquer, plus sensible à la longueur des passages., Variante `with-langchain` : orchestration LCEL, prompt de synthèse et adaptateur LLM branché sur le même index — la comparaison des deux stacks chiffre l'apport de l'orchestration, pas celui du scoring., Embeddings hachés + SVD : la représentation dense déterministe de cette famille, seule à traiter les paraphrases., Recherche hybride : la pratique industrielle, à n'envisager qu'après avoir mesuré où le lexical échoue..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.abstention_threshold=...
+# =================================================================================================
+
+name: "Index lexical BM25 + réponse extractive sourcée"
+algorithm: bm25
+class: TfidfModel
+task: retrieval
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `TfidfModel(params=...)` (voir src/models/model.py).
+params:
+  abstention_threshold: 0.0
+
+# --- options spécifiques à la stack `tfidf` ---------------------------------------
+llm:
+  provider: extractive
+  max_sentences: 2
+  min_overlap: 1

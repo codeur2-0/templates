@@ -96,7 +96,7 @@ text_classification:
   description: >-
     Classer des documents courts (tickets support, avis clients). Représentations :
     TF-IDF, embeddings, transformers. Métriques : macro-F1, accuracy, matrice de confusion.
-  allowed_stacks: [sklearn, spacy, transformers, langchain]
+  allowed_stacks: [tfidf, transformers]
 
 named_entity_recognition:
   display_name: "Reconnaissance d'entités nommées (NER)"
@@ -107,7 +107,7 @@ named_entity_recognition:
   description: >-
     Extraire des entités typées d'un texte (montants, dates, produits, organisations).
     Métriques : précision/rappel/F1 par type d'entité (évaluation au niveau entité).
-  allowed_stacks: [spacy, transformers]
+  allowed_stacks: [spacy]
 
 summarization:
   display_name: "Résumé automatique"
@@ -118,7 +118,7 @@ summarization:
   description: >-
     Résumer des documents métier (comptes-rendus, tickets). Baseline extractive (TextRank-like)
     puis seq2seq. Métriques : ROUGE-1/2/L, compression, couverture.
-  allowed_stacks: [transformers, sklearn]
+  allowed_stacks: [transformers]
 
 question_answering:
   display_name: "Question answering"
@@ -129,7 +129,7 @@ question_answering:
   description: >-
     Répondre à des questions sur un corpus métier documentaire (retrieval + réponse).
     Métriques : recall@k du retrieveur, exact match, couverture, latency.
-  allowed_stacks: [langchain, transformers]
+  allowed_stacks: [tfidf, langchain]
 
 retrieval_augmented_generation:
   display_name: "RAG (Retrieval-Augmented Generation)"
@@ -140,7 +140,7 @@ retrieval_augmented_generation:
   description: >-
     Indexer un corpus documentaire, retrouver les passages pertinents, générer une réponse
     sourcée. Métriques : recall@k, MRR, nDCG, taux de citation, hallucination (proxy).
-  allowed_stacks: [langchain, sklearn]
+  allowed_stacks: [tfidf, langchain]
 
 agent_tools:
   display_name: "Agents IA & tool calling"
@@ -151,7 +151,7 @@ agent_tools:
   description: >-
     Agent capable de planifier et d'appeler des outils (SQL, calculatrice, recherche) avec
     mémoire et garde-fous. Métriques : taux de réussite des tâches, nombre d'étapes, coût.
-  allowed_stacks: [langchain, sklearn]
+  allowed_stacks: [langchain]
 
 embedding_pipeline:
   display_name: "Pipelines d'embeddings"
@@ -162,7 +162,7 @@ embedding_pipeline:
   description: >-
     Produire, stocker et exploiter des embeddings de documents (batching, cache, dérive
     sémantique). Métriques : débit, coût, stabilité, recall@k de la recherche vectorielle.
-  allowed_stacks: [sklearn, langchain, transformers]
+  allowed_stacks: [tfidf, transformers]
 
 llm_finetuning:
   display_name: "Fine-tuning de LLM"
@@ -173,7 +173,7 @@ llm_finetuning:
   description: >-
     Fine-tuner un petit modèle de langage causal sur un corpus métier (poids aléatoires,
     aucune dépendance réseau). Métriques : perplexité, loss, génération qualitative.
-  allowed_stacks: [transformers, pytorch]
+  allowed_stacks: [transformers]
 
 image_classification:
   display_name: "Classification d'images"

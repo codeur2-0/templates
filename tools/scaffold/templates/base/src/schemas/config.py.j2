@@ -69,7 +69,9 @@ class ProjectConfig(BaseModel):
     stack: str = "{{ spec.stack_key }}"
     family: str = "{{ spec.family }}"
     modality: str = "{{ spec.modality }}"
-    title: str = "{{ spec.title }}"
+    title: str = (
+{{ py_string_tuple([spec.title], indent=8, suffix="") }}
+    )
     version: str = "1.0.0"
 
 
@@ -168,7 +170,9 @@ class PreprocessingConfig(BaseModel):
     model_config = _FLEXIBLE
 
     numeric: NumericPreprocessingConfig = Field(default_factory=NumericPreprocessingConfig)
-    categorical: CategoricalPreprocessingConfig = Field(default_factory=CategoricalPreprocessingConfig)
+    categorical: CategoricalPreprocessingConfig = Field(
+        default_factory=CategoricalPreprocessingConfig
+    )
     features: list[dict[str, Any]] = Field(default_factory=list)
     drop_columns: list[str] = Field(default_factory=list)
     keep_columns: list[str] | None = None
@@ -287,7 +291,11 @@ class MetricsConfig(BaseModel):
 
     task: Task = "{{ spec.metrics.task }}"
     primary: str = "{{ spec.metrics.primary }}"
-    secondary: list[str] = Field(default_factory=lambda: {{ py(spec.metrics.secondary) }})
+    secondary: list[str] = Field(
+        default_factory=lambda: [
+{{ py_string_tuple(spec.metrics.secondary, indent=12, suffix=",") }}
+        ]
+    )
     baseline: str = "{{ spec.metrics.baseline }}"
     direction: Literal["maximize", "minimize"] = "{{ spec.metrics.direction }}"
     min_primary: float | None = {{ py(spec.metrics.min_primary) }}
@@ -362,7 +370,9 @@ def validate_config(config: DictConfig | dict[str, Any] | AppConfig) -> AppConfi
     """
     if isinstance(config, AppConfig):
         return config
-    container = OmegaConf.to_container(config, resolve=True) if isinstance(config, DictConfig) else config
+    container = (
+        OmegaConf.to_container(config, resolve=True) if isinstance(config, DictConfig) else config
+    )
     if not isinstance(container, dict):
         msg = f"Expected a mapping-like configuration, got {type(container).__name__}"
         raise TypeError(msg)

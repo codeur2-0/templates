@@ -33,6 +33,33 @@ sklearn:
   commands:
     train: "python -m src.main mode=train"
 
+tfidf:
+  display_name: scikit-learn (TF-IDF / BM25)
+  category: classic-ml
+  template_dir: tfidf
+  class_name: TfidfModel
+  epochs_based: false
+  supports_proba: true
+  model_file: lexical_index.joblib
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "scipy>=1.11"
+    - "joblib>=1.3"
+  docs:
+    - name: "scikit-learn : extraction de features textuelles"
+      url: "https://scikit-learn.org/stable/modules/feature_extraction.html#text-feature-extraction"
+    - name: "TfidfVectorizer"
+      url: "https://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.TfidfVectorizer.html"
+  notes:
+    - "Reference lexicale hors ligne : TF-IDF + cosinus, et BM25 (Okapi) implemente a la main avec les memes statistiques de corpus."
+    - "Aucun modele pre-entraine, aucun telechargement : le vocabulaire est appris sur le train et persiste avec l'index."
+    - "Sert de baseline a toutes les familles texte : un modele neuronal qui ne la bat pas ne merite pas son cout."
+  commands:
+    train: "python -m src.main mode=train"
+
 xgboost:
   display_name: XGBoost
   category: boosting
@@ -212,17 +239,22 @@ transformers:
     train: "python -m src.main mode=train"
 
 langchain:
-  display_name: LangChain
+  display_name: LangChain (LCEL)
   category: ai-engineering
   template_dir: langchain
   epochs_based: false
   supports_proba: false
+  # Le chaînage LCEL n'est jamais picklé : l'état (corpus, chunks, embeddings) est persisté en
+  # joblib et la chaîne est reconstruite au chargement. D'ou le nom de fichier explicite.
+  model_file: rag_chain.joblib
   dependencies:
     - "numpy>=1.26"
     - "pandas>=2.2"
     - "pyarrow>=15.0"
     - "scikit-learn>=1.4"
-    - "langchain-core>=0.2"
+    - "langchain-core>=0.3"
+    - "joblib>=1.3"
+    - "pyyaml>=6.0"
   docs:
     - name: "LangChain Core Concepts"
       url: "https://python.langchain.com/docs/concepts/"
