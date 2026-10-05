@@ -1,7 +1,8 @@
 # Modalité `text` et familles `ai-eng` — RAG, QA, embeddings, agents
 
 - **Date** : 2026-10-05
-- **Statut** : design validé, implémentation en cours
+- **Statut** : design validé, tranche 1 livrée et vérifiée (`ai-eng/rag/with-tfidf` et
+  `ai-eng/rag/with-langchain` conformes dans `tools.verify --all`), tranches 2 à 5 à venir
 - **Branche** : `arena/3402658e-templates`
 - **Périmètre** : point 2 de la feuille de route du README racine — `ai-eng/` (LangChain, RAG,
   Transformers, serving FastAPI) et `nlp/` (spaCy, Transformers). Ce document couvre la couche
@@ -47,7 +48,7 @@ Livrer la modalité `text` et les projets ai-eng, c'est :
 | Contrat modèle | `BaseModel` réécrit dans `modality/text/src/models/base.py` : `fit(documents)`, `retrieve(query, k)`, `answer(question, k)`, `save`/`load`, `model_card` | Le contrat tabulaire (`X`, `y`, `predict_proba`) n'a aucun sens pour un retriever. La couche `modality` est la seule à définir le contrat, les stacks ne font que l'implémenter. |
 | Représentation | Embeddings **hachés + SVD tronquée** appris sur le corpus (scikit-learn), L2-normalisés | Déterministe, hors ligne, aucun modèle pré-entraîné téléchargé, rejouable sur un laptop. La SVD est apprise sur le **train** uniquement et persistée avec le modèle. |
 | Génération | `BaseLLM` avec deux implémentations : `ExtractiveLLM` (sélection de la meilleure phrase des passages, déterministe) et `OpenAICompatibleLLM` (client HTTP optionnel, jamais appelé dans les tests) | Un RAG pédagogique doit tourner sans clé API. L'interface montre où se branche un vrai LLM sans en faire une dépendance dure. |
-| Chaîne LangChain | LCEL : `RunnableParallel(retrieval=…) \| prompt \| llm \| StrOutputParser()`, avec `Document` et `BaseRetriever` de `langchain-core` | Montre le vrai geste LangChain (composition de runnables, prompts, parsers) sans dépendre d'une API. |
+| Chaîne LangChain | LCEL : retrieval (`BaseRetriever`) -> `RunnableParallel` -> `PromptTemplate` -> adaptateur LLM -> **nœud d'ancrage** projet, avec `Document`, `RunnableAssign` et `RunnableParallel` de `langchain-core` | Montre le vrai geste LangChain (composition de runnables, prompt de configuration, extension points) sans dépendre d'une API. `StrOutputParser` seul rendrait une chaîne nue : les citations — une métrique de la famille — seraient perdues. |
 | Persistance LangChain | L'état (documents, chunks, embeddings, configuration) est sérialisé en joblib ; la chaîne est **reconstruite** au chargement | Un `Runnable` LCEL n'est pas garanti picklable ; persister l'état et reconstruire est explicite et testable. |
 | Décision de réponse | Seuil de similarité → réponse ou **abstention** | Un RAG qui répond toujours invente : l'abstention mesurée est une métrique de premier plan. |
 | Métriques | recall@k, precision@k, MRR, nDCG@k, MAP@k, hit-rate, couverture + fidélité des citations, EM/F1 de réponse, taux d'abstention, latence p50/p95 | Mêmes définitions que `task/ranking` quand elles coïncident, pour que les familles restent comparables. |
@@ -128,8 +129,8 @@ templates/
 
 | Tranche | Contenu | État |
 | --- | --- | --- |
-| 1 | `stacks` tfidf + langchain, `modality/text`, `task/retrieval`, familles RAG et QA, notebooks texte, manifests, vérification verte | en cours |
-| 2 | `embedding_pipeline`, `agent_tools` | à venir |
+| 1 | `stacks` tfidf + langchain, `modality/text`, `task/retrieval`, famille `retrieval_augmented_generation`, notebooks texte, deux manifests, vérification verte | **livrée** : `ai-eng/rag/with-tfidf` (104 tests, 81,5 s) et `ai-eng/rag/with-langchain` (110 tests, 165,1 s), recall@5 de test 0,7194 dans les deux cas |
+| 2 | `embedding_pipeline`, `agent_tools`, `question_answering` (familles restantes de la modalité texte) | à venir |
 | 3 | `nlp/` : `text_classification` (tfidf, transformers), `named_entity_recognition` (spacy) | à venir |
 | 4 | `nlp/` : `summarization`, `llm_finetuning` (transformers, architecture minuscule, poids aléatoires) | à venir |
 | 5 | `mlops/model_serving` (fastapi) au-dessus d'un modèle entraîné | à venir |

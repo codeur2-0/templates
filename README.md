@@ -14,8 +14,9 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**25 projets** sur sept familles tabulaires, tous verts dans `tools/verify.py` (lint, formatage,
-typage, tests, six notebooks exécutés, pipeline complet `data → train → evaluate → predict`).
+**27 projets** — 25 sur sept familles tabulaires (sections 1.1 à 1.7) et 2 sur la famille RAG
+texte `ai-eng/rag` (section 1.8) — tous verts dans `tools/verify.py` (lint, formatage, typage,
+tests, six notebooks exécutés, pipeline complet `data → train → evaluate → predict`).
 
 ### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks
 
@@ -225,6 +226,65 @@ Chaque projet expose aussi : les six notebooks exécutés par la CI locale, les 
 modèle JSON (`model_card.json` : métriques, hyperparamètres, versions des librairies, empreinte
 des données) et un rapport d'évaluation Markdown avec analyse d'erreurs.
 
+### 1.8 `ai-eng/rag` — assistant documentaire interne sourcé, deux stacks
+
+Le premier cas d'usage **texte** du dépôt, et le premier où le modèle ne produit pas un label mais
+une réponse : répondre à une question interne uniquement à partir d'un corpus de procédures, citer
+le passage qui fonde la réponse, et s'abstenir explicitement quand le corpus ne la contient pas.
+128 documents synthétiques (huit thèmes d'entreprise x huit périmètres x deux éditions) découpés en
+passages de 110 tokens (chevauchement 30), 319 questions annotées dont 34 hors corpus, quatre
+difficultés mesurées séparément — facile, paraphrase, multi-document, hors corpus. La pertinence
+d'un passage est jugée par le chevauchement avec l'extrait annoté (seuil 50 % des mots de contenu),
+pas par la seule appartenance au bon document : un bon document n'est pas une bonne réponse.
+
+| Projet | Stack | Retrieval | recall@5 (test) | MRR | Précision des citations | F1 réponse | Abstention (exactitude) | Latence p95 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-tfidf`](ai-eng/rag/with-tfidf) | scikit-learn | BM25 (Okapi) | **0,7194** | 0,7038 | 0,6688 | 0,3210 | 0,8073 | **5,4 ms** |
+| [`with-langchain`](ai-eng/rag/with-langchain) | LangChain (LCEL) | BM25 + chaîne prompt/LLM/ancrage | **0,7194** | 0,7038 | 0,6688 | 0,3210 | 0,8073 | 12,9 ms |
+
+Les deux projets partagent le corpus, les questions, le découpage et l'index BM25 : **les chiffres de
+qualité sont identiques parce que le retrieval est identique** — c'est voulu, et c'est ce qui rend
+la comparaison lisible. Ce que la variante LangChain apporte ne se lit donc pas dans ces colonnes :
+
+- le **prompt** est un objet de configuration (`model.prompt.template`, variables `{context}` et
+  `{question}` vérifiées au montage de la chaîne), plutôt qu'une chaîne de caractères enfouie dans le
+  code ;
+- l'**adaptateur LLM** est une couture : générateur extractif hors ligne par défaut (aucune clé,
+  aucun réseau), client OpenAI-compatible optionnel qui reçoit **le prompt rendu par la chaîne** ;
+- les **citations traversent tout le graphe** : le nœud d'ancrage conserve le texte, les identifiants
+  des passages réellement utilisés, le prompt rendu et les passages, là où un `StrOutputParser`
+  rendrait une chaîne nue ;
+- la chaîne **n'est pas sérialisée** : l'état (passages, vocabulaire, embeddings) part en joblib et
+  le graphe est reconstruit au chargement — un test vérifie que la reconstruction répond à l'identique ;
+- le coût de l'orchestration est mesuré, pas caché : **+6,3 ms de médiane** (p50 4,8 -> 11,1 ms) et
+  **+7,5 ms de p95** (5,4 -> 12,9 ms) par question, sur un index de 128 passages.
+
+La même stack sert **trois stratégies de retrieval** interchangeables par `model.algorithm` :
+`langchain_lexical` (BM25, celle du rapport ci-dessus), `langchain_dense` (n-grammes hachés
+compressés par une SVD tronquée apprise sur le train) et `langchain_hybrid` (fusion par rangs
+réciproques des deux classements). Le notebook 04 les compare sur le **split de validation** et
+publie les intervalles de confiance ; le test qui refait le calcul de la fusion RRF à la main fait
+partie de la suite.
+
+Trois références donnent un sens aux 0,7194 : tirage aléatoire 0,0332, ordre du corpus 0,0357, et
+98 des 109 questions de test ont une réponse dans le corpus — un rappel de 1,0 est hors d'atteinte.
+
+| Segment (test) | Questions | recall@5 | MRR | F1 réponse | Abstention |
+| --- | --- | --- | --- | --- | --- |
+| `facile` | 43 | **0,9186** | 0,9193 | 0,3883 | 0,0930 |
+| `multi_document` (deux sources) | 13 | 0,7692 | 0,7956 | **0,5218** | 0,0000 |
+| `paraphrase` (aucun mot en commun) | 42 | **0,5000** | 0,4549 | 0,1900 | 0,4048 |
+| `hors_corpus` | 11 | n/a | n/a | 0,0000 | **1,0000** |
+
+**Lecture honnête** : le segment « paraphrase » divise le rappel par deux et concentre les échecs —
+c'est la limite structurelle d'un retriever lexical, mesurée plutôt que supposée, et c'est
+exactement ce que la variante dense puis hybride de la même stack est là pour chiffrer. Les
+questions hors corpus sont toutes refusées (0 réponse inventée sur 11) et le seuil d'abstention est
+calibré sur un split dédié, jamais sur le test. Les deux projets rendent un verdict **conforme**
+(`recall_at_5 = 0,7194 >= 0,60`) et exposent le même jeu de métriques par question : recall@k, MRR,
+nDCG@k, précision/rappel des citations, F1 de réponse, exactitude et rappel d'abstention, latences
+p50/p95, plus les planchers triviaux et les segments.
+
 ---
 
 ## 2. Démarrage rapide (cinq commandes)
@@ -402,10 +462,13 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **25/25 projets conformes** (ruff check, ruff format, mypy strict,
-4 235 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les tests
-de leur couche tâche —, 150 notebooks exécutés, `python -m src.main mode=all` de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
-six notebooks et pipeline complet — avant d'être considéré comme livré.
+État au dernier passage : **25/25 projets tabulaires conformes** (ruff check, ruff format, mypy
+strict, 4 235 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les
+tests de leur couche tâche —, 150 notebooks exécutés, `python -m src.main mode=all` de bout en
+bout) et **2/2 projets `ai-eng/rag` conformes** (`with-tfidf` en 81,5 s avec 104 tests,
+`with-langchain` en 165,1 s avec 110 tests, mêmes six notebooks et même pipeline complet). Chaque
+projet est rejoué intégralement — lint, typage, tests, exécution des six notebooks et pipeline
+complet — avant d'être considéré comme livré.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
 reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capture d'écran.
@@ -428,11 +491,12 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 ## 7. Feuille de route
 
 État du générateur : `registry/families.yaml` déclare **29 familles** et `registry/stacks.yaml`
-**18 stacks**. Les couches `base/`, `modality/tabular/`,
-`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking}/`,
-`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation}/`
-et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/` sont écrites et vérifiées : les
-**sept familles tabulaires** sont livrées. Ce qui reste, par ordre de valeur pédagogique :
+**18 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
+`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval}/`,
+`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation}/`
+et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,tfidf,langchain}/` sont écrites et
+vérifiées : les **sept familles tabulaires** et la **famille RAG** sont livrées (deux projets
+`ai-eng/rag`, section 1.8). Ce qui reste, par ordre de valeur pédagogique :
 
 1. **Stacks tabulaires déclarées, pas encore livrées** — `clustering` et `anomaly_detection` en
    PyTorch et TensorFlow (auto-encodeurs), `recommendation` en PyTorch (modèle à deux tours),
@@ -440,14 +504,19 @@ et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/` sont écrites et
    manifeste par stack et, comme pour la prévision, des notebooks paramétrés par stack
    (`extras.notebook_<famille>`) : les commentaires chiffrés d'un notebook doivent parler de la
    stack réellement mesurée.
-2. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
+2. **Suite du périmètre ai-eng et nlp** — la modalité texte, la tâche `retrieval` et la famille
+   `retrieval_augmented_generation` sont en place : la suite réutilise cette couche.
+   Restent `ai-eng/` (agents : Deepagents, Strands, CrewAI ; embeddings ; Transformers ;
+   serving FastAPI) et `nlp/` (classification de texte, NER avec spaCy, résumé, fine-tuning LLM).
+   Les familles `question_answering`, `embedding_pipeline` et `agent_tools` réutilisent
+   `modality/text/` + `task/generation/` ; `nlp/` ajoute ses propres couches `family/`.
+3. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
    GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
-   `ai-eng/` (LangChain, Deepagents, Strands, CrewAI, RAG, Transformers, serving FastAPI), `computer-vision/` et `nlp/`
-   (spaCy, Transformers). Chacune demande une nouvelle couche `modality/` (loaders,
-   pré-traitement, pipelines, tests) en plus des couches `family/` et `task/`.
-3. **Stacks déjà déclarées, non implémentées** — `spacy`, `transformers`, `langchain`, `duckdb`,
-   `pandas`, `prefect`, `mlflow`, `fastapi`, `scipy`, `pandera` : l'entrée de registre existe,
-   le dossier `templates/stack/<clé>/src/models/` reste à écrire.
+   `computer-vision/`. Chacune demande une nouvelle couche `modality/` (loaders, pré-traitement,
+   pipelines, tests) en plus des couches `family/` et `task/`.
+4. **Stacks déjà déclarées, non implémentées** — `spacy`, `transformers`, `duckdb`, `pandas`,
+   `prefect`, `mlflow`, `fastapi`, `scipy`, `pandera` : l'entrée de registre existe, le dossier
+   `templates/stack/<clé>/src/models/` reste à écrire.
 
 Chaque ajout suit la même procédure : entrée de registre -> templates de stack ou de famille ->
 manifeste -> `build` -> `verify` -> commit.

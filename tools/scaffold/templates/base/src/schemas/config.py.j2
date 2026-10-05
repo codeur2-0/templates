@@ -292,9 +292,7 @@ class MetricsConfig(BaseModel):
     task: Task = "{{ spec.metrics.task }}"
     primary: str = "{{ spec.metrics.primary }}"
     secondary: list[str] = Field(
-        default_factory=lambda: [
-{{ py_string_tuple(spec.metrics.secondary, indent=12, suffix=",") }}
-        ]
+{{ py_lambda_list(spec.metrics.secondary) }}
     )
     baseline: str = "{{ spec.metrics.baseline }}"
     direction: Literal["maximize", "minimize"] = "{{ spec.metrics.direction }}"
