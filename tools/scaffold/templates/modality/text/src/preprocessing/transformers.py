@@ -604,9 +604,14 @@ class HashingEmbedder:
             The configured embedder.
         """
         settings = as_mapping(config)
+        bounds = tuple(int(value) for value in settings.get("ngram_range", (1, 2)))
+        if len(bounds) != 2:
+            msg = f"ngram_range must hold exactly two bounds, got {bounds!r}"
+            raise ValueError(msg)
         return cls(
             n_features=int(settings.get("n_features", 4096)),
             n_components=int(settings.get("n_components", 192)),
+            ngram_range=(bounds[0], bounds[1]),
             random_state=int(settings.get("random_state", 42)),
         )
 
@@ -656,8 +661,40 @@ class HashingEmbedder:
             )
             raise RuntimeError(msg)
         matrix = self._hasher.transform(list(texts))
-        dense = self._svd.transform(matrix) if self._svd is not None else matrix
+        dense = self._svd.transform(matrix) if self._svd is not None else matrix.toarray()
         return normalize(np.asarray(dense, dtype="float32"), norm="l2")
+
+    def projection_fidelity(self, texts: Sequence[str]) -> float:
+        """Measure how much of the raw hashed geometry the projection keeps.
+
+        A projection is a *compression*: it maps the sparse hashed space onto a much smaller one,
+        and a similarity computed there is only useful if it still orders the passages the way the
+        raw space does. The metric compares, on consecutive pairs of the corpus, the cosine of the
+        raw hashed vectors with the cosine of their projections, and reports the agreement
+        ``1 - mean(|difference|) / 2``. It is ``1.0`` by construction when no projection is used,
+        and it falls when the compression starts confusing passages the hashed space separated.
+
+        Args:
+            texts: Texts used for the measurement (the training passages, typically).
+
+        Returns:
+            The agreement between the two similarity structures, in ``[0, 1]``.
+        """
+        raw = self._hasher.transform(list(texts))
+        projected = self.transform(texts)
+        if projected.shape[1] == raw.shape[1] or len(texts) < 2:
+            return 1.0
+        rows = projected / np.maximum(np.linalg.norm(projected, axis=1, keepdims=True), 1e-12)
+        # Consecutive passages of the corpus often belong to the same document: the pairs are
+        # therefore taken with a stride of a third of the corpus, which crosses the documents and
+        # the topics, and capped so the measurement stays cheap on a large index.
+        stride = max(len(rows) // 3, 1)
+        left = np.arange(0, max(len(rows) - stride, 1), dtype=int)[:512]
+        right = left + stride
+        raw_similarity = np.asarray(raw[left].multiply(raw[right]).sum(axis=1)).ravel()
+        dense_similarity = np.einsum("ij,ij->i", rows[left], rows[right])
+        deviation = float(np.mean(np.abs(raw_similarity - dense_similarity))) / 2.0
+        return float(np.clip(1.0 - deviation, 0.0, 1.0))
 
     def save(self, path: str | Path) -> Path:
         """Persist the embedder (hasher configuration + learned SVD).

@@ -434,16 +434,17 @@ Après `make all`, le dépôt local contient :
 | --- | --- |
 | `data/raw/product_support_faq.parquet` (+ `csv`) | jeu de données synthétique, 120 lignes |
 | `data/raw/generation_metadata.json` | recette de génération : graine, options, empreinte du jeu, fichiers écrits |
-| `data/processed/split_{train,val,test}.parquet` | splits avant transformation (l'évaluation et l'inférence rejouent exactement le même découpage) |
-| `data/processed/features_{X_train,X_val,X_test}.parquet` | matrices prêtes pour le modèle |
+| `data/processed/chunks.parquet` (+ `csv`) | passages indexés : le texte découpé, ses métadonnées et les annotations conservées |
 | `artifacts/models/lexical_index.joblib` | modèle entraîné |
 | `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
-| `artifacts/models/feature_builder.joblib` | construction des features dérivées, ajustée sur le train uniquement |
 | `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
 | `artifacts/models/resolved_config.json` | configuration Hydra résolue : l'artefact entraîné porte sa recette exacte |
 | `artifacts/metrics/training_metrics.json` | métriques d'entraînement et de validation |
 | `artifacts/metrics/evaluation_metrics.json` | métriques sur le split de test + verdict des seuils |
 | `artifacts/reports/evaluation_report.md` | rapport lisible (métriques, analyse d'erreurs, recommandations) |
+| `artifacts/reports/per_question.csv` | métriques par question : rappel@k, MRR, citations, abstention, latence |
+| `artifacts/reports/retrieved_passages.csv` | passages servis à chaque question, avec leur rang et leur score |
+| `artifacts/reports/segment_metrics.csv` | ventilation par difficulté, intention et type de réponse |
 | `artifacts/reports/predictions.csv` | prédictions sur l'échantillon de démonstration |
 | `artifacts/figures/*.png` | figures spécifiques à la tâche |
 | `outputs/<date>/<heure>/` | configuration composée + logs Hydra |

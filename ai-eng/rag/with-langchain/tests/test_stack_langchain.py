@@ -12,6 +12,7 @@ et ancrage, la fusion hybride combine réellement les deux classements, et la ch
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,7 @@ from src.models.chain import (
     build_prompt,
     format_documents,
 )
+from src.models.llm import Generation, Passage
 
 
 @pytest.fixture(scope="session")
@@ -189,9 +191,9 @@ def test_the_adapter_receives_the_prompt_rendered_by_the_chain(
     adapter = fitted_model._adapter  # type: ignore[attr-defined]
     original = adapter.generate
 
-    def spy(question: str, passages: object, *, prompt: str | None = None):  # type: ignore[no-untyped-def]
+    def spy(question: str, passages: Sequence[Passage], *, prompt: str | None = None) -> Generation:
         captured["prompt"] = str(prompt)
-        return original(question, passages, prompt=prompt)  # type: ignore[arg-type]
+        return original(question, passages, prompt=prompt)
 
     monkeypatch.setattr(adapter, "generate", spy)
     answer = fitted_model.chain.invoke(corpus_question)  # type: ignore[attr-defined]

@@ -716,6 +716,76 @@ plt.show()
 # ---------------------------------------------------------------------------------------------
 # 04 — planchers, scorers et seuil de refus
 # ---------------------------------------------------------------------------------------------
+def _deduplication_section(context: NotebookContext) -> list[NotebookNode]:
+    """Build the notebook cells that measure the near-duplicates of the corpus.
+
+    The section is added to the families whose corpus writes the same fact several times: the dense
+    stack exposes ``nearest_neighbours`` precisely for that second use case, and the measured ratio
+    is the one the family publishes.
+
+    Args:
+        context: Notebook context.
+
+    Returns:
+        The markdown, code and insight cells of the section.
+    """
+    return [
+        _md(
+            "## 4. Dédoublonnage — le second usage de l'index\n\n"
+            "Chaque fait du corpus est écrit trois fois (notice, fiche commerciale, note SAV) : "
+            "c'est ce qui rend le rappel généreux, et c'est aussi un travail à part entière — "
+            "retrouver les quasi-doublons d'une fiche sans écrire de recherche par mots-clés. "
+            "L'index répond aux deux questions : ``retrieve`` pour une question, "
+            "``nearest_neighbours`` pour un texte déjà indexé, en excluant la fiche interrogée."
+        ),
+        _text(
+            """
+def fact_and_reference(title: str) -> tuple[str, str]:
+    \"\"\"Lire le fait et la référence d'un titre de fiche (style — fait — produit (REF)).\"\"\"
+    parts = [part.strip() for part in title.split(" — ")]
+    return parts[1], parts[2].rsplit("(", 1)[1].rstrip(")")
+
+
+titles = dict(zip(DOCUMENTS["doc_id"], DOCUMENTS["title"], strict=True))
+same_fact = 0
+example: tuple[str, list[str]] | None = None
+for record in DOCUMENTS.to_dict(orient="records"):
+    neighbours = MODEL.nearest_neighbours(
+        str(record["text"]), 2, exclude_doc_id=str(record["doc_id"])
+    )
+    if all(
+        fact_and_reference(str(titles[neighbour.doc_id]))
+        == fact_and_reference(str(record["title"]))
+        for neighbour in neighbours
+    ):
+        same_fact += 1
+        if example is None:
+            example = (
+                str(record["doc_id"]),
+                [str(neighbour.doc_id) for neighbour in neighbours],
+            )
+print(f"{same_fact}/{len(DOCUMENTS)} fiches ont leurs deux autres écritures en tête")
+print(f"exemple : {example[0]} est voisin de {', '.join(example[1])}")
+example_frame = DOCUMENTS[DOCUMENTS["doc_id"].isin([example[0], *example[1]])]
+example_frame[["doc_id", "title", "section"]]
+""",
+            context,
+        ),
+        _insight(
+            [
+                "Un index ne sert pas seulement à répondre à des questions : le même objet "
+                "retrouve les quasi-doublons d'un texte, et une propriété du corpus — trois "
+                "écritures par fait — devient une mesure.",
+                "Le test de la stack refait cette vérification sur toutes les fiches : une "
+                "propriété annoncée au README et vérifiée sur un échantillon ne prouve rien.",
+                "Le dédoublonnage se juge sur ce qu'on en fait : ici il compte les écritures "
+                "multiples, il ne les supprime pas — trois sources valent mieux qu'une pour un "
+                "référentiel publié par plusieurs équipes.",
+            ]
+        ),
+    ]
+
+
 def build_04_model_exploration(context: NotebookContext, destination: Path) -> Path:
     """Build ``04_model_exploration.ipynb``: planchers, scorers et seuil d'abstention.
 
@@ -775,9 +845,10 @@ baselines[[f"recall_at_{k}" for k in (1, 5, 10)] + ["mrr"]].round(4)
         ),
         _md(
             "## 2. Comparer les scorers\n\n"
-            "BM25 et TF-IDF cosinus ne pondèrent pas la fréquence des termes de la même façon. Le "
-            "protocole est figé — même découpage, même corpus, mêmes questions — pour que l'écart "
-            "observé vienne du scorer et de rien d'autre."
+            "La stack sert plusieurs algorithmes — la cellule suivante les énumère : deux scorers ne "
+            "pondèrent pas la fréquence des termes de la même façon et deux index ne stockent pas la "
+            "même dimension. Le protocole est figé — même découpage, même corpus, mêmes questions — "
+            "pour que l'écart observé vienne de l'algorithme et de rien d'autre."
         ),
         _text(
             """
@@ -794,9 +865,21 @@ for algorithm in available_algorithms():
         for question in VAL_ANSWERABLE["question"]
     ]
     metrics = retrieval_metrics(rankings, gold, ks=(1, 5, 10))
+    # Chaque stack publie son empreinte : taille du vocabulaire pour un index lexical, dimension
+    # stockée et fidélité de projection pour un index dense. Une clé absente n'est pas inventée.
+    footprint_keys = {
+        "vocabulary_size": "vocabulaire",
+        "dimension": "dimension",
+        "projection_fidelity": "fidélité",
+    }
+    footprint = {
+        label: float(fit_result.extra[key])
+        for key, label in footprint_keys.items()
+        if key in fit_result.extra
+    }
     comparison[algorithm] = {
         "passages": float(fit_result.n_chunks),
-        "vocabulaire": float(fit_result.extra.get("vocabulary_size", 0.0)),
+        **footprint,
         "recall_at_1": metrics["recall_at_1"],
         "recall_at_5": metrics["recall_at_5"],
         "recall_at_10": metrics["recall_at_10"],
@@ -906,6 +989,10 @@ plt.show()
             ]
         ),
     ]
+    # Seule la stack dense expose ``nearest_neighbours`` : la variante lexicale de la même famille
+    # garde le notebook à trois sections.
+    if context.spec.stack == "embedding":
+        cells.extend(_deduplication_section(context))
     return write_notebook(destination / "04_model_exploration.ipynb", cells)
 
 

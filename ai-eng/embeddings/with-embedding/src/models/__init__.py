@@ -1,0 +1,40 @@
+"""Model layer of the **Index vectoriel dense (hachage + SVD)** stack.
+
+Public surface, imported everywhere else in the project::
+
+    from src.models import build_model, load_model          # fabrique + rechargement
+    from src.models.base import BaseModel, RetrievedChunk   # contrat et objets de retour
+    from src.models.factory import available_algorithms     # algorithmes servis par la stack
+
+Nothing outside this package imports a scikit-learn class: the framework stays an implementation
+detail behind :class:`~src.models.base.BaseModel` (dependency inversion).
+"""
+
+from src.models.base import Answer, BaseModel, FitResult, ModelCard, RetrievedChunk
+from src.models.factory import (
+    ALGORITHMS,
+    AlgorithmSpec,
+    available_algorithms,
+    build_model,
+    describe_algorithm,
+    load_model,
+    supported_tasks,
+)
+from src.models.model import DOCUMENT_COLUMNS, EmbeddingModel
+
+__all__ = [
+    "ALGORITHMS",
+    "AlgorithmSpec",
+    "Answer",
+    "BaseModel",
+    "DOCUMENT_COLUMNS",
+    "EmbeddingModel",
+    "FitResult",
+    "ModelCard",
+    "RetrievedChunk",
+    "available_algorithms",
+    "build_model",
+    "describe_algorithm",
+    "load_model",
+    "supported_tasks",
+]

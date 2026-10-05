@@ -1,0 +1,270 @@
+# =================================================================================================
+# Famille « embedding_pipeline » — industrialiser les représentations d'un catalogue dupliqué.
+# -------------------------------------------------------------------------------------------------
+# Même modalité et même tâche que les familles RAG et QA (recherche documentaire annotée), mais le
+# sujet n'est plus la réponse : c'est **l'index**. Le corpus est écrit trois fois — notice
+# constructeur, fiche commerciale, note SAV — parce que c'est ce qui arrive quand trois équipes
+# publient le même référentiel : les deux phrases du fait sont recopiées d'une fiche à l'autre,
+# le cadrage et le titre changent. Chaque fait est donc annoté pertinent dans les trois fiches, et un
+# index qui en retrouve une a fait son travail. La famille mesure ce qu'un index a de particulier :
+# dimension produite, fidélité de la projection, taille de l'artefact, recall@k, débit de requêtes,
+# taux de succès du cache, qualité de la décision d'abstention et stabilité entre deux exécutions.
+# =================================================================================================
+
+domain: ai-eng
+problem: embeddings
+modality: text
+family: embedding_pipeline
+
+business:
+  persona: >-
+    Équipe plateforme données d'une enseigne de matériel électronique (400 personnes), avec un
+    responsable catalogue qui publie le référentiel produit et un ingénieur IA qui outille le
+    service client.
+  context: >-
+    Le catalogue est publié trois fois : la notice constructeur, la fiche commerciale et la note SAV
+    reprennent la même autonomie et la même durée de garantie, avec un cadrage et un vocabulaire
+    d'accompagnement différents. Le service client cherche dans les trois, l'équipe catalogue veut
+    retrouver les fiches qui écrivent le même fait, et la plateforme veut un index réutilisable —
+    dimension, taille, débit et fidélité connus — plutôt qu'un script de recherche par cas d'usage.
+  problem: >-
+    Produire des **vecteurs de documents** déterministes, hors ligne et mesurables, les servir comme
+    index de recherche (recall@k), comme détecteur de quasi-doublons (les trois fiches d'un même
+    fait) et comme artefact versionné dont on connaît la dimension, la fidélité, la taille et le
+    débit — au lieu d'un index dont on ne sait rien sinon qu'il « marche ».
+  inputs: >-
+    Un corpus de fiches produit versionnées (titre, section, espace documentaire d'origine, date,
+    texte) et des questions annotées avec leurs fiches pertinentes et leurs questions hors corpus.
+  outputs: >-
+    Un index vectoriel persisté (matrice de vecteurs, dimension, propriétés), les passages les plus
+    proches d'une requête ou d'un document, une fiche de modèle qui publie la dimension, la fidélité
+    de la projection et les statistiques de cache, et un rapport de mesure par segment.
+  value: >-
+    Un seul artefact pour trois usages (recherche, dédoublonnage, routage), des chiffres opposables à
+    la baseline lexicale — mesurés sur les mêmes questions, y compris quand ils déplaisent — et une
+    réponse chiffrée à la question « 128 dimensions suffisent-elles ? » : sur ce corpus la
+    compression divise la taille de la matrice par trente-deux (0,16 Mo contre 5,25 Mo) et la
+    fidélité de projection mesure ce qu'elle conserve (1,0000 : l'ordre des similarités est inchangé
+    sur les paires testées).
+  success_criteria:
+    - "recall@5 ≥ 0,90 sur les questions répondables du split de test : les fiches annotées du fait demandé sont retrouvées (mesuré : 0,94 pour les deux variantes ; les planchers triviaux de la même métrique valent 0,05 pour le tirage aléatoire et 0,00 pour l'ordre du corpus)."
+    - "Précision au premier rang ≥ 0,70 : le premier résultat est l'une des trois fiches du fait demandé, malgré deux quasi-doublons par fait (mesuré : 0,78 en dense, 0,73 en TF-IDF cosinus)."
+    - "Exact match ≥ 0,60 : la phrase produite est celle du corpus, mot pour mot (mesuré : 0,79 en dense, 0,76 en TF-IDF cosinus ; 1,00 sur les questions factuelles et 0,60 sur les paraphrases, pour les deux variantes)."
+    - "Précision des citations ≥ 0,90 : une réponse n'annexe pas la phrase d'une fiche non pertinente (mesuré : 0,94 en dense, 0,97 en TF-IDF cosinus — le lexical cite plus juste, le dense classe mieux, et les deux chiffres sont publiés)."
+    - "Le taux de réponse sur les questions hors corpus est **publié** à côté de la couverture, jamais caché derrière le rappel (mesuré : 4 des 7 questions du test refusées en dense, 3 en TF-IDF cosinus, pour une couverture de 0,94 et 0,88 — ces questions sont écrites avec le vocabulaire des fiches, c'est la limite mesurée de la famille)."
+    - "Fidélité de la projection ≥ 0,95 : la compression conserve l'ordre des similarités du corpus (mesuré : 1,0000 à 128 dimensions, pour une matrice de 0,16 Mo contre 5,25 Mo en 4096 dimensions, soit un index trente-deux fois plus petit)."
+    - "Dimension publiée : la fiche de modèle annonce la dimension **réellement** stockée, pas la dimension demandée — la SVD réduit ses composantes sur un corpus plus petit que la dimension visée."
+    - "Dédoublonnage : les deux plus proches voisins d'une fiche sont ses deux autres écritures, vérifié par la suite de tests sur **toutes** les fiches du corpus de test, pas sur un échantillon (336 voisins attendus, deux par fiche)."
+    - "Débit : index de 168 fiches construit en moins de 30 s et requête servie en moins de 250 ms sur CPU (mesuré : 0,42 s de construction en dense, 0,07 s en lexical ; latence p95 de 4,64 ms en dense et 7,44 ms en lexical, cache armé)."
+    - "Déterminisme : deux exécutions à graine fixée produisent la même matrice et les mêmes métriques."
+    - "Stabilité de la décision : l'exactitude équilibrée réponse/abstention est publiée avec la couverture, jamais l'une sans l'autre (mesuré : 0,76 d'exactitude équilibrée pour 0,94 de couverture en dense, 0,66 pour 0,88 en lexical)."
+  cadence: "Index reconstruit à chaque publication du catalogue ; recherche en ligne, dédoublonnage en lot nocturne."
+  constraints:
+    - "Aucun poids pré-entraîné, aucun téléchargement : l'index est appris sur le corpus, hors ligne."
+    - "Le corpus est synthétique : aucune donnée client, aucune donnée personnelle."
+    - "L'index doit rester rechargeable à l'identique : vecteurs, métadonnées et configuration du générateur sont persistés ensemble."
+data:
+  dataset_name: equipment_catalogue_editions
+  title: "Catalogue produit publié trois fois (notice, fiche commerciale, note SAV)"
+  description: >-
+    Un corpus synthétique de 168 fiches — vingt-huit références x deux faits (autonomie, garantie
+    légale) x trois styles éditoriaux — et 115 questions annotées dont 19 hors corpus. Trois équipes
+    publient le même référentiel : les deux phrases du fait (celle qui porte la valeur et celle qui
+    la contextualise) sont **recopiées** dans les trois fiches, tandis que la phrase de style, la
+    section, l'espace d'origine et le titre changent. Les trois fiches sont annotées pertinentes pour
+    la question, ce qui plafonne recall@1 au tiers et fait de cette métrique une lecture de
+    précision ; 56 questions factuelles, 28 paraphrases, 12 multi-document (six fiches pertinentes :
+    deux faits x trois écritures) et 19 hors corpus couvrent quatre difficultés, et la paraphrase
+    change le vocabulaire de la question — 34 % des mots pleins partagés avec la phrase source
+    contre 71 % pour la question factuelle — sans jamais retirer la référence qui identifie la
+    réponse.
+  n_samples: 168
+  seed: 42
+  formats: [parquet, csv]
+  id_column: doc_id
+  time_column: published_at
+  columns:
+    - name: doc_id
+      dtype: str
+      role: identifier
+      description: "Identifiant stable de la fiche (clé de jointure, jamais une feature)."
+      unique: true
+      checks: { regex: "^DOC-[0-9]{4}$" }
+      generator: { kind: sequence }
+    - name: title
+      dtype: str
+      role: metadata
+      description: "Titre de la fiche : style éditorial, fait et référence concernée."
+      checks: { min_length: 6, max_length: 160 }
+      distribution: "un titre par fiche, construit sur le style, le fait et le code référence"
+      generator: { kind: template }
+    - name: section
+      dtype: category
+      role: feature
+      description: "Section éditoriale : procedure (notice), definition (fiche commerciale), contact (note SAV)."
+      checks: { isin: [politique, procedure, definition, contact, calcul, conformite] }
+      generator: { kind: choice }
+    - name: source
+      dtype: category
+      role: feature
+      description: "Espace documentaire d'origine : wiki_it, wiki_ops, wiki_support."
+      checks: { isin: [wiki_rh, wiki_it, wiki_finance, wiki_juridique, wiki_ops, wiki_support] }
+      generator: { kind: choice }
+    - name: published_at
+      dtype: datetime
+      role: timestamp
+      description: "Date de publication de la fiche (les trois exemplaires d'un fait ne sont pas datés pareil)."
+      generator: { kind: date }
+    - name: n_tokens
+      dtype: int
+      role: metadata
+      description: "Nombre de tokens du texte, calculé avec le tokenizer du projet."
+      checks: { ge: 40, le: 1200 }
+      generator: { kind: derived }
+    - name: text
+      dtype: str
+      role: feature
+      description: "Texte intégral de la fiche : la phrase du fait y est recopiée mot pour mot."
+      checks: { min_length: 200 }
+      generator: { kind: template }
+  insights:
+    - "Chaque fait est écrit trois fois et les deux phrases du fait sont identiques dans les trois fiches : le même contenu est annoté pertinent trois fois, donc un rappel faible ne peut pas venir d'un manque de candidats."
+    - "Les trois écritures d'un fait se ressemblent plus entre elles qu'aux fiches d'un autre produit : la suite de tests vérifie, sur toutes les fiches du corpus de test, que les deux plus proches voisins d'une fiche sont ses deux autres écritures — c'est ce qui rend le dédoublonnage mesurable."
+    - "Le découpage (110 tokens, 30 de recouvrement) laisse une fiche entière — une cinquantaine de tokens (53 en moyenne) — dans un seul passage : la recherche et le dédoublonnage portent sur les fiches, pas sur des fragments."
+    - "Les paraphrases partagent deux fois moins de mots pleins avec la phrase source que les questions factuelles (34 % contre 71 %) sans retirer la référence qui identifie la réponse : c'est le segment qui sépare un index de mots d'un index sémantique, et où l'exact match tombe à 0,60."
+    - "Les questions hors corpus portent sur un fait voisin que le catalogue n'écrit nulle part (réparation hors garantie, livraison le samedi, paiement en plusieurs fois) mais elles sont écrites avec le vocabulaire des fiches : l'abstention y est mesurée à 0,57 en dense, et la famille publie ce chiffre au lieu de le cacher."
+  recommendations:
+    - "Comparer systématiquement au tirage aléatoire et à l'ordre du corpus avant d'interpréter un recall@5 (0,05 et 0,00 ici)."
+    - "Comparer le dense au lexical sur les mêmes questions : sur ce corpus l'index dense gagne le classement (recall@5 0,94 et MRR 0,96 contre 0,94 et 0,91) et l'exact match (0,79 contre 0,76), tandis que l'index lexical garde la précision des citations (0,97 contre 0,94) et refuse mieux les questions hors corpus (3 sur 7 contre 4) — aucun des deux n'est « meilleur » dans l'absolu."
+    - "Ne pas conclure du sans-projection au sémantique : l'index dense de cette famille reste un hachage de n-grammes, et c'est exactement ce que dit le segment des paraphrases (0,60 d'exact match contre 1,00 en factuel)."
+    - "Publier la dimension réellement produite : une SVD tronquée réduit ses composantes quand le corpus est plus petit que la dimension demandée."
+    - "Mesurer la fidélité de la projection avant de choisir une dimension : ici 128 dimensions conservent le classement du hachage brut (fidélité 1,0000), et la matrice passe de 5,25 Mo à 0,16 Mo (taille publiée par la fiche de modèle)."
+    - "Servir la même requête deux fois et lire le taux de succès du cache : le débit annoncé dépend de la charge, pas du modèle."
+    - "Regarder les segments : une moyenne globale cache le plafond structurel du recall@1 (1/3, trois fiches pertinentes), la chute des paraphrases et le refus imparfait des questions hors corpus."
+  notes:
+    - "Le corpus est synthétique, mais sa structure imite un référentiel publié par plusieurs équipes : même fait, trois plumes, aucune autorité."
+    - "Les paraphrases ne partagent jamais zéro mot avec la fiche (17 % au minimum, 34 % en médiane) : c'est mesuré, et c'est la raison pour laquelle le segment reste difficile sans devenir insoluble."
+    - "Le multi-document est plafonné par construction : la réponse de référence concatène deux phrases venues de deux fiches, et le garde-fou `support_ratio` écarte la seconde quand elle est trop mal classée (exact match 0,25, F1 0,82 en dense)."
+    - "Le recall@1 ne peut pas dépasser 1/3 sur les questions mono-document et 1/6 sur les multi-document : la famille le publie en métrique secondaire et lit la précision au premier rang à sa place."
+
+model:
+  display_name: "Index vectoriel dense (n-grammes hachés + SVD tronquée)"
+  algorithm: hashing_svd
+  rationale: >-
+    Les vecteurs sont produits par un hachage de n-grammes (uni+bigrammes) suivi d'une SVD tronquée
+    apprise sur le corpus d'entraînement, puis normalisés en norme L2. Ce choix est le seul qui reste
+    **déterministe, hors ligne et mesurable** : aucun poids pré-entraîné à télécharger, un index de
+    quelques centaines de kilo-octets, une similarité qui reste un produit matriciel — donc un débit
+    qu'on peut publier — et un score borné dans ``[0, 1]``, ce qui rend le seuil d'abstention
+    calibrable (c'est la différence mesurée avec BM25, dont le score n'est pas borné). Ses
+    propriétés sont des mesures : la dimension réellement stockée, la fidélité de la projection,
+    la taille de la matrice, le taux de succès du cache. Ses limites sont publiées de la même
+    façon : la compression ne crée pas de sémantique — un hachage de n-grammes reste un index de
+    mots, et les paraphrases ne partagent qu'un tiers des mots pleins de la phrase source — et la
+    décision d'abstention sur les questions hors corpus reste imparfaite (quatre refus sur sept au
+    test en dense).
+  params:
+    abstention_threshold: 0.0
+    calibrate_abstention: true
+    calibration_min_gain: 0.05
+    max_cache_entries: 512
+    # Les nœuds propres à une stack (``embedding``, ``lexical``, ``llm``) sont déclarés par le
+    # manifeste de la variante concernée : les mettre ici les ferait hériter par la variante
+    # lexicale, qui publierait dans sa fiche de modèle des paramètres qu'elle n'utilise pas.
+  alternatives:
+    - "`hashing_raw` : l'espace de hachage conservé tel quel (4096 dimensions, fidélité 1,0) — l'index trente-deux fois plus gros (5,25 Mo) qui chiffre ce que la compression apporte."
+    - "Variante `with-tfidf` : le même corpus indexé dans l'espace vectoriel creux (TF-IDF cosinus) — la référence lexicale, qui garde la précision des citations (0,97) et refuse 3 des 7 questions hors corpus, et le témoin du segment paraphrase."
+    - "Bi-encodeur entraîné (stack `transformers`) : seule approche qui rapproche deux formulations sans mot commun, au prix d'un entraînement et d'un artefact plus lourd."
+    - "`nearest_neighbours` : le même index sert la détection de quasi-doublons (les trois fiches d'un fait) sans code supplémentaire."
+
+metrics:
+  task: retrieval
+  # Métrique principale : recall@5, et non recall@1. Chaque fait est écrit trois fois et les trois
+  # fiches sont annotées pertinentes : recall@1 ne peut donc pas dépasser 1/3 et mesure surtout la
+  # précision du premier rang, alors que recall@5 dit si le jeu complet des exemplaires est retrouvé.
+  # Les deux sont publiés — recall@1 en secondaire, avec la lecture qui va avec.
+  primary: recall_at_5
+  secondary:
+    - recall_at_1
+    - recall_at_3
+    - recall_at_10
+    - precision_at_1
+    - mrr
+    - ndcg_at_10
+    - answer_f1
+    - answer_exact_match
+    - citation_precision
+    - abstention_balanced_accuracy
+    - answer_coverage
+    - false_answer_rate
+  baseline: random
+  # Plancher de non-régression de l'index dense, mesuré sur le split de test : 0,9412. Le seuil est
+  # un garde-fou, pas un objectif : la famille mesure aussi la dimension, la fidélité, la taille de
+  # l'artefact et le débit, publiés dans la fiche de modèle et le rapport.
+  min_primary: 0.90
+  direction: maximize
+
+preprocessing:
+  chunking:
+    max_tokens: 110
+    overlap_tokens: 30
+
+train:
+  split:
+    test_size: 0.35
+    val_size: 0.2
+    stratify: true
+    shuffle: true
+    time_based: false
+  retrieval_ks: [1, 3, 5, 10]
+  early_stopping:
+    enabled: false
+  cross_validation:
+    enabled: false
+    folds: 3
+    strategy: kfold
+
+extras:
+  data_conf:
+    corpus:
+      reference_date: "2025-01-06"
+      paraphrase_share: 0.5
+      multi_document_share: 0.15
+      hors_corpus_share: 0.20
+      val_size: 0.20
+      test_size: 0.35
+  model_conf:
+    llm:
+      provider: extractive
+      # Deux phrases au plus : une question multi-document demande deux valeurs et une réponse qui
+      # n'en cite qu'une est plafonnée sur ce segment.
+      max_sentences: 2
+      # Deux mots pleins en commun au minimum : avec un seul, une phrase de contexte se qualifierait
+      # sur un mot grammatical et s'ajouterait à la réponse, ce qui ferait chuter l'exact match pour
+      # une raison qui n'apprend rien du modèle.
+      min_overlap: 2
+      # Les passages dont le score tombe sous 80 % du meilleur sont écartés du choix de phrase : sans
+      # ce garde-fou, une question sur les *frais de retour* se faisait compléter par la phrase du
+      # *délai de retour* d'une autre fiche.
+      support_ratio: 0.8
+  root_conf:
+    retrieval:
+      answer_k: 5
+      abstention_threshold: 0.0
+      rerank: false
+
+# -------------------------------------------------------------------------------------------------
+# Ce que le projet enseigne. La famille est la variante « industrialisation » du RAG : les mêmes
+# briques de recherche, mais la qualité se juge sur les propriétés de l'index autant que sur le
+# rappel.
+# -------------------------------------------------------------------------------------------------
+learning_objectives:
+  - "Construire un index vectoriel déterministe et hors ligne : hachage de n-grammes, SVD tronquée apprise sur le train, normalisation L2."
+  - "Mesurer les propriétés d'un index au lieu de les supposer : dimension réellement produite, fidélité de la projection, taille de l'artefact."
+  - "Chiffrer ce que la compression apporte et ce qu'elle coûte : 128 dimensions contre 4096, 0,16 Mo de matrice contre 5,25 Mo, fidélité de projection de 1,00."
+  - "Servir deux cas d'usage avec un seul artefact : recherche par requête et détection de quasi-doublons (`nearest_neighbours`)."
+  - "Instrumenter le service : cache de vecteurs de requêtes, taux de succès, latence p50/p95."
+  - "Comparer un index dense à sa référence lexicale sur les mêmes questions, et publier le résultat même quand il contredit l'intuition : ici le dense gagne le classement, le lexical la précision des citations."
+  - "Écrire un générateur dont la redondance est annotée : trois fiches disent le même fait, les trois sont pertinentes, le premier rang devient la difficulté et le dédoublonnage devient mesurable sans code supplémentaire."
+  - "Calibrer une décision d'abstention sur un score borné, et publier l'exactitude équilibrée avec la couverture."
+  - "Vérifier la stabilité : deux exécutions à graine fixée produisent la même matrice, donc les mêmes métriques."

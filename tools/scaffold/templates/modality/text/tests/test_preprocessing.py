@@ -241,6 +241,25 @@ def test_hashing_embedder_round_trip(tmp_path: Path) -> None:
     np.testing.assert_allclose(reloaded.transform(["télétravail"]), expected, atol=1e-6)
 
 
+def test_hashing_embedder_honours_the_configured_ngram_range() -> None:
+    """La plage de n-grammes déclarée dans la configuration est bien celle qui est hachée.
+
+    Une configuration qui déclare ``[1, 1]`` produisait silencieusement des bigrammes : le
+    paramètre existait sur la classe mais ``from_config`` l'ignorait.
+    """
+    unigrams = HashingEmbedder.from_config(
+        {"n_features": 256, "n_components": 0, "ngram_range": [1, 1]}
+    )
+    bigrams = HashingEmbedder.from_config(
+        {"n_features": 256, "n_components": 0, "ngram_range": [1, 2]}
+    )
+
+    assert unigrams.ngram_range == (1, 1)
+    assert bigrams.ngram_range == (1, 2)
+    with pytest.raises(ValueError, match="ngram_range"):
+        HashingEmbedder.from_config({"ngram_range": [1]})
+
+
 def test_embedding_dimension_is_reported() -> None:
     """La dimension est publiée dans le modèle : le rapport doit pouvoir l'afficher."""
     sparse = HashingEmbedder(n_features=128, n_components=0)

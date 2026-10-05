@@ -1,0 +1,560 @@
+"""Dense retrieval model: hashed n-gram embeddings, projected and served as a vector index.
+
+The stack answers a different question from the lexical one: not *which passage shares the most
+words with the question*, but *which passage is the closest in a continuous space*. Three decisions
+are worth stating because they shape everything else:
+
+* the embedder is :class:`~src.preprocessing.transformers.HashingEmbedder` — a stable hashing of
+  word unigrams and bigrams, optionally compressed by a truncated SVD learned on the **training**
+  corpus. No download, no pre-trained weights: the current repository forbids network access at
+  runtime, and random weights would produce embeddings that rank documents arbitrarily;
+* vectors are L2-normalised, so a cosine similarity is a dot product and the whole index is one
+  matrix multiplication — which is what makes the throughput measured in the report meaningful;
+* the published score is the cosine remapped to ``[0, 1]`` (``(cosine + 1) / 2``). The raw cosine
+  stays in the passage metadata: the contract of the project requires a non-negative score, and a
+  monotone transform keeps the ranking identical.
+
+What this stack demonstrates beyond ranking: an embedding index has **properties** an engineer must
+measure — the dimension actually produced, the fidelity of the projection (how much of the raw
+hashed space the compression keeps), the size of the artefact, the query throughput and the hit
+rate of the query cache. It also enables a use case the lexical index cannot serve as cleanly:
+**near-duplicate detection** (:meth:`EmbeddingModel.nearest_neighbours`), which is what the
+evaluation of the family reports on a corpus where every fact is written three times.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from src.features.build_features import ChunkFeatureBuilder
+from src.models.base import BaseModel, RetrievedChunk
+from src.preprocessing.pipelines import TextPreprocessor
+from src.preprocessing.transformers import HashingEmbedder
+from src.utils.io import load_pickle, save_pickle
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+#: Columns of the document metadata kept in the artefact.
+DOCUMENT_COLUMNS: tuple[str, ...] = ("doc_id", "title", "section", "source", "published_at")
+
+#: Default number of passages a query returns when the configuration is silent.
+DEFAULT_K: int = 5
+
+
+def _llm_node(config: Any) -> dict[str, Any]:
+    """Return the ``model.llm`` node of a configuration as a plain mapping."""
+    model_node = config.get("model") if isinstance(config, Mapping) else None
+    node = model_node.get("llm") if isinstance(model_node, Mapping) else None
+    return dict(node) if isinstance(node, Mapping) else {}
+
+
+def _artifact_config(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild the ``model`` node archived in an artefact (the generator knobs).
+
+    The generator is part of the trained artefact: ``min_overlap`` and ``support_ratio`` decide
+    which passages may be quoted, so a reload that falls back on the defaults answers differently
+    from the model that was fitted and evaluated. The API key is never archived.
+
+    Args:
+        payload: Artefact payload read from disk.
+
+    Returns:
+        A configuration carrying ``model.llm`` when the artefact archived one.
+    """
+    llm = payload.get("llm")
+    if isinstance(llm, Mapping) and llm:
+        return {"model": {"llm": dict(llm)}}
+    return {}
+
+
+def _merge_config(
+    archived: Mapping[str, Any], provided: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Merge the configuration archived in an artefact with the one the caller passes.
+
+    Args:
+        archived: Configuration rebuilt from the artefact.
+        provided: Configuration passed to :meth:`EmbeddingModel.load` (it wins).
+
+    Returns:
+        The effective configuration; ``model`` is merged key by key, every other node is replaced.
+    """
+    merged: dict[str, Any] = {str(key): value for key, value in archived.items()}
+    for key, value in dict(provided or {}).items():
+        current = merged.get(str(key))
+        if str(key) == "model" and isinstance(value, Mapping) and isinstance(current, Mapping):
+            merged["model"] = {**current, **dict(value)}
+        else:
+            merged[str(key)] = value
+    return merged
+
+
+def _balanced_accuracy(answered: Any, abstained: Any) -> float:
+    """Mean of the true-positive and true-negative rates of an answer/abstain rule.
+
+    Args:
+        answered: Outcomes of the rule on the answerable questions.
+        abstained: Outcomes of the rule on the out-of-corpus questions.
+
+    Returns:
+        The balanced accuracy, or ``0.5`` when one of the classes is empty.
+    """
+    positive = np.asarray(list(answered), dtype="float64")
+    negative = np.asarray(list(abstained), dtype="float64")
+    if not positive.size or not negative.size:
+        return 0.5
+    return float(0.5 * (positive.mean() + negative.mean()))
+
+
+class EmbeddingModel(BaseModel):
+    """Dense vector index over the passages of the corpus.
+
+    Attributes:
+        framework: Stack identifier archived in the model card.
+    """
+
+    framework = "embedding"
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Build the model (see :class:`~src.models.base.BaseModel` for the arguments)."""
+        super().__init__(**kwargs)
+        self._preprocessor = TextPreprocessor.from_config(self.config.get("preprocessing", {}))
+        self._embedder = HashingEmbedder.from_config(self.params.get("embedding", {}))
+        self._chunks: pd.DataFrame = self.chunks
+        self._matrix: np.ndarray | None = None
+        self._documents: pd.DataFrame = pd.DataFrame(columns=list(DOCUMENT_COLUMNS))
+        self._features = ChunkFeatureBuilder()
+        self._query_cache: dict[str, np.ndarray] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self.projection_fidelity = 1.0
+
+    # ------------------------------------------------------------------ contrat ----------
+    @property
+    def chunks(self) -> pd.DataFrame:
+        """The indexed passages."""
+        stored = getattr(self, "_chunks", None)
+        if stored is None:
+            return super().chunks
+        return stored
+
+    @property
+    def dimension(self) -> int:
+        """Dimension of the vectors actually stored in the index."""
+        return self._dense_width()
+
+    def _dense_width(self) -> int:
+        """Return the width of the stored matrix (0 before ``fit``)."""
+        if self._matrix is None:
+            return 0
+        return int(self._matrix.shape[1])
+
+    def _fit(
+        self,
+        documents: pd.DataFrame,
+        queries: pd.DataFrame | None,
+        *,
+        callbacks: Sequence[Any] | None = None,
+        context: Any = None,
+    ) -> dict[str, float]:
+        """Chunk the corpus, learn the projection and index the passages.
+
+        The projection is learned on the **training** passages only: fitting it on the whole corpus
+        would leak the test documents into the representation, exactly like fitting a TF-IDF
+        vocabulary on the test set.
+
+        Args:
+            documents: Reference corpus.
+            queries: Annotated questions used to calibrate the abstention threshold.
+            callbacks: Training callbacks (fired by the trainer).
+            context: Mutable callback context.
+
+        Returns:
+            The index metrics (dimension, projection fidelity, artefact size proxy).
+        """
+        del callbacks, context
+        self._chunks = self._preprocessor.prepare_corpus(documents)
+        self._documents = documents.loc[
+            :, [column for column in DOCUMENT_COLUMNS if column in documents.columns]
+        ].copy()
+        passages = self._chunks["text"].astype(str).tolist()
+        self._embedder.fit(passages)
+        self._matrix = np.asarray(self._embedder.transform(passages), dtype="float64")
+        self.projection_fidelity = self._embedder.projection_fidelity(passages)
+        self._features = ChunkFeatureBuilder()
+        self._query_cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self.abstention_threshold = self._calibrate_threshold(queries)
+        logger.info(
+            "Vector index built | {} passages | dimension={} | projection fidelity={:.4f}",
+            len(self._chunks),
+            self._dense_width(),
+            self.projection_fidelity,
+        )
+        return {
+            "dimension": float(self._dense_width()),
+            "projection_fidelity": float(self.projection_fidelity),
+        }
+
+    # ------------------------------------------------------------------ recherche --------
+    def embed(self, texts: Sequence[str]) -> np.ndarray:
+        """Embed a batch of texts with the fitted embedder.
+
+        This is the public seam of the stack: the same vectors serve the search index, a
+        deduplication job or a downstream classifier, and the caller never touches the hasher.
+
+        Args:
+            texts: Texts to embed (a question, a passage, a batch of documents).
+
+        Returns:
+            The dense, L2-normalised matrix of shape ``(len(texts), dimension)``.
+
+        Raises:
+            RuntimeError: When the model is not fitted.
+        """
+        if self._embedder is None or self._matrix is None:
+            msg = "EmbeddingModel has no index: call fit(documents) or load an artefact first"
+            raise RuntimeError(msg)
+        return np.asarray(self._embedder.transform(list(texts)), dtype="float64")
+
+    def _query_vector(self, question: str) -> np.ndarray:
+        """Return the embedding of a question, reusing the cache when possible."""
+        cached = self._query_cache.get(question)
+        if cached is not None:
+            self._cache_hits += 1
+            return cached
+        vector = self.embed([question])[0]
+        self._cache_misses += 1
+        if len(self._query_cache) >= self.max_cache_entries:
+            self._query_cache.pop(next(iter(self._query_cache)))
+        self._query_cache[question] = vector
+        return vector
+
+    @property
+    def max_cache_entries(self) -> int:
+        """Maximum number of query vectors kept in memory."""
+        return int(self.params.get("max_cache_entries", 512))
+
+    def query_cache_stats(self) -> dict[str, float]:
+        """Return the cache statistics of the current process (measured, never assumed)."""
+        lookups = self._cache_hits + self._cache_misses
+        return {
+            "hits": float(self._cache_hits),
+            "misses": float(self._cache_misses),
+            "hit_rate": float(self._cache_hits / lookups) if lookups else 0.0,
+            "entries": float(len(self._query_cache)),
+        }
+
+    def clear_cache(self) -> None:
+        """Drop the cached query vectors (used by the throughput benchmark of notebook 03)."""
+        self._query_cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+    def scores_for(self, question: str) -> np.ndarray:
+        """Return the cosine similarity of every indexed passage for a question.
+
+        Args:
+            question: User question.
+
+        Returns:
+            The similarity vector, aligned with :attr:`chunks` (higher is closer).
+
+        Raises:
+            RuntimeError: When the model is not fitted.
+        """
+        if self._matrix is None:
+            msg = "EmbeddingModel has no index: call fit(documents) or load an artefact first"
+            raise RuntimeError(msg)
+        return self._matrix @ self._query_vector(question)
+
+    def _retrieve(
+        self, question: str, k: int, filters: Mapping[str, Any]
+    ) -> Sequence[RetrievedChunk]:
+        """Rank the passages of the index by cosine similarity.
+
+        Args:
+            question: User question.
+            k: Number of passages to return.
+            filters: Document-level filters (``section``, ``source``).
+
+        Returns:
+            The passages, best first.
+        """
+        scores = self.scores_for(question)
+        ranking = np.argsort(-scores, kind="stable")
+        tokens = self._preprocessor.tokenize(question)
+        retrieved: list[RetrievedChunk] = []
+        for index in ranking:
+            if len(retrieved) >= k:
+                break
+            chunk = self._chunks.iloc[int(index)]
+            document = self._document_of(str(chunk["doc_id"]))
+            if not self._passes_filters(document, chunk, filters):
+                continue
+            cosine = float(scores[int(index)])
+            retrieved.append(
+                RetrievedChunk(
+                    chunk_id=str(chunk["chunk_id"]),
+                    doc_id=str(chunk["doc_id"]),
+                    text=str(chunk["text"]),
+                    score=float(np.clip((cosine + 1.0) / 2.0, 0.0, 1.0)),
+                    rank=len(retrieved) + 1,
+                    title=str(document.get("title", "")),
+                    section=str(document.get("section", "")),
+                    metadata={
+                        **self._features.build(tokens, dict(chunk), document),
+                        "cosine": cosine,
+                    },
+                )
+            )
+        return retrieved
+
+    def _passes_filters(
+        self, document: Mapping[str, Any], chunk: Mapping[str, Any], filters: Mapping[str, Any]
+    ) -> bool:
+        """Whether a passage satisfies the document-level filters of a query."""
+        for key, expected in dict(filters or {}).items():
+            source = document if key in document else chunk
+            if str(source.get(key, "")) != str(expected):
+                return False
+        return True
+
+    def nearest_neighbours(
+        self, text: str, k: int = 3, *, exclude_doc_id: str | None = None
+    ) -> list[RetrievedChunk]:
+        """Return the passages closest to a text, ignoring its own document when asked.
+
+        This is the API of the second use case of the stack: finding the near-duplicates of a
+        document (the same fact written again by another team), or routing a ticket to the closest
+        known answer. The retriever's own ``filters`` cannot express "everything but this
+        document", hence the explicit argument.
+
+        Args:
+            text: Text to look up (a passage, a question, a whole document).
+            k: Number of neighbours to return.
+            exclude_doc_id: Document to leave out of the results (usually the query itself).
+
+        Returns:
+            The neighbours, closest first.
+        """
+        wanted = max(int(k) + (1 if exclude_doc_id else 0), int(k))
+        neighbours = [
+            passage
+            for passage in self.retrieve(text, k=wanted)
+            if exclude_doc_id is None or passage.doc_id != exclude_doc_id
+        ][: int(k)]
+        for position, passage in enumerate(neighbours, start=1):
+            passage.rank = position
+        return neighbours
+
+    def index_summary(self) -> dict[str, Any]:
+        """Return the measurable properties of the index (published in the model card)."""
+        if self._matrix is None:
+            return {"fitted": False}
+        return {
+            "fitted": True,
+            "n_passages": len(self._chunks),
+            "dimension": self._dense_width(),
+            "hashing_space": int(self._embedder.n_features),
+            "n_components": int(self._embedder.n_components),
+            "projection_fidelity": round(float(self.projection_fidelity), 6),
+            "matrix_bytes": int(self._matrix.nbytes),
+            "matrix_mb": round(float(self._matrix.nbytes) / 1024**2, 4),
+            "mean_passage_tokens": round(float(self._chunks["n_tokens"].mean()), 2)
+            if "n_tokens" in self._chunks
+            else 0.0,
+        }
+
+    # ------------------------------------------------------------------ persistance ------
+    def save(self, path: str | Path) -> Path:
+        """Persist the embedder, the vector matrix and the document metadata.
+
+        Args:
+            path: Destination file.
+
+        Returns:
+            The written path.
+        """
+        destination = self._resolve_path(path)
+        payload = {
+            "algorithm": self.algorithm,
+            "params": self.params,
+            "task": self.task,
+            "random_state": self.random_state,
+            "name": self.name,
+            "embedder": self._embedder,
+            "matrix": self._matrix,
+            "projection_fidelity": self.projection_fidelity,
+            "chunks": self._chunks,
+            "documents": self._documents,
+            "llm": _llm_node(self.config),
+            "fit_result": None if self.fit_result_ is None else self.fit_result_.to_dict(),
+            **self._state_to_save(),
+        }
+        return save_pickle(payload, destination)
+
+    @classmethod
+    def load(cls, path: str | Path, *, config: Mapping[str, Any] | None = None) -> EmbeddingModel:
+        """Reload a persisted vector index.
+
+        Args:
+            path: Artefact written by :meth:`save`.
+            config: Optional configuration refreshed into the reloaded model.
+
+        Returns:
+            The reloaded model, ready to retrieve.
+        """
+        payload = load_pickle(path)
+        model = cls(
+            algorithm=str(payload.get("algorithm", "hashing_svd")),
+            params=dict(payload.get("params", {})),
+            task=str(payload.get("task", "retrieval")),
+            random_state=int(payload.get("random_state", 42)),
+            config=_merge_config(_artifact_config(payload), config),
+            name=str(payload.get("name", "hashing_svd")),
+        )
+        model._embedder = payload["embedder"]
+        model._matrix = payload["matrix"]
+        model.projection_fidelity = float(payload.get("projection_fidelity", 1.0))
+        model._chunks = payload["chunks"]
+        model._documents = payload["documents"]
+        model._features = ChunkFeatureBuilder()
+        model._state_from_payload(payload)
+        if payload.get("fit_result"):
+            from src.models.base import FitResult
+
+            model.fit_result_ = FitResult.from_dict(payload["fit_result"])
+        model._is_fitted = True
+        logger.info(
+            "Vector index reloaded | {} passages | dimension={}",
+            len(model._chunks),
+            model._dense_width(),
+        )
+        return model
+
+    # ------------------------------------------------------------------ interne ----------
+    def _calibrate_threshold(self, queries: pd.DataFrame | None) -> float:
+        """Choose the abstention threshold on the **calibration** split.
+
+        The rule is deliberately simple and stated: the threshold is the value that maximises the
+        balanced accuracy of the answer / abstain decision on the calibration questions. A question
+        is "answerable" when the corpus holds its answer; the score used is the best similarity the
+        index produced, on the ``[0, 1]`` scale published by :meth:`_retrieve`. Tuning this on the
+        test split would be a leak.
+
+        Args:
+            queries: Calibration questions (``None`` keeps the configured threshold).
+
+        Returns:
+            The threshold to apply (``0.0`` when calibration is disabled or impossible).
+        """
+        configured = float(self.params.get("abstention_threshold", 0.0))
+        if (
+            queries is None
+            or queries.empty
+            or not bool(self.params.get("calibrate_abstention", True))
+        ):
+            return configured
+        if "answer_type" not in queries.columns:
+            return configured
+        answerable: list[float] = []
+        unanswerable: list[float] = []
+        for record in queries.to_dict(orient="records"):
+            passages = self._retrieve(str(record["question"]), 1, {})
+            if not passages:
+                continue
+            target = unanswerable if record.get("answer_type") == "unanswerable" else answerable
+            target.append(float(passages[0].score))
+        if not answerable or not unanswerable:
+            logger.warning(
+                "Abstention threshold not calibrated "
+                "({} answerable, {} hors corpus): keeping {:.4f}",
+                len(answerable),
+                len(unanswerable),
+                configured,
+            )
+            return configured
+        positive = np.asarray(answerable)
+        negative = np.asarray(unanswerable)
+        candidates = np.unique(np.concatenate([positive, negative]))
+        best_threshold = float(configured)
+        best_score = _balanced_accuracy(positive >= configured, negative < configured)
+        for candidate in candidates:
+            balanced = _balanced_accuracy(positive >= candidate, negative < candidate)
+            if balanced > best_score + 1e-12:
+                best_score = balanced
+                best_threshold = float(candidate)
+        gain = best_score - _balanced_accuracy(positive >= configured, negative < configured)
+        minimum_gain = float(self.params.get("calibration_min_gain", 0.05))
+        if best_threshold <= 0.0 or gain < minimum_gain:
+            logger.info(
+                "Abstention calibration rejected (gain {:.4f} < {:.4f}): keeping {:.4f}",
+                gain,
+                minimum_gain,
+                configured,
+            )
+            return configured
+        logger.info(
+            "Abstention threshold calibrated | value={:.4f} | balanced accuracy={:.4f} (+{:.4f})",
+            best_threshold,
+            best_score,
+            gain,
+        )
+        return best_threshold
+
+    def _document_of(self, doc_id: str) -> dict[str, Any]:
+        """Return the metadata row of a document, or an empty mapping."""
+        if self._documents.empty:
+            return {}
+        matches = self._documents.loc[self._documents["doc_id"] == doc_id]
+        if matches.empty:
+            return {}
+        return {str(key): value for key, value in matches.iloc[0].to_dict().items()}
+
+    def _extra_metadata(self) -> dict[str, Any]:
+        """Stack-specific facts archived next to the fit result."""
+        matrix_bytes = int(self._matrix.nbytes) if self._matrix is not None else 0
+        return {
+            "n_documents": len(self._documents),
+            "n_passages": len(self._chunks),
+            "dimension": self._dense_width(),
+            "hashing_space": int(self._embedder.n_features),
+            "n_components": int(self._embedder.n_components),
+            "projection_fidelity": round(float(self.projection_fidelity), 6),
+            "mean_passage_tokens": round(float(self._chunks["n_tokens"].mean()), 2)
+            if not self._chunks.empty
+            else 0.0,
+            "algorithm": self.algorithm,
+            # The size of the index is a measured property, published instead of guessed: the
+            # comparison with the raw hashing space of the same corpus is what justifies (or not)
+            # the compression, and the criterion of the family is read from this number.
+            "matrix_bytes": matrix_bytes,
+            "matrix_mb": round(matrix_bytes / 1024**2, 4),
+        }
+
+    def _effective_params(self) -> dict[str, Any]:
+        """Return the resolved hyper-parameters (the index properties included)."""
+        return {
+            **dict(self.params),
+            # The calibrated threshold is *learned*: the card publishes the value the model
+            # actually applies, not the placeholder the configuration declared.
+            "abstention_threshold": float(self.abstention_threshold),
+            "embedding": {
+                "n_features": int(self._embedder.n_features),
+                "n_components": int(self._embedder.n_components),
+                "ngram_range": list(self._embedder.ngram_range),
+                "dimension": self._dense_width(),
+                "projection_fidelity": round(float(self.projection_fidelity), 6),
+            },
+        }
+
+
+__all__ = ["DOCUMENT_COLUMNS", "EmbeddingModel"]

@@ -1,8 +1,9 @@
 # Modalité `text` et familles `ai-eng` — RAG, QA, embeddings, agents
 
 - **Date** : 2026-10-05
-- **Statut** : design validé, tranche 1 livrée et vérifiée (`ai-eng/rag/with-tfidf` et
-  `ai-eng/rag/with-langchain` conformes dans `tools.verify --all`), tranches 2 à 5 à venir
+- **Statut** : design validé, tranches 1, 2 et 2b livrées et vérifiées (`ai-eng/rag/with-{tfidf,langchain}`,
+  `ai-eng/question-answering/with-{tfidf,langchain}` et `ai-eng/embeddings/with-{embedding,tfidf}`
+  conformes dans `tools.verify`), tranches 3 à 5 à venir
 - **Branche** : `arena/3402658e-templates`
 - **Périmètre** : point 2 de la feuille de route du README racine — `ai-eng/` (LangChain, RAG,
   Transformers, serving FastAPI) et `nlp/` (spaCy, Transformers). Ce document couvre la couche
@@ -131,7 +132,7 @@ templates/
 | --- | --- | --- |
 | 1 | `stacks` tfidf + langchain, `modality/text`, `task/retrieval`, famille `retrieval_augmented_generation`, notebooks texte, deux manifests, vérification verte | **livrée** : `ai-eng/rag/with-tfidf` (104 tests, 81,5 s) et `ai-eng/rag/with-langchain` (110 tests, 165,1 s), recall@5 de test 0,7194 dans les deux cas |
 | 2 | `question_answering` (mutualise `modality/text`, `task/retrieval`, `stack/{tfidf,langchain}`) | **livrée** : `ai-eng/question-answering/with-tfidf` (106 tests, 48,8 s) et `with-langchain` (111 tests, 85,4 s), exact match 0,6212 et F1 0,7381 dans les deux cas |
-| 2b | `embedding_pipeline`, `agent_tools` (familles restantes de la modalité texte) | à venir |
+| 2b | `embedding_pipeline` (stack `embedding` : hachage + SVD, voisins, fidélité) et `agent_tools` (familles restantes de la modalité texte) | **livrée pour `embedding_pipeline`** : `ai-eng/embeddings/with-embedding` (109 tests, 46,0 s) et `with-tfidf` (107 tests, 39,2 s), recall@5 0,9412 dans les deux cas ; `agent_tools` à venir |
 | 3 | `nlp/` : `text_classification` (tfidf, transformers), `named_entity_recognition` (spacy) | à venir |
 | 4 | `nlp/` : `summarization`, `llm_finetuning` (transformers, architecture minuscule, poids aléatoires) | à venir |
 | 5 | `mlops/model_serving` (fastapi) au-dessus d'un modèle entraîné | à venir |
@@ -178,3 +179,54 @@ fois et les questions hors corpus portent sur un fait voisin mais absent.
 | `citation_precision` | 0,9808 | une citation ne pointe presque jamais à côté |
 | `abstention_balanced_accuracy` | 0,8106 | refuser reste une décision mesurée, pas un aveu |
 | Latence p95 | 5,3 ms (tfidf) / 11,0 ms (langchain) | l'orchestration coûte ~6 ms, hors réseau |
+
+## 8. Tranche 2b — famille `embedding_pipeline`
+
+Troisième contrat de la modalité texte, et le seul où l'objet mesuré n'est pas la réponse mais
+**l'index** : dimension réellement stockée, fidélité de la projection, taille de la matrice, débit de
+requêtes, taux de succès du cache — plus le second usage du même artefact, la détection de
+quasi-doublons. Le corpus est écrit trois fois (notice constructeur, fiche commerciale, note SAV) :
+les deux phrases du fait sont recopiées d'une fiche à l'autre, et les trois fiches sont annotées
+pertinentes, ce qui plafonne `recall_at_1` au tiers (un sixième sur les questions multi-document) et
+impose une métrique principale qui ne dépende pas du rang du premier candidat (`recall_at_5`, plancher
+0,90).
+
+### Ce que la tranche a appris (et corrigé)
+
+1. **La dimension publiée est celle qui est stockée, pas celle qui est demandée.** Une SVD tronquée
+   réduit ses composantes quand le corpus est plus petit que la dimension visée ; la fiche de modèle
+   publiait le `n_components` de la configuration. Elle expose désormais la dimension de l'embedder
+   ajusté, la taille de la matrice (`matrix_bytes`, `matrix_mb`), la fidélité de projection et le
+   nombre de passages — les propriétés d'index remontent par `_extra_metadata` → `FitResult.extra` →
+   carte, jamais par une clé inventée au moment du rapport.
+2. **Un paramètre déclaré mais non lu est un mensonge de configuration.** `HashingEmbedder`
+   acceptait `ngram_range` mais `from_config` l'ignorait : une configuration `[1, 1]` produisait des
+   bigrammes en silence. Le paramètre est maintenant lu (avec contrôle du nombre de bornes) et un
+   test de non-régression verrouille le comportement.
+3. **Compresser n'est pas sématiser.** La projection en 128 dimensions conserve l'ordre des
+   similarités de l'espace de hachage brut (fidélité 1,0000, matrice de 0,16 Mo contre 5,25 Mo,
+   trente-deux fois plus petite) mais ne rapproche pas deux formulations : les deux variantes tombent
+   à 0,60 d'exact match sur les paraphrases, contre 1,00 sur les questions factuelles (34 % de mots
+   pleins partagés contre 71 %). C'est la limite mesurée de la famille, publiée comme les autres.
+4. **Le même index sert deux cas d'usage, et le second se teste.** `nearest_neighbours(exclude_doc_id=…)`
+   retrouve les deux autres écritures d'un fait : la suite de la stack vérifie la propriété pour
+   **toutes** les fiches du corpus (deux voisins chacune), et le notebook 04 en fait sa quatrième
+   section pour la seule variante dense — la variante lexicale garde trois sections, sa stack
+   n'exposant pas l'API.
+5. **Le dense ne gagne pas partout, et le projet le dit.** Sur ce corpus (phrases recopiées mot pour
+   mot), l'index dense gagne le classement (MRR 0,9608 contre 0,9118) et l'exact match (0,7941 contre
+   0,7647) ; l'index creux garde la précision des citations (0,9667 contre 0,9375), coûte 0,07 s au
+   lieu de 0,42 s et refuse 3 des 7 questions hors corpus contre 4. Chaque variante publie ses
+   propres chiffres (tableau §12 de son README) plutôt qu'un tableau de famille unique.
+
+### Mesures finales (split de test, 41 questions dont 34 répondables)
+
+| Métrique | `with-embedding` | `with-tfidf` | Lecture |
+| --- | --- | --- | --- |
+| `recall_at_5` (principale) | 0,9412 | 0,9412 | les trois fiches du fait sont retrouvées ; plancher 0,90 |
+| `mrr` / `ndcg_at_10` | 0,9608 / 0,9682 | 0,9118 / 0,9462 | le dense classe mieux, le lexical suit |
+| `answer_exact_match` | 0,7941 | 0,7647 | 1,00 sur les questions factuelles, 0,60 sur les paraphrases |
+| `citation_precision` | 0,9375 | 0,9667 | l'index creux cite plus juste |
+| `abstention_balanced_accuracy` | 0,7563 | 0,6555 | publiée avec la couverture (0,94 / 0,88) |
+| Index | 128 dimensions, 0,16 Mo, fidélité 1,0000 | 138 termes, index creux | le sujet de la famille |
+| Latence p95 | 4,64 ms | 7,44 ms | cache de requêtes armé (512 entrées) |

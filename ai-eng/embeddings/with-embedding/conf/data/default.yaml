@@ -1,0 +1,58 @@
+# =================================================================================================
+# Données : Catalogue produit publié trois fois (notice, fiche commerciale, note SAV)
+# -------------------------------------------------------------------------------------------------
+# Un corpus synthétique de 168 fiches — vingt-huit références x deux faits (autonomie, garantie
+# légale) x trois styles éditoriaux — et 115 questions annotées dont 19 hors corpus. Trois équipes
+# publient le même référentiel : les deux phrases du fait (celle qui porte la valeur et celle qui
+# la contextualise) sont **recopiées** dans les trois fiches, tandis que la phrase de style, la
+# section, l'espace d'origine et le titre changent. Les trois fiches sont annotées pertinentes
+# pour la question, ce qui plafonne recall@1 au tiers et fait de cette métrique une lecture de
+# précision ; 56 questions factuelles, 28 paraphrases, 12 multi-document (six fiches pertinentes :
+# deux faits x trois écritures) et 19 hors corpus couvrent quatre difficultés, et la paraphrase
+# change le vocabulaire de la question — 34 % des mots pleins partagés avec la phrase source
+# contre 71 % pour la question factuelle — sans jamais retirer la référence qui identifie la
+# réponse.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: equipment_catalogue_editions
+n_samples: 168
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: null              # apprentissage non supervisé : pas de cible
+id_column: doc_id
+time_column: published_at
+group_column: null
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['doc_id', 'title', 'published_at', 'n_tokens']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+corpus:
+  reference_date: '2025-01-06'
+  paraphrase_share: 0.5
+  multi_document_share: 0.15
+  hors_corpus_share: 0.2
+  val_size: 0.2
+  test_size: 0.35

@@ -417,17 +417,21 @@ Après `make all`, le dépôt local contient :
 | --- | --- |
 | `data/raw/{{ spec.data.dataset_name }}.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | jeu de données synthétique, {{ "{:,}".format(spec.data.n_samples) | replace(",", " ") }} lignes |
 | `data/raw/generation_metadata.json` | recette de génération : graine, options, empreinte du jeu, fichiers écrits |
-| `data/processed/split_{train,val,test}.parquet` | splits avant transformation (l'évaluation et l'inférence rejouent exactement le même découpage) |
+{% if spec.modality == "text" %}| `data/processed/chunks.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | passages indexés : le texte découpé, ses métadonnées et les annotations conservées |
+{% else %}| `data/processed/split_{train,val,test}.parquet` | splits avant transformation (l'évaluation et l'inférence rejouent exactement le même découpage) |
 | `data/processed/features_{X_train,X_val,X_test}.parquet` | matrices prêtes pour le modèle |
-| `artifacts/models/{{ train.artifacts.model_file if train and train.artifacts and train.artifacts.model_file else 'model.joblib' }}` | modèle entraîné |
+{% endif %}| `artifacts/models/{{ train.artifacts.model_file if train and train.artifacts and train.artifacts.model_file else 'model.joblib' }}` | modèle entraîné |
 | `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
-| `artifacts/models/feature_builder.joblib` | construction des features dérivées, ajustée sur le train uniquement |
-| `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
+{% if spec.modality != "text" %}| `artifacts/models/feature_builder.joblib` | construction des features dérivées, ajustée sur le train uniquement |
+{% endif %}| `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
 | `artifacts/models/resolved_config.json` | configuration Hydra résolue : l'artefact entraîné porte sa recette exacte |
 | `artifacts/metrics/training_metrics.json` | métriques d'entraînement et de validation |
 | `artifacts/metrics/evaluation_metrics.json` | métriques sur le split de test + verdict des seuils |
 | `artifacts/reports/evaluation_report.md` | rapport lisible (métriques, analyse d'erreurs, recommandations) |
-{% if spec.metrics.task == "forecasting" %}| `artifacts/reports/per_horizon.csv` | MAPE / MAE / biais / couverture ventilés par horizon |
+{% if spec.metrics.task in ("retrieval", "generation") %}| `artifacts/reports/per_question.csv` | métriques par question : rappel@k, MRR, citations, abstention, latence |
+| `artifacts/reports/retrieved_passages.csv` | passages servis à chaque question, avec leur rang et leur score |
+| `artifacts/reports/segment_metrics.csv` | ventilation par difficulté, intention et type de réponse |
+{% elif spec.metrics.task == "forecasting" %}| `artifacts/reports/per_horizon.csv` | MAPE / MAE / biais / couverture ventilés par horizon |
 | `artifacts/reports/segments.csv` | ventilation par régime extrême, week-end, jour férié, vacances |
 | `artifacts/reports/baselines.csv` | références triviales (persistance, naif saisonnier, moyennes glissantes) |
 | `artifacts/reports/intervals.csv` | bornes, largeur relative et méthode de calibration par prévision |

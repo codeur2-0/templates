@@ -1,0 +1,43 @@
+# =================================================================================================
+# Modèle : Espace vectoriel creux TF-IDF (cosinus normalisé) sur le catalogue dupliqué
+# -------------------------------------------------------------------------------------------------
+# TF-IDF projette chaque fiche dans un espace vectoriel creux dont les dimensions sont les mots du
+# corpus, pondérées par leur rareté ; les vecteurs sont normalisés en norme L2, donc le score est
+# un cosinus borné dans ``[0, 1]`` et le seuil d'abstention reste calibrable sur le split de
+# calibration — c'est la différence mesurée avec BM25, dont le score n'est pas borné et dont la
+# calibration d'un seuil global ne sépare plus les questions hors corpus. Sur ce corpus, la phrase
+# à retrouver est recopiée mot pour mot dans trois fiches, et un index de mots y est chez lui :
+# recall@5 0,94, mrr 0,91. Ses limites sont publiées sans être atténuées : l'index dense classe
+# mieux (MRR 0,96), retrouve plus souvent la phrase exacte (0,79 contre 0,76) et refuse une
+# question hors corpus de plus (4 refus sur 7 contre 3), tandis que l'index creux garde l'avantage
+# sur la précision des citations (0,97 contre 0,94) et sur le coût de construction (0,07 s contre
+# 0,42 s).
+#
+# Alternatives considérées : `bm25` : un classement au moins aussi bon que le cosinus sur ce corpus, mais un score non borné dont la calibration d'un seuil global ne sépare plus les questions hors corpus (l'exactitude équilibrée tombe à 0,41) : le notebook 04 compare les trois scorers sur le split de validation., `hybrid` : fusion par rangs réciproques du lexical et d'un espace dense haché — la pratique industrielle quand aucune des deux familles ne suffit seule., Variante `with-embedding` : index dense (n-grammes hachés + SVD tronquée) avec les propriétés d'index publiées (dimension, fidélité, taille, débit, cache) — la comparaison des deux stacks chiffre ce que la sémantique apporte, et ce qu'elle coûte., Bi-encodeur entraîné (stack `transformers`) : seule approche qui rapproche deux formulations sans mot commun, au prix d'un entraînement et d'un artefact plus lourd..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.abstention_threshold=...
+# =================================================================================================
+
+name: "Espace vectoriel creux TF-IDF (cosinus normalisé) sur le catalogue dupliqué"
+algorithm: tfidf_cosine
+class: TfidfModel
+task: retrieval
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `TfidfModel(params=...)` (voir src/models/model.py).
+params:
+  abstention_threshold: 0.0
+  calibrate_abstention: true
+  calibration_min_gain: 0.05
+  max_cache_entries: 512
+
+# --- options spécifiques à la stack `tfidf` ---------------------------------------
+llm:
+  provider: extractive
+  max_sentences: 2
+  min_overlap: 2
+  support_ratio: 0.8

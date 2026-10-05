@@ -162,7 +162,7 @@ embedding_pipeline:
   description: >-
     Produire, stocker et exploiter des embeddings de documents (batching, cache, dérive
     sémantique). Métriques : débit, coût, stabilité, recall@k de la recherche vectorielle.
-  allowed_stacks: [tfidf, transformers]
+  allowed_stacks: [tfidf, embedding]
 
 llm_finetuning:
   display_name: "Fine-tuning de LLM"
