@@ -242,6 +242,7 @@ langchain:
   display_name: LangChain (LCEL)
   category: ai-engineering
   template_dir: langchain
+  class_name: LangChainModel
   epochs_based: false
   supports_proba: false
   # Le chaînage LCEL n'est jamais picklé : l'état (corpus, chunks, embeddings) est persisté en
@@ -261,10 +262,11 @@ langchain:
     - name: "LCEL (LangChain Expression Language)"
       url: "https://python.langchain.com/docs/concepts/lcel/"
   notes:
-    - "Embeddings **déterministes et offline** (hashing features + SVD) pour rendre l'exemple rejouable sans clé API."
-    - "L'adaptateur LLM est une interface : un `LocalRuleBasedLLM` offline par défaut, un client OpenAI-compatible optionnel."
+    - "Embeddings **déterministes et offline** (n-grammes hachés + SVD tronquée apprise sur le train) : l'exemple est rejouable sans clé API et sans téléchargement."
+    - "Le retriever est un `BaseRetriever` : la chaîne LCEL l'enchaîne avec un `PromptTemplate` et un adaptateur LLM (`ExtractiveLLM` offline par défaut, client OpenAI-compatible optionnel)."
+    - "Le prompt vit dans la configuration (`model.prompt.template`) ; l'état (passages, vocabulaire, embeddings) est persisté en joblib et la chaîne est reconstruite au chargement."
   commands:
-    train: "python -m src.main mode=index"
+    train: "python -m src.main mode=train"
 
 duckdb:
   display_name: DuckDB

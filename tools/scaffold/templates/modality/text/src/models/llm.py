@@ -46,6 +46,7 @@ class Passage:
         score: Retrieval score of the passage.
         rank: Rank of the passage in the retrieved list (1-based).
         title: Title of the source document, when known.
+        section: Editorial section of the source document, when known.
     """
 
     chunk_id: str
@@ -54,6 +55,7 @@ class Passage:
     score: float
     rank: int
     title: str = ""
+    section: str = ""
 
 
 @dataclass(slots=True)
@@ -78,12 +80,17 @@ class BaseLLM(ABC):
     provider: str = "base"
 
     @abstractmethod
-    def generate(self, question: str, passages: Sequence[Passage]) -> Generation:
+    def generate(
+        self, question: str, passages: Sequence[Passage], *, prompt: str | None = None
+    ) -> Generation:
         """Answer a question from retrieved passages.
 
         Args:
             question: User question.
             passages: Retrieved passages, best first.
+            prompt: Prompt already rendered by the caller (an orchestrator such as the LangChain
+                chain owns the prompt and passes it down). Adapters that build their own prompt
+                ignore it; adapters that can follow one use it instead of rebuilding it.
 
         Returns:
             The generation (possibly an explicit refusal).
@@ -122,16 +129,22 @@ class ExtractiveLLM(BaseLLM):
     max_chars: int = 480
     provider = "extractive"
 
-    def generate(self, question: str, passages: Sequence[Passage]) -> Generation:
+    def generate(
+        self, question: str, passages: Sequence[Passage], *, prompt: str | None = None
+    ) -> Generation:
         """Build the answer from the best sentences of the retrieved passages.
 
         Args:
             question: User question.
             passages: Retrieved passages, best first.
+            prompt: Rendered prompt of the caller, **ignored by construction**: an extractive
+                generator selects sentences, it does not follow instructions. The argument exists
+                so that every adapter of the project exposes the same interface.
 
         Returns:
             The extractive answer with its citations.
         """
+        del prompt
         question_tokens = [token for token in tokenize(question) if len(token) > 2]
         if not question_tokens or not passages:
             return Generation(text="", rationale="no passage or no content word in the question")
@@ -261,12 +274,17 @@ class OpenAICompatibleLLM(BaseLLM):
             f"Contexte:\n{context}\n\nQuestion: {question}\nRéponse:"
         )
 
-    def generate(self, question: str, passages: Sequence[Passage]) -> Generation:
+    def generate(
+        self, question: str, passages: Sequence[Passage], *, prompt: str | None = None
+    ) -> Generation:
         """Call the endpoint and parse the answer.
 
         Args:
             question: User question.
             passages: Retrieved passages.
+            prompt: Rendered prompt of the caller. When an orchestrator (the LangChain chain)
+                owns the prompt, its version is sent as-is; otherwise the adapter builds the
+                grounded prompt from the passages.
 
         Returns:
             The generated answer with the passages it cites.
@@ -283,7 +301,10 @@ class OpenAICompatibleLLM(BaseLLM):
                     "role": "system",
                     "content": "Assistant documentaire strictement fondé sur le contexte.",
                 },
-                {"role": "user", "content": self.build_prompt(question, passages)},
+                {
+                    "role": "user",
+                    "content": prompt or self.build_prompt(question, passages),
+                },
             ],
         }
         request = urllib.request.Request(

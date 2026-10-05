@@ -1,0 +1,68 @@
+# =================================================================================================
+# Modèle : Chaîne LCEL + retriever lexical BM25 (réponse fondée sur les passages cités)
+# -------------------------------------------------------------------------------------------------
+# Le retrieval reste BM25 — la référence de la famille, et le concurrent à battre — mais la
+# réponse n'est plus produite par le seul retriever : un graphe LCEL assemble le contexte, le
+# prompt et l'appel au générateur, puis rattache la réponse aux passages qui la fondent. L'intérêt
+# de cette variante n'est pas le score de recherche (identique à celui de `with-tfidf`) mais ce
+# qu'elle rend explicite et testable : le prompt est un objet de configuration, l'adaptateur LLM
+# est une couture (extractive hors ligne par défaut, client distant optionnel), les citations
+# traversent toute la chaîne et la précision des citations devient une métrique qu'on peut suivre.
+# Les deux autres stratégies de la stack — embeddings hachés et fusion RRF des classements —
+# existent pour mesurer, sur le split de validation, ce que le sémantique et l'hybride apportent
+# réellement avant de payer leur coût.
+#
+# Alternatives considérées : `langchain_dense` : embeddings n-grammes hachés compressés par une SVD tronquée apprise sur le train — seul bras qui rapproche deux formulations sans mot commun., `langchain_hybrid` : fusion par rangs réciproques du lexical et du dense, la pratique industrielle quand aucune des deux familles ne suffit seule., Variante `with-tfidf` : le même index BM25 sans orchestration — sert de témoin pour chiffrer l'apport de la chaîne., Adaptateur distant : remplacer `llm.provider: extractive` par un client OpenAI-compatible pour envoyer le même prompt à un vrai modèle, sans changer une ligne de la chaîne..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.abstention_threshold=...
+# =================================================================================================
+
+name: "Chaîne LCEL + retriever lexical BM25 (réponse fondée sur les passages cités)"
+algorithm: langchain_lexical
+class: LangChainModel
+task: retrieval
+supports_proba: false
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `LangChainModel(params=...)` (voir src/models/model.py).
+params:
+  abstention_threshold: 0.0
+  calibrate_abstention: true
+  calibration_min_gain: 0.05
+  lexical:
+    k1: 1.5
+    b: 0.75
+    ngram_range:
+    - 1
+    - 1
+    min_df: 1
+  embedding:
+    n_features: 4096
+    n_components: 192
+  rrf_constant: 60
+
+# --- options spécifiques à la stack `langchain` ---------------------------------------
+llm:
+  provider: extractive
+  max_sentences: 2
+  min_overlap: 1
+prompt:
+  max_context_chars: 2400
+  template: 'Tu réponds uniquement à partir du contexte fourni, en français.
+
+    Si le contexte ne contient pas la réponse, réponds exactement ''ABSTENTION''.
+
+    Termine ta réponse par ''SOURCES: '' suivi des identifiants des passages utilisés.
+
+
+    Contexte:
+
+    {context}
+
+
+    Question: {question}
+
+    Réponse:'

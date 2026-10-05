@@ -20,7 +20,7 @@ from src.models.base import BaseModel, ModelCard
 
 def test_unfitted_model_refuses_to_retrieve() -> None:
     """Retriever sans index : erreur explicite, jamais une liste vide silencieuse."""
-    model = build_model({"model": {"algorithm": "bm25", "params": {}}})
+    model = build_model({"model": {"algorithm": available_algorithms()[0], "params": {}}})
     assert not model.is_fitted
     with pytest.raises(RuntimeError):
         model.retrieve("Quelle est la durée de la période d'essai ?")
@@ -105,7 +105,7 @@ def test_hors_corpus_questions_are_abstained_or_flagged(
 def test_abstention_threshold_is_respected() -> None:
     """Le seuil est le seul endroit qui décide : il doit être appliqué tel quel."""
     model = build_model(
-        {"model": {"algorithm": "bm25"}},
+        {"model": {"algorithm": available_algorithms()[0]}},
         params={"abstention_threshold": 1e9, "calibrate_abstention": False},
     )
     documents = pd.DataFrame(
@@ -132,8 +132,8 @@ def test_model_card_is_complete(fitted_model: BaseModel) -> None:
     card = fitted_model.model_card()
     assert isinstance(card, ModelCard)
     payload = card.to_dict()
-    assert payload["framework"] == "tfidf"
-    assert payload["algorithm"] == "bm25"
+    assert payload["framework"] == fitted_model.framework
+    assert payload["algorithm"] == fitted_model.algorithm
     assert payload["n_documents"] > 0
     assert payload["n_chunks"] > 0
     assert payload["params"]
@@ -177,9 +177,12 @@ def test_load_model_rejects_an_unknown_suffix(tmp_path: Path) -> None:
 
 
 def test_available_algorithms_are_declared() -> None:
-    """Les algorithmes proposés viennent du registre de la stack, pas d'une liste en dur."""
+    """Chaque algorithme annoncé est documenté et constructible : le catalogue n'est pas vide."""
     algorithms = available_algorithms()
-    assert {"bm25", "tfidf_cosine"} <= set(algorithms)
+    assert algorithms, "la stack doit déclarer au moins un algorithme"
+    assert len(set(algorithms)) == len(algorithms)
+    for name in algorithms:
+        assert build_model({"model": {"algorithm": name}}).algorithm == name
 
 
 def test_build_model_refuses_an_unknown_algorithm() -> None:

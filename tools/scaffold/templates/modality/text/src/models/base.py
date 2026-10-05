@@ -150,6 +150,7 @@ class RetrievedChunk:
             score=float(self.score),
             rank=int(self.rank),
             title=self.title,
+            section=self.section,
         )
 
     def to_row(self) -> dict[str, Any]:
