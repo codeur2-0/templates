@@ -1,0 +1,64 @@
+# =================================================================================================
+# Données : Messages de service client annotés en entités, rédigés et abrégés
+# -------------------------------------------------------------------------------------------------
+# Un corpus synthétique de 1 200 messages de service client annotés au niveau du caractère : cinq
+# types d'entités (produit, référence de commande, montant, date, transporteur), 4 454 mentions,
+# soit 3,7 mentions par message, aucun message sans entité par construction. Chaque message est
+# écrit par un gabarit à slots : les surfaces annotées sont enregistrées au moment de l'écriture,
+# elles ne sont pas retrouvées après coup. Deux styles rédactionnels se partagent le corpus — 55 %
+# de messages rédigés (« CMD-1234 », « 89,90 € », « 12 mars 2025 ») et 45 % de messages abrégés («
+# cmd 1234 », « 89.90 EUR », « 12/03/2025 »). Les surfaces de produits et de transporteurs des
+# splits d'évaluation sont **réservées** : 7,8 % des mentions portent un nom de produit ou de
+# transporteur jamais vu à l'entraînement, et cette part est publiée dans les métadonnées. Les
+# distracteurs sont **déclarés** : familles de produits, villes, numéros de facture, années seules
+# apparaissent dans les textes et ne sont jamais annotés. Le découpage (train / val / calibration
+# / test) est stratifié par style et écrit dans le corpus.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: sav_messages
+n_samples: 1200
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: null              # apprentissage non supervisé : pas de cible
+id_column: msg_id
+time_column: received_at
+group_column: null
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['msg_id', 'style', 'n_entities', 'n_tokens', 'received_at']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+corpus:
+  reference_date: '2025-03-03'
+  style_shares:
+    redige: 0.55
+    abrege: 0.45
+  split_shares:
+    train: 0.6
+    val: 0.2
+    calibration: 0.05
+    test: 0.15
+  part_reservee: 0.75
+  reserved_draw: 0.65

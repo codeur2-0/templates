@@ -223,8 +223,14 @@ spacy:
   display_name: spaCy
   category: nlp
   template_dir: spacy
+  class_name: SpacyEntityTagger
   epochs_based: true
-  supports_proba: true
+  #: Le tagger à transitions n'expose pas de probabilité par mention : la confiance publiée est un
+  #: taux de corroboration, mesuré par niveau dans le rapport. Aucun `predict_proba` n'est exposé.
+  supports_proba: false
+  #: L'artefact d'un pipeline spaCy est un **répertoire** (`nlp.to_disk`), pas un fichier : le
+  #: manifeste le déclare (`train.artifacts.model_file: tagger`) et le contrat du projet le documente.
+  model_file: tagger
   dependencies:
     - "numpy>=1.26"
     - "pandas>=2.2"
@@ -237,11 +243,24 @@ spacy:
       url: "https://spacy.io/usage"
     - name: "spaCy API"
       url: "https://spacy.io/api"
+    - name: "spaCy : entraîner un composant d'entités nommées"
+      url: "https://spacy.io/usage/training#ner"
   notes:
     - "Pipeline `spacy.blank(...)` entraîné from scratch : aucune dépendance à un modèle pré-entraîné téléchargeable."
     - "Thinc (le moteur ML de spaCy) fournit les couches et l'optimisation ; `Example` alimente l'entraînement."
+    - "Trois algorithmes servis : `gazetteer` (couche de règles déclarées + surfaces apprises sur le train, aucun apprentissage de poids — le plancher explicable), `tagger` (tok2vec + classifieur à transitions, entraîné sur le corpus) et `hybrid` (le tagger décide, les règles corroborent et comblent les trous — servi par défaut)."
+    - "Un tagger à transitions n'expose pas de probabilité par mention : la confiance publiée est le **taux de recouvrement** entre le span prédit et la couche de règles, et sa précision est mesurée par niveau dans le rapport d'évaluation (`confidence_gap`). Publier une fausse probabilité serait pire que publier une mesure de corroboration documentée."
+    - "Les frontières de mentions comptent autant que le type : la métrique principale est une F1 micro au niveau entité (type **et** bornes exactes), complétée par une F1 partielle qui mesure le coût de cette exigence."
   commands:
     train: "python -m src.main mode=train"
+  candidate_algorithms: "couche de règles (gazetteer), tagger à transitions (tagger), hybride tagger + règles (hybrid)"
+  candidate_note: >-
+    La couche de règles ne dépend d'aucun apprentissage de poids : ses surfaces viennent des
+    annotations du split d'entraînement, jamais du vocabulaire de la famille, donc elle ne peut pas
+    connaître les surfaces réservées aux splits d'évaluation — c'est ce qui rend l'effet des
+    réserves mesurable au lieu d'être supposé. Le tagger, lui, apprend la forme des mentions ; sur
+    le corpus de référence de la famille, il couvre les règles (l'hybride ne gagne pas de F1), et
+    l'écart entre les deux est publié sur les mêmes lignes de test.
 
 transformers:
   display_name: Hugging Face Transformers (entraîné sur le corpus)

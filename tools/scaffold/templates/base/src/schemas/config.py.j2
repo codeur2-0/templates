@@ -232,7 +232,7 @@ class ArtifactsConfig(BaseModel):
 
     model_config = _FLEXIBLE
 
-    model_file: str = "model.{{ {'pytorch': 'pt', 'keras': 'keras', 'tensorflow': 'weights.h5', 'transformers': 'pt', 'spacy': 'joblib'}.get(spec.stack_key, 'keras' if stack.epochs_based else 'joblib') }}"
+    model_file: str = "model.{{ {'pytorch': 'pt', 'keras': 'keras', 'tensorflow': 'weights.h5', 'transformers': 'pt', 'spacy': 'tagger'}.get(spec.stack_key, 'keras' if stack.epochs_based else 'joblib') }}"
     pipeline_file: str = "preprocessing.joblib"
     feature_builder_file: str = "feature_builder.joblib"
     metrics_file: str = "training_metrics.json"

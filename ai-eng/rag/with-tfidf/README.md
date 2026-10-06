@@ -184,12 +184,12 @@ ai-eng/rag/with-tfidf/
 │   └── predict.py
 │
 ├── notebooks/                   # 6 notebooks pédagogiques exécutables
-│   ├── 01_exploratory_analysis.ipynb
-│   ├── 02_data_validation_and_schemas.ipynb
-│   ├── 03_preprocessing_and_features.ipynb
+│   ├── 01_eda.ipynb
+│   ├── 02_validation.ipynb
+│   ├── 03_preprocessing.ipynb
 │   ├── 04_model_exploration.ipynb
-│   ├── 05_training_and_tracking.ipynb
-│   └── 06_evaluation_and_error_analysis.ipynb
+│   ├── 05_training.ipynb
+│   └── 06_error_analysis.ipynb
 │
 ├── tests/                       # pytest (schémas, loaders, preprocessing, modèle, training)
 │   ├── conftest.py
@@ -386,7 +386,6 @@ from src.schemas.config import validate_config
 
 data = SyntheticDataGenerator(n_samples=1000, seed=42).run()
 ```
-
 ### (d) Via le Makefile
 
 ```bash
@@ -570,4 +569,4 @@ Pour rejouer une configuration exacte : Hydra sauvegarde la config composée dan
 Code fourni à des fins pédagogiques, licence MIT. Pour proposer une amélioration : conserver la
 structure imposée, ajouter des tests, mettre à jour ce README et vérifier `make verify`.
 
-*Dernière génération : 2026-10-05 · projet `ai-eng-rag-tfidf`*
+*Dernière génération : 2026-10-06 · projet `ai-eng-rag-tfidf`*

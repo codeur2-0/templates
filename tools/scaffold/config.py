@@ -91,6 +91,58 @@ class ColumnSpec(BaseModel):
         return DTYPE_ALIASES[key]
 
 
+class AnnotationColumnSpec(BaseModel):
+    """A single column of the **second** table of a span-labelling corpus.
+
+    Une tâche d'extraction d'entités ne se décrit pas par une table : les messages portent le texte,
+    une **table d'annotations** porte la supervision (décalages, type, surface). Ce modèle décrit
+    cette seconde table, dont les rôles n'ont rien de commun avec ceux de la première : une clé de
+    jointure, des décalages de caractères, un type d'entité.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description="Column name as it appears in the annotation table.")
+    dtype: str = Field(description="Logical dtype: int, float, str, category, bool, datetime.")
+    role: Literal["join_key", "offset", "target", "metadata"] = Field(
+        description="Annotation role: join key, character offset, entity type or metadata."
+    )
+    description: str = Field(description="Business meaning (French, used in READMEs).")
+    checks: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Pandera checks: ge, gt, isin, regex, str_length, ...",
+    )
+    distribution: str | None = Field(
+        default=None, description="Expected distribution, documented in data/README.md."
+    )
+
+    @field_validator("dtype", mode="before")
+    @classmethod
+    def _normalise_dtype(cls, value: str) -> str:
+        """Map the many ways of spelling a dtype onto the canonical set."""
+        key = str(value).strip().lower()
+        if key not in DTYPE_ALIASES:
+            msg = f"Unknown dtype '{value}'. Allowed: {sorted(set(DTYPE_ALIASES.values()))}"
+            raise ValueError(msg)
+        return DTYPE_ALIASES[key]
+
+
+class AnnotationsSpec(BaseModel):
+    """Supervision table of a span-labelling corpus (named entity recognition, ...)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(description="File stem of the annotation table, e.g. ``spans``.")
+    title: str
+    description: str
+    n_rows_expected: str = Field(description="Human readable size of the supervision table.")
+    columns: list[AnnotationColumnSpec] = Field(min_length=3)
+
+    def by_role(self, role: str) -> list[AnnotationColumnSpec]:
+        """Return the annotation columns having the given role."""
+        return [column for column in self.columns if column.role == role]
+
+
 class DataSpec(BaseModel):
     """Everything needed to generate, document and validate the example dataset."""
 
@@ -103,6 +155,8 @@ class DataSpec(BaseModel):
     seed: int = 42
     formats: list[str] = Field(default_factory=lambda: ["parquet", "csv"])
     columns: list[ColumnSpec] = Field(min_length=2)
+    #: Deuxième table des corpus d'étiquetage de spans : ``None`` pour toutes les autres familles.
+    annotations: AnnotationsSpec | None = None
     target: str | None = None
     id_column: str | None = None
     time_column: str | None = None

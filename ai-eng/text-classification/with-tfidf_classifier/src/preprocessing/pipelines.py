@@ -59,7 +59,7 @@ class TextPreprocessor:
         """Turn a corpus into the passage table that will be indexed.
 
         Args:
-            documents: Corpus with at least ``doc_id`` and ``text``.
+            documents: Corpus with at least the chunker's identifier column and ``text``.
 
         Returns:
             The passage table (``chunk_id``, ``doc_id``, ``chunk_index``, offsets, tokens, text).

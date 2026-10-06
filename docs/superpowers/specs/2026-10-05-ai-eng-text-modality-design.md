@@ -1,9 +1,10 @@
 # Modalité `text` et familles `ai-eng` — RAG, QA, embeddings, agents
 
 - **Date** : 2026-10-05
-- **Statut** : design validé, tranches 1, 2 et 2b livrées et vérifiées (`ai-eng/rag/with-{tfidf,langchain}`,
-  `ai-eng/question-answering/with-{tfidf,langchain}` et `ai-eng/embeddings/with-{embedding,tfidf}`
-  conformes dans `tools.verify`), tranches 3 à 5 à venir
+- **Statut** : design validé, tranches 1, 2, 2b et 3 livrées et vérifiées (`ai-eng/rag/with-{tfidf,langchain}`,
+  `ai-eng/question-answering/with-{tfidf,langchain}`, `ai-eng/embeddings/with-{embedding,tfidf}`,
+  `ai-eng/text-classification/with-{tfidf_classifier,transformers}` et
+  `ai-eng/named-entity-recognition/with-spacy` conformes dans `tools.verify`), tranches 4 et 5 à venir
 - **Branche** : `arena/3402658e-templates`
 - **Périmètre** : point 2 de la feuille de route du README racine — `ai-eng/` (LangChain, RAG,
   Transformers, serving FastAPI) et `nlp/` (spaCy, Transformers). Ce document couvre la couche
@@ -11,7 +12,8 @@
 
 ## 1. Objectif
 
-Le dépôt déclare **29 familles** et **18 stacks**, mais une seule modalité est implémentée
+Le dépôt déclare **29 familles** et **21 stacks** (18 au moment de la rédaction, plus
+`tfidf_classifier`, `embedding` et `spacy`), mais une seule modalité était implémentée au départ
 (`modality/tabular/`). Les huit familles texte du registre — `text_classification`,
 `named_entity_recognition`, `summarization`, `question_answering`,
 `retrieval_augmented_generation`, `agent_tools`, `embedding_pipeline`, `llm_finetuning` — n'ont
@@ -110,9 +112,11 @@ templates/
 │   ├── src/pipelines/{__init__,data_pipeline,train_pipeline,evaluation_pipeline,inference_pipeline}.py
 │   └── tests/{conftest.py.j2,test_*.py}
 ├── task/retrieval/                         # evaluator, reports, predictor, plots
-├── task/generation/                        # résumé / fine-tuning (tranche 2)
-├── family/{retrieval_augmented_generation,question_answering,embedding_pipeline,agent_tools}
-└── stack/{tfidf,langchain,transformers,spacy,fastapi}
+├── task/text_multiclass/                   # classification de texte (tranche 3)
+├── task/generation/                        # résumé / fine-tuning (tranche 4)
+├── task/named_entity_recognition/          # extraction d'entités (tranche 3)
+├── family/{retrieval_augmented_generation,question_answering,embedding_pipeline,agent_tools,text_classification,named_entity_recognition}
+└── stack/{tfidf,tfidf_classifier,langchain,transformers,spacy,fastapi}
 ```
 
 ## 5. Conventions spécifiques à la modalité texte
@@ -133,7 +137,7 @@ templates/
 | 1 | `stacks` tfidf + langchain, `modality/text`, `task/retrieval`, famille `retrieval_augmented_generation`, notebooks texte, deux manifests, vérification verte | **livrée** : `ai-eng/rag/with-tfidf` (104 tests, 81,5 s) et `ai-eng/rag/with-langchain` (110 tests, 165,1 s), recall@5 de test 0,7194 dans les deux cas |
 | 2 | `question_answering` (mutualise `modality/text`, `task/retrieval`, `stack/{tfidf,langchain}`) | **livrée** : `ai-eng/question-answering/with-tfidf` (106 tests, 48,8 s) et `with-langchain` (111 tests, 85,4 s), exact match 0,6212 et F1 0,7381 dans les deux cas |
 | 2b | `embedding_pipeline` (stack `embedding` : hachage + SVD, voisins, fidélité) et `agent_tools` (familles restantes de la modalité texte) | **livrée pour `embedding_pipeline`** : `ai-eng/embeddings/with-embedding` (109 tests, 46,0 s) et `with-tfidf` (107 tests, 39,2 s), recall@5 0,9412 dans les deux cas ; `agent_tools` à venir |
-| 3 | `nlp/` : `text_classification` (tfidf, transformers), `named_entity_recognition` (spacy) | à venir |
+| 3 | `ai-eng/` : `text_classification` (tfidf, transformers), `named_entity_recognition` (spacy) | **livrée** : `ai-eng/text-classification/with-tfidf_classifier` (121 tests, 41,8 s) et `with-transformers` (127 tests, 1 056,1 s), F1 macro 0,8408 / 0,7942 ; `ai-eng/named-entity-recognition/with-spacy` (101 tests, 153,6 s), F1 entité 0,9340 |
 | 4 | `nlp/` : `summarization`, `llm_finetuning` (transformers, architecture minuscule, poids aléatoires) | à venir |
 | 5 | `mlops/model_serving` (fastapi) au-dessus d'un modèle entraîné | à venir |
 

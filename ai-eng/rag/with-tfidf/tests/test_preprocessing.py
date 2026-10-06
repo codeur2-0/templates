@@ -32,6 +32,8 @@ from src.preprocessing.transformers import (
     split_sentences,
     tokenize,
 )
+from src.schemas.config import AppConfig
+from src.utils.config_access import node
 
 TEXT = (
     "Le solde de congés payés est de 25 jours ouvrables par an. "
@@ -39,6 +41,21 @@ TEXT = (
     "Les jours non pris sont perdus au 31 mai. "
     "Le télétravail est plafonné à 8 jours par mois."
 )
+
+
+def _identifier_column(app_config: AppConfig) -> str:
+    """Return the corpus identifier column declared by the project (``doc_id``, ``msg_id``…).
+
+    Le découpage ne devine pas le nom de la colonne d'identifiant : chaque famille déclare la
+    sienne (``data.id_column``) et le test lit cette déclaration, comme le fait le chargeur.
+
+    Args:
+        app_config: Validated application configuration.
+
+    Returns:
+        The declared identifier column.
+    """
+    return str(node(app_config, "data").get("id_column") or "doc_id")
 
 
 def test_normalise_text_collapses_whitespace() -> None:
@@ -107,10 +124,13 @@ def test_chunker_rejects_an_absurd_configuration() -> None:
         DocumentChunker(max_tokens=10, overlap_tokens=0)
 
 
-def test_chunker_frames_a_corpus(documents: pd.DataFrame) -> None:
+def test_chunker_frames_a_corpus(documents: pd.DataFrame, app_config: AppConfig) -> None:
     """Le passage à l'échelle : chaque document produit au moins un passage contractuel."""
-    chunker = DocumentChunker(max_tokens=110, overlap_tokens=30)
-    frame = chunker.chunk_frame(documents.head(8))
+    head = documents.head(8)
+    chunker = DocumentChunker(
+        max_tokens=110, overlap_tokens=30, id_column=_identifier_column(app_config)
+    )
+    frame = chunker.chunk_frame(head)
     assert len(frame) >= 8
     assert set(frame.columns) == {
         "chunk_id",
@@ -122,6 +142,9 @@ def test_chunker_frames_a_corpus(documents: pd.DataFrame) -> None:
         "text",
     }
     assert frame["chunk_id"].is_unique
+    # L'identifiant de la ligne source voyage avec le passage : c'est ce qui permet de remonter du
+    # passage retrouvé au message dont il vient, quel que soit le nom déclaré dans la famille.
+    assert frame["doc_id"].nunique() == len(head)
 
 
 def test_stop_word_filter_drops_short_and_frequent_tokens() -> None:
@@ -139,19 +162,29 @@ def test_stop_word_filter_round_trip(tmp_path: Path) -> None:
     assert reloaded.transform(["le", "cabinet"]) == original.transform(["le", "cabinet"])
 
 
-def test_preprocessing_pipeline_is_deterministic(documents: pd.DataFrame) -> None:
+def test_preprocessing_pipeline_is_deterministic(
+    documents: pd.DataFrame, app_config: AppConfig
+) -> None:
     """Deux découpages du même corpus donnent exactement les mêmes passages."""
     pipeline = TextPreprocessingPipeline.from_config(
-        {"chunking": {"max_tokens": 110, "overlap_tokens": 30}}
+        {
+            "chunking": {
+                "max_tokens": 110,
+                "overlap_tokens": 30,
+                "id_column": _identifier_column(app_config),
+            }
+        }
     )
     first = pipeline.transform_documents(documents.head(6))
     second = pipeline.transform_documents(documents.head(6))
     pd.testing.assert_frame_equal(first, second)
 
 
-def test_preprocessor_tokens_a_question(documents: pd.DataFrame) -> None:
+def test_preprocessor_tokens_a_question(documents: pd.DataFrame, app_config: AppConfig) -> None:
     """``TextPreprocessor`` enchaîne découpage et tokénisation, comme le fait le modèle."""
-    preprocessor = TextPreprocessor()
+    preprocessor = TextPreprocessor.from_config(
+        {"chunking": {"id_column": _identifier_column(app_config)}}
+    )
     chunks = preprocessor.prepare_corpus(documents.head(3))
     assert len(chunks) >= 3
     tokens = preprocessor.tokenize("Quelle est la durée de la période d'essai ?")

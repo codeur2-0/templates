@@ -14,9 +14,10 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**33 projets** — 25 sur sept familles tabulaires (sections 1.1 à 1.7) et 8 sur les quatre familles
+**34 projets** — 25 sur sept familles tabulaires (sections 1.1 à 1.7) et 9 sur les cinq familles
 texte `ai-eng/rag` (section 1.8), `ai-eng/question-answering` (section 1.9), `ai-eng/embeddings`
-(section 1.10) et `ai-eng/text-classification` (section 1.11) — tous verts dans
+(section 1.10), `ai-eng/text-classification` (section 1.11) et `ai-eng/named-entity-recognition`
+(section 1.12) — tous verts dans
 `tools/verify.py` (lint, formatage, typage, tests, six notebooks exécutés, pipeline complet
 `data → train → evaluate → predict`).
 
@@ -457,6 +458,64 @@ stack. Coût assumé : trois secondes d'ajustement pour le sac d'embeddings (~18
 contre environ deux minutes et demie pour l'encodeur servi (344 582 paramètres, mesuré entre 136 s et
 150 s selon la charge de la machine).
 
+### 1.12 `ai-eng/named-entity-recognition` — extraction d'entités dans les messages clients, spaCy
+
+Cinquième cas d'usage texte, et le premier où le modèle ne classe pas un document : il **localise**
+des éléments dans le texte. Cinq types d'entités (produit, référence de commande, montant, date,
+transporteur) doivent être retrouvés avec leurs **bornes exactes** dans 1 200 messages de service
+client synthétiques (4 454 entités, 21 tokens par message en moyenne), écrits dans deux styles
+rédactionnels — 55 % rédigés (« CMD-1234 », « 12 mars 2025 ») et 45 % abrégés (« cmd 1234 », «
+12/03/2025 ») — et arrivés par quatre canaux. Le découpage est 720 / 240 / 60 / 180 messages. Deux
+difficultés sont construites : les surfaces de produits et de transporteurs des splits d'évaluation
+sont **réservées** (12 produits et 4 transporteurs jamais vus à l'entraînement : une liste apprise
+ne peut pas les retrouver), et les distracteurs sont **déclarés** (familles de produits, villes,
+numéros de facture, années seules — présents dans les textes, jamais annotés).
+
+| Projet | Stack | Modèle | F1 entité (test) | Précision / rappel | F1 macro | F1 partielle | Surfaces réservées / vues | Ajustement |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-spacy`](ai-eng/named-entity-recognition/with-spacy) | spaCy (tok2vec + transitions, entraîné sur le corpus) | **hybride** : tagger appris, corroboré par une couche de règles | **0,9340** | 0,9521 / 0,9167 | **0,9239** | 0,9735 | 0,6056 / 1,0000 | ≈ 95-103 s |
+
+Trois références mesurées sur le même split de test (180 messages, 672 entités) donnent un sens aux
+0,9340 : le plancher trivial (n'annoter aucune entité) vaut **0,0**, la couche de règles du projet —
+motifs de référence, de montant et de date plus un index de surfaces appris **sur le train
+uniquement** — atteint **0,8710** (précision 0,9725, rappel 0,7887), et le raccourci de forme («
+telle signature de caractères veut dire tel type », appris sur le train) atteint 1,0 sur les trois
+types à motif, 0,9265 sur `produit` et 0,9351 sur `transporteur` — mais seulement quand les bornes
+lui sont données. Le modèle apporte **+0,0630** de F1 sur la couche de règles, et il **généralise**
+là où l'index s'arrête — c'est la raison pour laquelle le tagger est servi ; la couche de règles,
+elle, reste dans le rendu hybride pour ce qu'elle apporte en plus du score : une **provenance** et
+un taux de corroboration par mention.
+
+**Lecture honnête** : trois chiffres racontent le projet. (1) Le tagger retrouve **100 %** des
+mentions dont la surface a été vue à l'entraînement et **60,6 %** de celles dont la surface était
+réservée — cet écart de 0,3944 est la seule mesure du dépôt qui distingue « apprendre la forme d'un
+nom » de « recopier un vocabulaire », et il est publié dans les deux sens. (2) Le type difficile est
+`transporteur` (F1 0,713 : précision 0,828, rappel 0,626) parce que ses surfaces n'ont pas de
+préfixe reconnaissable — à l'inverse `commande`, `date` et `montant` sont lus au sans-faute par les
+deux couches (F1 1,0). La ventilation le montre au passage : les messages abrégés ne sont pas les
+plus durs (0,943 contre 0,926 pour les rédigés), et le canal le plus difficile est le formulaire
+(0,923) — un résultat publié, pas une intuition. (3) La confiance publiée n'est **pas** une
+probabilité : un tagger à transitions n'en expose aucune, donc chaque mention porte son **taux de
+corroboration** par les règles, dont la précision est mesurée par niveau — 0,973 pour les mentions
+corroborées (545 sur 647), 0,843 pour les autres, écart de 0,1396 sur les mentions correctes.
+Publier une fausse probabilité aurait été plus simple et faux ; le projet publie une mesure, avec
+son mode d'emploi (seuil d'automatisation arbitré sur le split de calibration et relu sur la
+validation, jamais sur le test).
+
+La stack spaCy sert **trois algorithmes** interchangeables par `model.algorithm` : `gazetteer` (la
+couche de règles seule, sans apprentissage de poids), `tagger` (tok2vec + classifieur à transitions,
+`spacy.blank("fr")`, aucun poids pré-entraîné téléchargé) et `hybrid` (servi par défaut). Le projet
+est structurellement le plus riche du dépôt : l'annotation est un **couple de tables** validé par
+Pandera (`surface == text[start:end]`, pas de chevauchement, mention rattachée au split de son
+message), l'entraînement commence par l'**alignement des offsets** sur les tokens (100 % des
+annotations apprennent, 0 ignorée — un corpus décalé produirait un score moyen sans que personne ne
+sache pourquoi), et l'artefact est un **répertoire** (`nlp.to_disk`) rechargé à l'identique, ce que
+la suite de tests vérifie. Coût assumé : environ une minute et demie d'entraînement (30 époques sur
+720 messages) et 3 à 5 s d'évaluation, pour une médiane de 2,5 à 3,1 ms par message en inférence
+(p95 de 3,0 à 4,4 ms selon la charge — la latence est une mesure, pas un score, et le projet ne la
+fige pas) ; les six notebooks tournent sur un corpus réduit (320 messages) et re-dérivent leurs
+propres chiffres.
+
 ---
 
 ## 2. Démarrage rapide (cinq commandes)
@@ -552,10 +611,11 @@ l'implémentation change. C'est ce qui rend la comparaison possible.
 | **Keras** | API fonctionnelle : graphe déclaré puis `compile`/`fit`, callbacks natifs (`EarlyStopping(restore_best_weights)`, `ReduceLROnPlateau`, `TerminateOnNaN`) pontés vers les callbacks du projet, `class_weight` pour le déséquilibre | archive native `model.keras` + sidecar `model.config.json` |
 | **TensorFlow** | Niveau le plus bas : modèle **subclassé**, couches maison (`DenseBlock`, `ResidualBlock`), pipeline `tf.data`, `GradientTape` + `tf.function`, pertes sur logits, écrêtage du gradient, pondération d'échantillons | poids `model.weights.h5` + sidecar `model.config.json` |
 
-Trois stacks texte complètent la liste, documentées avec leurs projets : **scikit-learn
-(TF-IDF / BM25)**, **LangChain (LCEL)** et l'**index vectoriel dense** (hachage de n-grammes puis SVD
-tronquée, stack `embedding`) — même contrat `BaseModel`, même corpus annoté, un index différent par
-stack (sections 1.8 à 1.10).
+Quatre stacks texte complètent la liste, documentées avec leurs projets : **scikit-learn
+(TF-IDF / BM25)**, **LangChain (LCEL)**, l'**index vectoriel dense** (hachage de n-grammes puis SVD
+tronquée, stack `embedding`) et **spaCy** (tagger à transitions entraîné sur le corpus, corroboré par
+une couche de règles, stack `spacy`) — même contrat `BaseModel`, même corpus annoté d'un côté, corpus
+annoté au caractère de l'autre (sections 1.8 à 1.12).
 
 Pièges documentés dans le code (et résolus) que ces stacks partagent :
 
@@ -612,7 +672,7 @@ tools/
 │   ├── engine.py                 # rendu Jinja2 + post-traitement (ruff format / ruff --fix)
 │   ├── context.py                # contexte de rendu (spec, stack, family, helpers comme wrap())
 │   ├── registry/
-│   │   ├── stacks.yaml           # 20 stacks : dépendances, classe, format du fichier modèle, docs
+│   │   ├── stacks.yaml           # 21 stacks : dépendances, classe, format du fichier modèle, docs
 │   │   └── families.yaml         # familles de problèmes : modalité, tâche, builder de notebooks
 │   ├── defaults/
 │   │   ├── global.yaml           # valeurs par défaut de tous les projets (train, preprocessing…)
@@ -642,16 +702,26 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **25/25 projets tabulaires conformes** (ruff check, ruff format, mypy
-strict, 4 235 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les
-tests de leur couche tâche —, 150 notebooks exécutés, `python -m src.main mode=all` de bout en
-bout) et **8/8 projets `ai-eng` conformes** : `rag/with-tfidf` (85,4 s, 107 tests),
-`rag/with-langchain` (168,3 s, 112 tests), `question-answering/with-tfidf` (56,1 s, 107 tests),
-`question-answering/with-langchain` (90,5 s, 112 tests), `embeddings/with-embedding` (42,9 s,
-109 tests), `embeddings/with-tfidf` (38,5 s, 107 tests), `text-classification/with-tfidf_classifier`
-(41,8 s, 121 tests) et `text-classification/with-transformers` (1 056,1 s, 127 tests — l'encodeur
-s'entraîne dans les notebooks, d'où la durée) — mêmes six notebooks et même pipeline complet. Chaque projet est rejoué intégralement — lint, typage, tests, exécution des six notebooks
-et pipeline complet — avant d'être considéré comme livré.
+État au dernier passage : **34 projets**, dont **28 rejoués de bout en bout dans l'environnement de
+cette branche** (ruff check, ruff format, mypy strict, pytest, six notebooks exécutés,
+`python -m src.main mode=all`) — la barrière de qualité a d'ailleurs tenu sur les 34 : `ruff check`,
+`ruff format` et `mypy` sont verts partout, y compris pour les six projets que l'environnement ne
+peut pas exécuter faute de TensorFlow.
+
+Les **neuf projets `ai-eng`** sont conformes : `rag/with-tfidf` (118,4 s, 107 tests),
+`rag/with-langchain` (203,4 s, 112 tests), `question-answering/with-tfidf` (69,2 s, 107 tests),
+`question-answering/with-langchain` (105,0 s, 112 tests), `embeddings/with-embedding` (61,3 s,
+109 tests), `embeddings/with-tfidf` (59,2 s, 107 tests), `text-classification/with-tfidf_classifier`
+(48,5 s, 121 tests), `text-classification/with-transformers` (893,0 s, 127 tests — l'encodeur
+s'entraîne dans les notebooks, d'où la durée) et `named-entity-recognition/with-spacy` (201,6 s,
+101 tests) — mêmes six notebooks et même pipeline complet. Les **19 projets tabulaires**
+scikit-learn, XGBoost, LightGBM et PyTorch rejoués dans le même environnement sont conformes eux
+aussi (la référence multi-stacks complète, 4 235 tests, reste celle du dernier passage intégral) ;
+les quatre projets **Keras** et les deux **TensorFlow** n'ont pas été rejoués ici — TensorFlow n'est
+pas installé — mais leurs sources sont inchangées (seuls le README et `pyproject.toml` ont été
+régénérés, et la barrière de qualité y passe). Chaque projet est rejoué intégralement — lint,
+typage, tests, exécution des six notebooks et pipeline complet — avant d'être considéré comme
+livré.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
 reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capture d'écran.
@@ -675,13 +745,14 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 
 État du générateur : `registry/families.yaml` déclare **29 familles** et `registry/stacks.yaml`
 **21 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
-`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval,text_multiclass}/`,
-`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering,embedding_pipeline,text_classification}/`
-et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,tfidf,tfidf_classifier,langchain,embedding,transformers}/`
+`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval,text_multiclass,named_entity_recognition}/`,
+`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering,embedding_pipeline,text_classification,named_entity_recognition}/`
+et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,tfidf,tfidf_classifier,langchain,embedding,transformers,spacy}/`
 sont écrites et vérifiées : les **sept familles tabulaires**, la **famille RAG** (section 1.8), la
-**famille questions-réponses** (section 1.9), la **famille d'index d'embeddings** (section 1.10) et
-la **famille de classification de texte** (section 1.11) sont livrées — huit projets `ai-eng`, tous
-mesurés sur un corpus synthétique et un split de test dédié. Ce qui reste, par ordre de valeur pédagogique :
+**famille questions-réponses** (section 1.9), la **famille d'index d'embeddings** (section 1.10), la
+**famille de classification de texte** (section 1.11) et la **famille d'extraction d'entités
+nommées** (section 1.12) sont livrées — neuf projets `ai-eng`, tous mesurés sur un corpus
+synthétique et un split de test dédié. Ce qui reste, par ordre de valeur pédagogique :
 
 1. **Stacks tabulaires déclarées, pas encore livrées** — `clustering` et `anomaly_detection` en
    PyTorch et TensorFlow (auto-encodeurs), `recommendation` en PyTorch (modèle à deux tours),
@@ -689,21 +760,22 @@ mesurés sur un corpus synthétique et un split de test dédié. Ce qui reste, p
    manifeste par stack et, comme pour la prévision, des notebooks paramétrés par stack
    (`extras.notebook_<famille>`) : les commentaires chiffrés d'un notebook doivent parler de la
    stack réellement mesurée.
-2. **Suite du périmètre ai-eng et nlp** — la modalité texte, les tâches `retrieval` et
-   `text_multiclass` et les familles `retrieval_augmented_generation`, `question_answering`,
-   `embedding_pipeline` et `text_classification` sont en place (sections 1.8 à 1.11) : la suite
+2. **Suite du périmètre ai-eng et nlp** — la modalité texte, les tâches `retrieval`,
+   `text_multiclass` et `named_entity_recognition` et les familles
+   `retrieval_augmented_generation`, `question_answering`, `embedding_pipeline`,
+   `text_classification` et `named_entity_recognition` sont en place (sections 1.8 à 1.12) : la suite
    réutilise ces couches. Restent `ai-eng/` (agents : Deepagents, Strands, CrewAI ; serving FastAPI),
-   `nlp/` (NER avec spaCy, résumé, fine-tuning LLM) et les familles `summarization`, `llm_finetuning`
-   et `agent_tools` — cette dernière réutilise `modality/text/` + `task/retrieval/` comme l'a fait
+   `nlp/` (résumé, fine-tuning LLM) et les familles `summarization`, `llm_finetuning` et
+   `agent_tools` — cette dernière réutilise `modality/text/` + `task/retrieval/` comme l'a fait
    `embedding_pipeline`.
 3. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
    GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
    `computer-vision/`. Chacune demande une nouvelle couche `modality/` (loaders, pré-traitement,
    pipelines, tests) en plus des couches `family/` et `task/`.
-4. **Stacks déjà déclarées, non implémentées** — `spacy`, `duckdb`, `pandas`,
-   `prefect`, `mlflow`, `fastapi`, `jinja2`, `scipy`, `github-actions`, `pandera` : l'entrée de
-   registre existe, le dossier `templates/stack/<clé>/` reste à écrire ; elles serviront `nlp/`,
-   `data-eng/`, `mlops/` et le serving.
+4. **Stacks déjà déclarées, non implémentées** — `duckdb`, `pandas`, `prefect`, `mlflow`,
+   `fastapi`, `jinja2`, `scipy`, `github-actions`, `pandera` : l'entrée de registre existe, le dossier
+   `templates/stack/<clé>/` reste à écrire ; elles serviront `data-eng/`, `mlops/` et le serving
+   (`spacy` est livrée avec la section 1.12).
 
 Chaque ajout suit la même procédure : entrée de registre -> templates de stack ou de famille ->
 manifeste -> `build` -> `verify` -> commit.

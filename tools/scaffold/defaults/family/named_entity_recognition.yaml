@@ -1,0 +1,267 @@
+# =================================================================================================
+# Famille « named_entity_recognition » — extraire les entités d'un message de service client.
+# -------------------------------------------------------------------------------------------------
+# Même modalité que les familles RAG / QA / classification de texte (le texte), mais un objet
+# différent : ici la sortie n'est pas une étiquette par document, c'est une **liste de mentions
+# typées** avec leurs positions. Le corpus est donc annoté au niveau du caractère : produits,
+# références de commande, montants, dates et transporteurs. Trois difficultés sont construites
+# volontairement, parce qu'elles sont ce qui sépare un exercice d'un projet :
+#
+#   * les surfaces de produits et de transporteurs des splits d'évaluation sont **réservées** — elles
+#     n'apparaissent jamais à l'entraînement : une liste apprise ne peut pas les retrouver, un modèle
+#     qui apprend la forme en retrouve une partie, et l'écart est publié ;
+#   * les **distracteurs sont déclarés** : familles de produits (« le casque »), villes, numéros de
+#     facture, années seules — présents dans les textes, jamais annotés ;
+#   * deux **styles rédactionnels** coexistent : « CMD-1234 » devient « cmd 1234 », « 89,90 € »
+#     devient « 89.90 EUR », « 12 mars 2025 » devient « 12/03/2025 ».
+#
+# L'évaluation est **au niveau entité** : un span est correct s'il a le bon type *et* les bonnes
+# bornes. Une mention décalée d'un caractère compte comme fausse, et la métrique partielle est
+# publiée à côté pour mesurer ce que cette exigence coûte.
+# =================================================================================================
+
+domain: ai-eng
+problem: named-entity-recognition
+modality: text
+family: named_entity_recognition
+
+business:
+  persona: >-
+    Responsable du back-office d'un distributeur de matériel informatique (300 personnes), avec un
+    ingénieur IA qui outille le service client et une équipe qualité qui mesure les dossiers
+    traités en retard.
+  context: >-
+    Le service client reçoit 1 200 messages par semaine par formulaire, courriel, chat et courrier.
+    Chaque message raconte la même histoire en mots différents : une référence de commande, un
+    produit, un transporteur, un montant et une date. Aujourd'hui, un conseiller relit le message
+    pour recopier ces cinq informations dans le dossier — un travail mécanique, fastidieux, et qui
+    conditionne tout le reste : sans la référence de commande correcte, aucune relance n'est
+    possible, et un montant mal recopié se retrouve dans la comptabilité.
+  problem: >-
+    Extraire automatiquement les entités d'un message (produit, référence de commande, montant,
+    date, transporteur), avec leurs positions exactes dans le texte, en publiant pour chaque mention
+    sa **provenance** (règle déclenchée ou modèle) et sa **confiance** — et en mesurant la part de
+    mentions qui portent sur des noms jamais vus à l'entraînement, parce que c'est là que le
+    système se trompe.
+  inputs: >-
+    Un message de client en texte libre, avec son canal d'arrivée, son style rédactionnel et sa date
+    de réception. Aucune mise en forme, aucune structure : le texte tel qu'il a été écrit.
+  outputs: >-
+    Une table de mentions : identifiant du message, décalages de début et de fin, type, surface,
+    provenance, confiance, et le verdict (correct ou non) quand la vérité terrain est connue. Plus
+    la fiche de modèle, le rapport d'évaluation et les figures de lecture (F1 par type, erreurs de
+    bornes, précision par niveau de confiance).
+  value: >-
+    Le conseiller relit une extraction au lieu de recopier cinq champs, et chaque erreur devient
+    diagnosticable : le rapport dit si le système s'est trompé sur le *type* (un transporteur pris
+    pour un produit) ou sur les *bornes* (une mention trop courte), et la ventilation par style
+    montre que les messages abrégés sont plus difficiles que les messages rédigés — un résultat
+    publié, pas une excuse.
+  success_criteria:
+    - "F1 au niveau entité ≥ 0,70 sur le split de test : la métrique est micro (toutes les mentions comptent pareil), et le plancher trivial vaut 0,0 — un système qui n'annote rien n'a aucune précision."
+    - "F1 macro également publiée : sur cinq types de fréquence inégale, la F1 micro peut cacher un type sacrifié, et le transporteur est le type difficile du corpus."
+    - "Les surfaces réservées aux splits d'évaluation (produits et transporteurs jamais vus à l'entraînement) sont mesurées **à part** : la dégradation entre le train et le test est un résultat du projet, pas une surprise."
+    - "Les distracteurs déclarés (familles de produits, villes, numéros de facture, années seules) ne sont **jamais** annotés par le système, et la couche de règles le vérifie par test."
+    - "Chaque mention publiée porte sa provenance (`regle` ou `modele`) et une confiance dont la précision est mesurée par niveau : une confiance de 0,9 qui ne vaut que 0,6 en précision est publiée comme telle."
+    - "Déterminisme : deux entraînements à graine fixée produisent des prédictions identiques, et la suite de tests le vérifie."
+    - "Aucune dépendance réseau à l'exécution : pipeline `spacy.blank(...)` entraîné sur le corpus, vocabulaire appris sur le train, aucun modèle pré-entraîné téléchargé."
+  cadence: "Entraînement mensuel sur les messages étiquetés ; extraction en ligne à la réception du message."
+  constraints:
+    - "Aucune donnée personnelle : le corpus est synthétique et les textes sont des gabarits paramétrés."
+    - "Une mention sans provenance n'est pas exploitable par un conseiller : la sortie doit dire d'où elle vient."
+    - "Les bornes comptent : une mention décalée est refusée par le back-office, donc comptée comme fausse."
+
+data:
+  dataset_name: sav_messages
+  title: "Messages de service client annotés en entités, rédigés et abrégés"
+  description: >-
+    Un corpus synthétique de 1 200 messages de service client annotés au niveau du caractère : cinq
+    types d'entités (produit, référence de commande, montant, date, transporteur), 4 454 mentions,
+    soit 3,7 mentions par message, aucun message sans entité par construction. Chaque message est
+    écrit par un gabarit à slots : les surfaces annotées sont enregistrées au moment de l'écriture,
+    elles ne sont pas retrouvées après coup. Deux styles rédactionnels se partagent le corpus —
+    55 % de messages rédigés (« CMD-1234 », « 89,90 € », « 12 mars 2025 ») et 45 % de messages
+    abrégés (« cmd 1234 », « 89.90 EUR », « 12/03/2025 »). Les surfaces de produits et de
+    transporteurs des splits d'évaluation sont **réservées** : 7,8 % des mentions portent un nom de
+    produit ou de transporteur jamais vu à l'entraînement, et cette part est publiée dans les
+    métadonnées. Les distracteurs sont **déclarés** : familles de produits, villes, numéros de
+    facture, années seules apparaissent dans les textes et ne sont jamais annotés. Le découpage
+    (train / val / calibration / test) est stratifié par style et écrit dans le corpus.
+  n_samples: 1200
+  seed: 42
+  formats: [parquet, csv]
+  # Aucune colonne n'est « la cible » : la supervision d'un projet d'extraction d'entités est une
+  # **table d'annotations**, déclarée ci-dessous. C'est la différence de fond avec la classification
+  # de texte, où le libellé tient sur la ligne du document.
+  target: null
+  id_column: msg_id
+  time_column: received_at
+  columns:
+    - name: msg_id
+      dtype: str
+      role: identifier
+      description: "Identifiant stable du message (clé de jointure avec la table d'annotations)."
+      unique: true
+      checks: { regex: "^MSG-[0-9]{4}$" }
+      generator: { kind: sequence }
+    - name: text
+      dtype: str
+      role: feature
+      description: "Texte du message tel qu'il a été écrit, avec ses surfaces rédigées ou abrégées."
+      checks: { min_length: 40, max_length: 400 }
+      generator: { kind: template }
+    - name: canal
+      dtype: category
+      role: feature
+      description: "Canal d'arrivée du message : formulaire, courriel, chat ou courrier."
+      checks: { isin: [formulaire, email, chat, courrier] }
+      distribution: "≈ 44 / 13 / 32 / 11 %"
+      generator: { kind: choice }
+    - name: style
+      dtype: category
+      role: metadata
+      description: "Style rédactionnel : redige (surfaces complètes) ou abrege (surfaces courtes, ponctuation réduite)."
+      checks: { isin: [redige, abrege] }
+      distribution: "≈ 55 / 45 %"
+      generator: { kind: choice }
+    - name: n_entities
+      dtype: int
+      role: metadata
+      description: "Nombre d'entités annotées dans le message (calculé à la génération, jamais prédit)."
+      checks: { ge: 3, le: 5 }
+      generator: { kind: derived }
+    - name: n_tokens
+      dtype: int
+      role: metadata
+      description: "Nombre de tokens du texte, calculé avec le tokenizer du projet (pour les figures de longueur)."
+      checks: { ge: 8, le: 120 }
+      generator: { kind: derived }
+    - name: received_at
+      dtype: datetime
+      role: timestamp
+      description: "Date de réception du message (six mois d'historique)."
+      generator: { kind: date }
+    - name: split
+      dtype: category
+      role: group
+      description: "Découpage du corpus (train / val / calibration / test), stratifié par style au moment de la génération."
+      checks: { isin: [train, val, calibration, test] }
+      distribution: "60 / 20 / 5 / 15 % : le test n'est mesuré qu'une fois"
+      generator: { kind: sequence }
+  annotations:
+    name: spans
+    title: "Table d'annotations : une ligne par entité à retrouver"
+    description: >-
+      La supervision du projet est une seconde table, jointe aux messages par `msg_id`. Chaque ligne
+      porte les décalages de caractères du span, son type, la surface écrite et un drapeau
+      `holdout` qui dit si la surface fait partie de celles réservées aux splits d'évaluation. Un
+      span est correct si son type *et* ses deux bornes sont exacts.
+    n_rows_expected: "≈ 3,7 par message (4 454 mentions pour 1 200 messages, entre 3 et 5 par message)"
+    columns:
+      - name: msg_id
+        dtype: str
+        role: join_key
+        description: "Message annoté (clé étrangère vers la table des messages)."
+        checks: { regex: "^MSG-[0-9]{4}$" }
+      - name: start
+        dtype: int
+        role: offset
+        description: "Décalage du premier caractère de la mention dans le texte du message."
+        checks: { ge: 0 }
+      - name: end
+        dtype: int
+        role: offset
+        description: "Décalage du premier caractère **après** la mention (convention Python, `end` exclu)."
+        checks: { gt: start }
+      - name: label
+        dtype: category
+        role: target
+        description: "Type de l'entité : produit, commande, montant, date ou transporteur."
+        checks: { isin: [produit, commande, montant, date, transporteur] }
+      - name: surface
+        dtype: str
+        role: metadata
+        description: "Texte exact de la mention, recopié de `text[start:end]` : il sert à lire les erreurs et à mesurer la mémorisation des surfaces."
+        checks: { min_length: 3 }
+      - name: holdout
+        dtype: bool
+        role: metadata
+        description: "Vrai pour une surface réservée aux splits d'évaluation (produit ou transporteur absent du train) : c'est la part difficile, et elle est publiée."
+  insights:
+    - "Trois entités sur quatre sont reconnaissables par leur forme (référence de commande, montant, date) : elles ne dépendent pas du vocabulaire, et un système à base de motifs les trouve quasi parfaitement."
+    - "Les produits et les transporteurs, eux, sont des **noms** : leur reconnaissance dépend d'un vocabulaire appris, donc un nom réservé aux splits d'évaluation est hors de portée d'une liste — c'est l'écart que le projet mesure au lieu de le supposer."
+    - "Les villes ressemblent à des entités et n'en sont pas : sans distracteur, un modèle apprendrait à surligner tous les noms propres et la précision serait trompeuse."
+    - "Les deux styles d'écriture portent exactement les mêmes entités : un système qui ne sait lire que le style rédigé perd la moitié du corpus, et le rapport le chiffre."
+    - "Les bornes sont mesurées séparément du type : une mention bien typée mais décalée est fausse, et le rapport publie la F1 partielle pour dire ce que cette exigence coûte."
+    - "Le découpage est écrit dans le corpus, pas tiré à l'entraînement : deux exécutions mesurent les mêmes messages de test."
+  recommendations:
+    - "Comparer les trois algorithmes de la stack sur le split de validation avant de figer le choix : la couche de règles explicables, le tagger entraîné, et l'hybride qui journalise les deux."
+    - "Mesurer la F1 par type avant la F1 globale : sur cinq types, la moyenne cache toujours un type sacrifié — ici le transporteur, dont les surfaces abrégées sont les plus ambiguës."
+    - "Ne jamais lire un score sans son plancher : 0,0 pour un système qui n'annote rien, et la couche de règles publiée à côté du modèle comme référence à battre."
+    - "Regarder la précision par niveau de confiance avant d'automatiser : la confiance d'un span est un niveau de corroboration, pas une probabilité, et elle ne vaut que ce que sa table de précision dit."
+    - "Relire les erreurs de bornes (mentions trop courtes, mentions fusionnées) : elles coûtent un dossier mal rempli, alors qu'un type manqué coûte une relance."
+  notes:
+    - "Le corpus est déterministe : même graine, mêmes textes, mêmes annotations, mêmes découpages, mêmes métriques."
+    - "Les messages sont générés par gabarits paramétrés : aucune donnée personnelle, aucun texte recopié."
+    - "Les annotations sont produites à l'écriture du texte, jamais reconstruites après coup : `surface == text[start:end]` est un contrat testé."
+
+model:
+  display_name: "Tagger d'entités spaCy appris sur le corpus, corroboré par une couche de règles"
+  algorithm: hybrid
+  rationale: >-
+    Un pipeline `spacy.blank(...)` est entraîné **sur le corpus** : aucun modèle pré-entraîné n'est
+    téléchargé, le tok2vec et le tagger à transitions apprennent sur les messages annotés du split
+    d'entraînement. Le modèle servi est **hybride** : le tagger décide, et une couche de règles
+    déclarées (motifs de référence de commande, de montant et de date, plus un index de surfaces
+    appris sur le train) corrobore les mentions et comble les trous. Cette couche n'améliore pas
+    mesurablement la F1 — elle est publiée comme référence explicable, et elle fournit la
+    provenance et la confiance de chaque mention. La confiance n'est pas une probabilité du modèle
+    (spaCy n'en expose pas pour un tagger à transitions) : c'est le **taux de recouvrement** entre le
+    span prédit et la couche de règles, et sa précision est mesurée par niveau dans le rapport.
+  params:
+    # Seuls les réglages réellement servis sont déclarés ici : le budget d'époques, la taille des
+    # lots et le taux d'apprentissage viennent du nœud `train` (30/8/0,0007, mesurés par la grille du
+    # manifeste), la graine vient de `seed`, et l'architecture est celle de spaCy — elle est
+    # **publiée** dans la fiche de modèle (`resolved_architecture`) plutôt que redéclarée, parce
+    # que redéclarer une architecture partielle produit un modèle différent de celui que la fiche
+    # décrit.
+    training:
+      dropout: 0.2
+      shuffle: true
+  alternatives:
+    - "`gazetteer` : la couche de règles seule, sans apprentissage — motifs déclarés plus surfaces vues au train. C'est le plancher explicable du projet, publié à côté du modèle."
+    - "`tagger` : le tagger spaCy seul, sans la couche de règles — c'est lui qui porte la F1, et l'écart avec l'hybride est publié (il est nul en F1 macro sur ce corpus)."
+    - "Modèle pré-entraîné téléchargé (`fr_core_news_sm`) : hors périmètre, le projet interdit toute dépendance réseau à l'exécution."
+    - "Modèle de langue à base de transformeurs : hors périmètre pour la même raison, et le corpus est trop petit pour justifier l'empreinte mémoire."
+
+train:
+  epochs: 30
+  batch_size: 8
+  learning_rate: 0.0007
+  early_stopping:
+    enabled: false
+  callbacks:
+    progress_bar: false
+
+metrics:
+  task: multiclass
+  primary: entity_f1
+  secondary:
+    - entity_precision
+    - entity_recall
+    - macro_f1
+    - partial_f1
+    - type_accuracy
+    - boundary_accuracy
+    - mean_confidence
+    - confidence_gap
+    - predicted_entities
+    - latency_p50_ms
+    - latency_p95_ms
+  # La référence publiée de la famille n'est pas une classe majoritaire mais la **couche de règles** :
+  # le rapport la mesure sur le même split de test, donc chaque score de modèle peut être lu comme un
+  # gain par rapport à une référence explicable. Le plancher d'un système qui n'annote rien (F1 0,0)
+  # est publié avec le corpus.
+  baseline: regles
+  min_primary: 0.70
+  direction: maximize

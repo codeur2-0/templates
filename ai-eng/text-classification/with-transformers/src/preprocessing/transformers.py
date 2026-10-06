@@ -251,10 +251,14 @@ class DocumentChunker:
         max_tokens: Maximum number of tokens per passage.
         overlap_tokens: Tokens shared by two consecutive passages (answers that straddle a
             boundary would otherwise be invisible to the retriever).
+        id_column: Identifier column of the corpus (``doc_id`` by default; a family whose rows are
+            messages declares ``msg_id`` in its data configuration). Le contrat des passages garde
+            ``doc_id`` : c'est le nom du champ « document source », pas celui de la famille.
     """
 
     max_tokens: int = 120
     overlap_tokens: int = 30
+    id_column: str = "doc_id"
 
     def __post_init__(self) -> None:
         """Reject an impossible configuration early."""
@@ -273,7 +277,8 @@ class DocumentChunker:
         """Build a chunker from a configuration node.
 
         Args:
-            config: Mapping (or OmegaConf node) holding ``max_tokens`` and ``overlap_tokens``.
+            config: Mapping (or OmegaConf node) holding ``max_tokens``, ``overlap_tokens`` and,
+                optionally, ``id_column``.
 
         Returns:
             The configured chunker.
@@ -282,6 +287,7 @@ class DocumentChunker:
         return cls(
             max_tokens=int(settings.get("max_tokens", 120)),
             overlap_tokens=int(settings.get("overlap_tokens", 30)),
+            id_column=str(settings.get("id_column", "doc_id")),
         )
 
     def chunk_document(self, doc_id: str, text: str) -> list[Chunk]:
@@ -332,14 +338,24 @@ class DocumentChunker:
         """Chunk a whole corpus frame.
 
         Args:
-            documents: Corpus with ``doc_id`` and ``text`` columns.
+            documents: Corpus with the identifier column (:attr:`id_column`) and ``text``.
 
         Returns:
             The chunks as a flat frame, ready for :func:`src.data.schemas.validate_chunks`.
+
+        Raises:
+            ValueError: When the identifier column is missing from the corpus.
         """
+        if self.id_column not in documents.columns:
+            msg = (
+                f"Identifier column '{self.id_column}' missing from the corpus: "
+                f"{sorted(documents.columns)}"
+            )
+            raise ValueError(msg)
         rows: list[dict[str, Any]] = []
         for record in documents.itertuples(index=False):
-            for chunk in self.chunk_document(str(record.doc_id), str(record.text)):
+            identifier = str(getattr(record, self.id_column))
+            for chunk in self.chunk_document(identifier, str(record.text)):
                 rows.append(chunk.to_row())
         frame = pd.DataFrame(rows)
         logger.info(
@@ -491,7 +507,7 @@ class TextPreprocessingPipeline:
         """Chunk a corpus into passages.
 
         Args:
-            documents: Corpus with ``doc_id`` and ``text``.
+            documents: Corpus with the chunker's identifier column and ``text``.
 
         Returns:
             The passage table.
@@ -522,6 +538,7 @@ class TextPreprocessingPipeline:
             {
                 "max_tokens": self.chunker.max_tokens,
                 "overlap_tokens": self.chunker.overlap_tokens,
+                "id_column": self.chunker.id_column,
                 "stop_words": sorted(self.stop_words.stop_words),
                 "min_length": self.stop_words.min_length,
             },
@@ -541,7 +558,9 @@ class TextPreprocessingPipeline:
         payload = load_pickle(path)
         return cls(
             chunker=DocumentChunker(
-                max_tokens=int(payload["max_tokens"]), overlap_tokens=int(payload["overlap_tokens"])
+                max_tokens=int(payload["max_tokens"]),
+                overlap_tokens=int(payload["overlap_tokens"]),
+                id_column=str(payload.get("id_column", "doc_id")),
             ),
             stop_words=StopWordFilter(payload["stop_words"], min_length=int(payload["min_length"])),
         )

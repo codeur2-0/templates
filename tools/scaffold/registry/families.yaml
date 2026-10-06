@@ -102,7 +102,7 @@ named_entity_recognition:
   display_name: "Reconnaissance d'entités nommées (NER)"
   modality: text
   task: multiclass
-  notebook_builder: text
+  notebook_builder: nel
   template_dir: named_entity_recognition
   description: >-
     Extraire des entités typées d'un texte (montants, dates, produits, organisations).

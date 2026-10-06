@@ -1,0 +1,39 @@
+# =================================================================================================
+# Modèle : Tagger d'entités spaCy entraîné sur le corpus (tok2vec + transitions), hybride
+# -------------------------------------------------------------------------------------------------
+# Le tagger est un pipeline `spacy.blank("fr")` entraîné **sur le corpus** : le tok2vec et le
+# composant `ner` (un classifieur à transitions) apprennent sur les 720 messages du split
+# d'entraînement, sans aucun poids pré-entraîné, donc sans dépendance réseau. C'est le seul modèle
+# du projet capable de généraliser au-delà du vocabulaire vu : les surfaces réservées des splits
+# d'évaluation ne peuvent pas être retrouvées par une liste, mais une partie est retrouvée par la
+# *forme* des noms — et l'écart est mesuré. Le modèle servi est hybride (`algorithm: hybrid`) : le
+# tagger décide, la couche de règles corrobore et comble les trous. Les règles n'apportent rien en
+# F1 sur ce corpus (le tagger les couvre), et c'est publié ; en revanche elles donnent à chaque
+# mention une **provenance** et une **confiance** — le taux de recouvrement entre le span prédit
+# et la couche de règles, dont la précision est mesurée par niveau dans le rapport d'évaluation.
+# Un tagger à transitions n'expose pas de probabilité par mention : publier une fausse probabilité
+# serait pire que publier une mesure de corroboration documentée.
+#
+# Alternatives considérées : `gazetteer` : la couche de règles seule (motifs déclarés + surfaces vues au train), sans apprentissage — le plancher explicable, mesuré sur le même split de test., `tagger` : le tagger seul, sans règles ; l'écart avec l'hybride est publié (il est nul en F1 macro sur ce corpus)., Modèle pré-entraîné téléchargé (`fr_core_news_md`) : hors périmètre — le projet n'autorise aucune dépendance réseau à l'exécution., Modèle à base de transformeurs (`camembert-base`) : hors périmètre pour la même raison, et 719 messages d'entraînement ne justifient pas l'empreinte mémoire..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.training=...
+# =================================================================================================
+
+name: "Tagger d'entités spaCy entraîné sur le corpus (tok2vec + transitions), hybride"
+algorithm: hybrid
+class: SpacyEntityTagger
+task: multiclass
+supports_proba: false
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `SpacyEntityTagger(params=...)` (voir src/models/model.py).
+params:
+  training:
+    dropout: 0.2
+    shuffle: true
+
+# --- options spécifiques à la stack `spacy` ---------------------------------------
+text_column: text

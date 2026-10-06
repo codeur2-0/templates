@@ -18,10 +18,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 #: Modules de construction connus, indexés par ``family.notebook_builder``.
 #: ``tabular`` sert de repli : une famille sans builder dédié garde un squelette exécutable.
-BUILDERS = ("tabular", "text", "text_classification", "image", "platform")
+BUILDERS = ("tabular", "text", "text_classification", "nel", "image", "platform")
 
 #: Familles dont le builder existe réellement (les autres retombent sur ``tabular``).
-IMPLEMENTED = ("tabular", "text", "text_classification")
+IMPLEMENTED = ("tabular", "text", "text_classification", "nel")
 
 
 def build_notebooks(
@@ -42,6 +42,7 @@ def build_notebooks(
         The list of written notebook paths.
     """
     from tools.scaffold.notebooks import (
+        nel,
         tabular,
         text,
         text_classification,
@@ -55,6 +56,7 @@ def build_notebooks(
         "tabular": tabular.build_all,
         "text": text.build_all,
         "text_classification": text_classification.build_all,
+        "nel": nel.build_all,
     }[requested]
     return builder(context, destination)
 

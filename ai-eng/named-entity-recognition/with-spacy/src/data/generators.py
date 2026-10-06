@@ -1,0 +1,538 @@
+"""Générateur synthétique du corpus de reconnaissance d'entités nommées.
+
+Un corpus synthétique de 1 200 messages de service client annotés au niveau du caractère : cinq
+types d'entités (produit, référence de commande, montant, date, transporteur), 4 454 mentions,
+soit 3,7 mentions par message, aucun message sans entité par construction. Chaque message est
+écrit par un gabarit à slots : les surfaces annotées sont enregistrées au moment de l'écriture,
+elles ne sont pas retrouvées après coup. Deux styles rédactionnels se partagent le corpus — 55 %
+de messages rédigés (« CMD-1234 », « 89,90 € », « 12 mars 2025 ») et 45 % de messages abrégés («
+cmd 1234 », « 89.90 EUR », « 12/03/2025 »). Les surfaces de produits et de transporteurs des
+splits d'évaluation sont **réservées** : 7,8 % des mentions portent un nom de produit ou de
+transporteur jamais vu à l'entraînement, et cette part est publiée dans les métadonnées. Les
+distracteurs sont **déclarés** : familles de produits, villes, numéros de facture, années seules
+apparaissent dans les textes et ne sont jamais annotés. Le découpage (train / val / calibration /
+test) est stratifié par style et écrit dans le corpus.
+
+Le corpus est écrit par **gabarits à slots**, et chaque slot dont le nom est un type d'entité est
+annoté **au moment de l'écriture** : les décalages de caractères ne sont pas retrouvés après coup par
+une expression régulière, ils sont la trace exacte de ce qui a été écrit. C'est ce qui rend le corpus
+utilisable comme vérité terrain plutôt que comme approximation.
+
+Trois décisions structurent la difficulté de la tâche :
+
+* les surfaces de produits et de transporteurs des splits d'évaluation sont **réservées** : elles
+  n'apparaissent jamais à l'entraînement, donc une liste apprise ne peut pas les retrouver. Les
+  montants et les dates, eux, restent reconnaissables par leur *forme* — c'est l'écart entre les
+  deux familles de types que le projet publie ;
+* les **distracteurs sont déclarés** : familles de produits (« le casque »), villes, numéros de
+  facture et années seules apparaissent dans les textes et ne sont jamais annotés. Un modèle qui
+  surligne tous les noms communs du domaine se trompe, et la couche de règles le montre ;
+* deux styles rédactionnels coexistent (``redige`` et ``abrege``) : « CMD-1234 » devient
+  « cmd 1234 », « 89,90 € » devient « 89.90 EUR », « 12 mars 2025 » devient « 12/03/2025 ». Un modèle
+  qui n'a appris qu'une écriture en rate la moitié — la ventilation par style est publiée.
+
+Le découpage (``train`` / ``val`` / ``calibration`` / ``test``) est **stratifié par style** et écrit
+dans le corpus : deux exécutions à graine fixée produisent les mêmes lignes au bit près, et le test ne
+sert qu'une fois. Tout est semé, rien n'est téléchargé, aucune donnée personnelle n'est utilisée.
+"""
+
+from __future__ import annotations
+
+import random
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from src.data.generator_base import BaseCorpusGenerator, GeneratedCorpus
+from src.data.vocabulary import (
+    CANAUX,
+    FAMILLES,
+    LABELS,
+    MOIS,
+    PART_RESERVEE,
+    PRODUITS,
+    PRODUITS_RESERVES,
+    RESERVED_DRAW,
+    SPLIT_SHARES,
+    STYLES,
+    STYLE_SHARES,
+    TEMPLATES_ABREGE,
+    TEMPLATES_REDIGE,
+    TRANSPORTEURS,
+    TRANSPORTEURS_RESERVES,
+    VILLES,
+    vocabulary_report,
+)
+from src.preprocessing.transformers import tokenize
+from src.utils.config_access import as_mapping
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+#: Slots des gabarits qui ne sont pas des entités : ils restent littéraux dans les textes.
+LITERAL_SLOTS: tuple[str, ...] = ("numero", "ville")
+
+#: Nombre maximal d'entités par message : les gabarits en portent entre trois et cinq.
+MAX_ENTITIES_PER_DOCUMENT: int = 5
+
+
+@dataclass(frozen=True, slots=True)
+class _Slot:
+    """One rendered slot: the surface, its label and whether it is reserved for evaluation."""
+
+    name: str
+    surface: str
+    holdout: bool
+
+
+class _MessageBuilder:
+    """Assemble a message while keeping the exact trace of the annotated spans.
+
+    Le rendu est **séquentiel** : chaque fragment écrit avance un curseur, et un slot annoté
+    enregistre ``(start, end)`` avant d'écrire sa surface. Les décalages ne sont donc jamais
+    recalculés, et un texte qui contiendrait deux fois la même surface reste correctement annoté.
+    """
+
+    def __init__(self) -> None:
+        """Start an empty message."""
+        self.parts: list[str] = []
+        self.spans: list[dict[str, Any]] = []
+        self.cursor = 0
+
+    def literal(self, text: str) -> None:
+        """Append a literal fragment (never annotated)."""
+        self.parts.append(text)
+        self.cursor += len(text)
+
+    def entity(self, surface: str, label: str, *, holdout: bool) -> None:
+        """Append an annotated surface, recording its character offsets."""
+        start = self.cursor
+        self.parts.append(surface)
+        self.cursor += len(surface)
+        self.spans.append(
+            {
+                "start": start,
+                "end": self.cursor,
+                "label": label,
+                "surface": surface,
+                "holdout": holdout,
+            }
+        )
+
+    def text(self) -> str:
+        """Return the assembled text."""
+        return "".join(self.parts)
+
+    def render(self, template: str, values: Mapping[str, _Slot]) -> list[dict[str, Any]]:
+        """Render a template, annotating the slots that name an entity type.
+
+        Seuls les slots dont le nom est un **type d'entité** sont annotés : ``{numero}`` et
+        ``{ville}`` sont recopiés littéralement. Un numéro de facture n'est pas une référence de
+        commande, et une ville n'appartient pas à la taxonomie du projet — ce sont des distracteurs
+        *déclarés*, donc mesurables.
+
+        Args:
+            template: Template holding ``{slot}`` markers.
+            values: Slot name to rendered slot mapping.
+
+        Returns:
+            The annotated spans of the message, in reading order.
+        """
+        remaining = template
+        while "{" in remaining:
+            before, _, rest = remaining.partition("{")
+            slot_name, _, after = rest.partition("}")
+            self.literal(before)
+            slot = values[slot_name]
+            if slot_name in LABELS:
+                self.entity(slot.surface, slot_name, holdout=slot.holdout)
+            else:
+                self.literal(slot.surface)
+            remaining = after
+        self.literal(remaining)
+        return list(self.spans)
+
+
+@dataclass(slots=True)
+class SyntheticEntityCorpusGenerator(BaseCorpusGenerator):
+    """Generate the annotated message corpus, its splits and its metadata.
+
+    Attributes:
+        dataset_name: Name used in logs and artefacts.
+        n_documents: Target number of messages.
+        seed: Reproducibility seed.
+        reference_date: Reception date of the first message (dates are drawn backwards).
+        split_shares: Share of each split (stratified per style).
+        style_shares: Share of each editorial style.
+        part_reservee: Share of evaluation mentions that may use a reserved surface.
+        reserved_draw: Probability of drawing a reserved surface when the line is allowed to.
+        random_state: Seed generator, created in :meth:`__post_init__`.
+    """
+
+    dataset_name: str = "sav_messages"
+    n_documents: int = 1200
+    seed: int = 42
+    reference_date: date = date(2025, 3, 3)
+    split_shares: dict[str, float] = field(default_factory=lambda: dict(SPLIT_SHARES), repr=False)
+    style_shares: dict[str, float] = field(default_factory=lambda: dict(STYLE_SHARES), repr=False)
+    part_reservee: float = PART_RESERVEE
+    reserved_draw: float = RESERVED_DRAW
+    random_state: random.Random = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Seed the generator and validate the declared shares."""
+        self.random_state = random.Random(self.seed)
+        for name, shares in (("style", self.style_shares), ("split", self.split_shares)):
+            total = float(sum(shares.values()))
+            if abs(total - 1.0) > 1e-6:
+                msg = f"{name} shares must sum to 1, got {total:.4f} ({shares})"
+                raise ValueError(msg)
+        if not 0.0 <= self.part_reservee <= 1.0:
+            msg = f"part_reservee must be a probability, got {self.part_reservee}"
+            raise ValueError(msg)
+        smallest = min(len(TEMPLATES_REDIGE), len(TEMPLATES_ABREGE))
+        if self.n_documents < smallest * 4:
+            msg = (
+                f"n_documents must be at least {smallest * 4} so that every template is drawn "
+                f"several times per split, got {self.n_documents}"
+            )
+            raise ValueError(msg)
+
+    @classmethod
+    def from_config(cls, config: Any, *, seed: int | None = None) -> SyntheticEntityCorpusGenerator:
+        """Build the generator from the ``data`` node of the configuration.
+
+        Args:
+            config: ``data`` configuration node (``seed``, ``n_samples`` and the ``corpus``
+                sub-node are read).
+            seed: Optional seed override.
+
+        Returns:
+            The configured generator.
+        """
+        settings = as_mapping(config)
+        corpus = as_mapping(settings.get("corpus"))
+        return cls(
+            dataset_name=str(settings.get("dataset_name", "sav_messages")),
+            n_documents=int(settings.get("n_samples", 1200)),
+            seed=int(seed if seed is not None else settings.get("seed", 42)),
+            reference_date=_parse_date(corpus.get("reference_date")) or date(2025, 3, 3),
+            split_shares=dict(corpus.get("split_shares") or SPLIT_SHARES),
+            style_shares=dict(corpus.get("style_shares") or STYLE_SHARES),
+            part_reservee=float(corpus.get("part_reservee", PART_RESERVEE)),
+            reserved_draw=float(corpus.get("reserved_draw", RESERVED_DRAW)),
+        )
+
+    # ------------------------------------------------------------------ génération ---------
+    def generate(self) -> GeneratedCorpus:
+        """Generate the messages, the annotated spans and the metadata.
+
+        Returns:
+            The :class:`GeneratedCorpus`, whose ``queries`` table carries the **annotations**: one
+            row per entity to find (``msg_id``, ``start``, ``end``, ``label``, ``surface``,
+            ``holdout``). A NER corpus is two tables, and the second one is the supervision.
+        """
+        documents, spans = self._tables()
+        metadata = self._metadata(documents, spans)
+        logger.info(
+            "Corpus '{}' generated | {} messages | {} entités | {} types | splits {}",
+            self.dataset_name,
+            len(documents),
+            len(spans),
+            spans["label"].nunique(),
+            documents["split"].value_counts().to_dict(),
+        )
+        return GeneratedCorpus(documents=documents, queries=spans, metadata=metadata)
+
+    def _tables(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Build the two tables of the corpus: messages and annotations."""
+        styles = self._style_sequence()
+        splits = self._split_sequence(styles)
+        rows: list[dict[str, Any]] = []
+        annotations: list[dict[str, Any]] = []
+        for index, (style, split) in enumerate(zip(styles, splits, strict=True)):
+            message_id = f"MSG-{index + 1:04d}"
+            builder = _MessageBuilder()
+            template = self.random_state.choice(
+                TEMPLATES_REDIGE if style == "redige" else TEMPLATES_ABREGE
+            )
+            spans = builder.render(template, self._slot_values(style, split))
+            for span in spans:
+                annotations.append({"msg_id": message_id, **span})
+            text = builder.text()
+            rows.append(
+                {
+                    "msg_id": message_id,
+                    "text": text,
+                    "canal": self._canal(style),
+                    "style": style,
+                    "n_entities": len(spans),
+                    "n_tokens": len(tokenize(text)),
+                    "received_at": self._timestamp(index),
+                    "split": split,
+                }
+            )
+        documents = pd.DataFrame(rows)
+        # Le contrat Pandera déclare un vrai ``datetime64[ns]`` : une colonne d'objets ``date``
+        # passerait le test à l'écriture puis échouerait à la relecture du Parquet.
+        documents["received_at"] = pd.to_datetime(documents["received_at"]).astype("datetime64[ns]")
+        documents["n_entities"] = documents["n_entities"].astype("int64")
+        documents["n_tokens"] = documents["n_tokens"].astype("int64")
+        spans_frame = pd.DataFrame(annotations).astype(
+            {"msg_id": "string", "start": "int64", "end": "int64", "label": "string"}
+        )
+        return documents, spans_frame
+
+    # ------------------------------------------------------------------ tirages ------------
+    def _style_sequence(self) -> list[str]:
+        """Return the editorial style of every message, in order."""
+        counts = _largest_remainder(self.n_documents, self.style_shares)
+        sequence = [style for style, count in counts.items() for _ in range(count)]
+        self.random_state.shuffle(sequence)
+        return sequence
+
+    def _split_sequence(self, styles: Sequence[str]) -> list[str]:
+        """Return the split of every message, stratified by style."""
+        assignment: list[str] = [""] * len(styles)
+        for style in self.style_shares:
+            indexes = [index for index, value in enumerate(styles) if value == style]
+            counts = _largest_remainder(len(indexes), self.split_shares)
+            names = [split for split, count in counts.items() for _ in range(count)]
+            self.random_state.shuffle(names)
+            for index, name in zip(indexes, names, strict=True):
+                assignment[index] = name
+        return assignment
+
+    def _canal(self, style: str) -> str:
+        """Return the arrival channel (``chat`` writes briefly, ``courrier`` at length)."""
+        if style == "abrege":
+            return "chat" if self.random_state.random() < 0.7 else "email"
+        return "courrier" if self.random_state.random() < 0.2 else "formulaire"
+
+    def _timestamp(self, index: int) -> date:
+        """Return the reception date of one message (six months of history)."""
+        return self.reference_date - timedelta(
+            days=int(index * 0.15) + self.random_state.randint(0, 2)
+        )
+
+    def _slot_values(self, style: str, split: str) -> dict[str, _Slot]:
+        """Draw the slot surfaces of one message."""
+        reserved_allowed = split != "train" and self.random_state.random() < self.part_reservee
+        produit, produit_holdout = self._draw_produit(style, reserved_allowed)
+        transporteur, transporteur_holdout = self._draw_transporteur(style, reserved_allowed)
+        return {
+            "commande": _Slot("commande", self._commande_reference(style), False),
+            "produit": _Slot("produit", produit, produit_holdout),
+            "transporteur": _Slot(
+                "transporteur", transporteur, transporteur_holdout
+            ),
+            "montant": _Slot("montant", self._montant(style), False),
+            "date": _Slot("date", self._date(style), False),
+            "numero": _Slot("numero", f"{self.random_state.randint(1000, 9999)}", False),
+            "ville": _Slot("ville", self.random_state.choice(VILLES), False),
+        }
+
+    def _draw_produit(self, style: str, reserved_allowed: bool) -> tuple[str, bool]:
+        """Draw a product surface: full name when redacted, shortened when abbreviated."""
+        position = 0 if style == "redige" else 1
+        if reserved_allowed and self.random_state.random() < self.reserved_draw:
+            return self.random_state.choice(PRODUITS_RESERVES)[position], True
+        return self.random_state.choice(PRODUITS)[position], False
+
+    def _draw_transporteur(self, style: str, reserved_allowed: bool) -> tuple[str, bool]:
+        """Draw a carrier surface (lowercase in the abbreviated style)."""
+        if reserved_allowed and self.random_state.random() < self.reserved_draw:
+            surface, holdout = self.random_state.choice(TRANSPORTEURS_RESERVES), True
+        else:
+            surface, holdout = self.random_state.choice(TRANSPORTEURS), False
+        return (surface if style == "redige" else surface.lower()), holdout
+
+    def _commande_reference(self, style: str) -> str:
+        """Return an order reference: ``CMD-1234`` when redacted, ``cmd 1234`` when abbreviated."""
+        number = self.random_state.randint(1000, 9999)
+        return f"CMD-{number}" if style == "redige" else f"cmd {number}"
+
+    def _montant(self, style: str) -> str:
+        """Return an amount in euro, written differently in each style."""
+        units = self.random_state.randint(9, 999)
+        cents = self.random_state.choice(["00", "50", "90", "99"])
+        if style == "redige":
+            if self.random_state.random() < 0.12:
+                thousands, rest = divmod(units, 1000)
+                return f"{thousands}\u00a0{rest:03d},{cents}\u00a0€"
+            return f"{units},{cents}\u00a0€"
+        if self.random_state.random() < 0.3:
+            return f"{units} euros"
+        return f"{units}.{cents} EUR"
+
+    def _date(self, style: str) -> str:
+        """Return a date: ``12 mars 2025`` when redacted, ``12/03/2025`` when abbreviated."""
+        day, month = self.random_state.randint(1, 28), self.random_state.randint(1, 12)
+        if style == "redige":
+            return f"{day} {MOIS[month - 1]} 2025"
+        return f"{day:02d}/{month:02d}/2025"
+
+    # ------------------------------------------------------------------ métadonnées --------
+    def _metadata(self, documents: pd.DataFrame, spans: pd.DataFrame) -> dict[str, Any]:
+        """Describe the corpus, including the references a reader must know before reading a score.
+
+        Deux références sont publiées avec les données, parce qu'elles situent les scores :
+
+        * le **plancher trivial** vaut zéro : un modèle qui n'annote rien obtient une F1 de zéro
+          (par convention, l'absence totale de prédiction n'est pas une précision parfaite) ;
+        * la **mémorisation des surfaces** : part des mentions d'évaluation dont la surface annotée
+          existe déjà, pour le même type, dans le train. Elle vaut 1,0 pour les montants et les dates
+          (leur *forme* se répète) et tombe pour les produits et les transporteurs — c'est la part
+          que seule une liste apprise peut couvrir, et la raison d'être des surfaces réservées.
+        """
+        counts = spans["label"].value_counts().to_dict()
+        per_message = documents["n_entities"]
+        return {
+            "dataset_name": self.dataset_name,
+            "seed": self.seed,
+            "n_documents": int(len(documents)),
+            "n_entities": int(len(spans)),
+            "labels": list(LABELS),
+            "entity_counts": {str(label): int(counts.get(label, 0)) for label in LABELS},
+            "entities_per_document": {
+                "mean": round(float(per_message.mean()), 3),
+                "median": float(per_message.median()),
+                "min": int(per_message.min()),
+                "max": int(per_message.max()),
+                "documents_without_entity": int((per_message == 0).sum()),
+            },
+            "tokens_per_document": {
+                "mean": round(float(documents["n_tokens"].mean()), 2),
+                "median": float(documents["n_tokens"].median()),
+                "min": int(documents["n_tokens"].min()),
+                "max": int(documents["n_tokens"].max()),
+            },
+            "style_shares": {
+                name: round(float((documents["style"] == name).mean()), 4) for name in STYLES
+            },
+            "canal_shares": {
+                name: round(float((documents["canal"] == name).mean()), 4) for name in CANAUX
+            },
+            "split_sizes": {str(key): int(value) for key, value in documents["split"].value_counts().items()},
+            "holdout": {
+                "part_reservee": self.part_reservee,
+                "reserved_draw": self.reserved_draw,
+                "share": round(float(spans["holdout"].mean()), 4),
+                "per_label": {
+                    str(label): round(float(group["holdout"].mean()), 4)
+                    for label, group in spans.groupby("label", observed=True)
+                },
+                "reserved_products": list(vocabulary_report()["reserved_products"]),
+                "reserved_carriers": list(vocabulary_report()["reserved_carriers"]),
+                "definition": (
+                    "Surfaces réservées aux splits d'évaluation : un nom de produit ou de "
+                    "transporteur absent du train ne peut pas être retrouvé par une liste apprise, "
+                    "alors qu'un montant ou une date inédits restent reconnaissables par leur forme."
+                ),
+            },
+            "distractors": {
+                "families": list(FAMILLES),
+                "definition": (
+                    "Familles de produits, villes, numéros de facture et années seules : présents "
+                    "dans les textes, jamais annotés, donc jamais récompensés."
+                ),
+                "cities": list(VILLES),
+                "literal_slots": list(LITERAL_SLOTS),
+            },
+            "surface_memorisation": self._memorisation(documents, spans),
+            "trivial_floor": {
+                "rule": "aucune entité prédite",
+                "entity_f1": 0.0,
+                "definition": (
+                    "Un modèle qui n'annote rien ne produit aucune prédiction : sa F1 est nulle par "
+                    "convention, et c'est le niveau au-dessous duquel tout score est une régression."
+                ),
+            },
+            "vocabulary": vocabulary_report(),
+        }
+
+    @staticmethod
+    def _memorisation(documents: pd.DataFrame, spans: pd.DataFrame) -> dict[str, Any]:
+        """Measure how much of the evaluation annotations repeat a training surface.
+
+        Args:
+            documents: Message table (``msg_id``, ``split``).
+            spans: Annotation table.
+
+        Returns:
+            Per label, the share of evaluation mentions whose surface was already annotated for the
+            same label in the training split.
+        """
+        split_of = dict(zip(documents["msg_id"], documents["split"], strict=True))
+        annotated = spans.assign(split=spans["msg_id"].map(split_of))
+        train = annotated[annotated["split"] == "train"]
+        seen: dict[str, set[str]] = {
+            label: {str(surface).casefold() for surface in train.loc[train["label"] == label, "surface"]}
+            for label in LABELS
+        }
+        report: dict[str, Any] = {
+            "definition": (
+                "Part des mentions dont la surface annotée existe déjà, pour le même type, dans le "
+                "train : c'est ce qu'un modèle à base de liste peut couvrir, et rien de plus."
+            )
+        }
+        for split in ("val", "test"):
+            subset = annotated[annotated["split"] == split]
+            report[split] = {
+                str(label): round(
+                    float(
+                        subset.loc[subset["label"] == label, "surface"]
+                        .map(lambda surface: str(surface).casefold() in seen[label])
+                        .mean()
+                    ),
+                    4,
+                )
+                for label in LABELS
+            }
+        return report
+
+
+def _largest_remainder(total: int, shares: Mapping[str, float]) -> dict[str, int]:
+    """Split ``total`` across ``shares`` with the largest remainder method.
+
+    Args:
+        total: Number of rows to distribute.
+        shares: Target share of each group (summing to one).
+
+    Returns:
+        The integer count of each group, summing to ``total``.
+    """
+    exact = {name: total * share for name, share in shares.items()}
+    counts = {name: int(np.floor(value)) for name, value in exact.items()}
+    missing = total - sum(counts.values())
+    order = sorted(exact, key=lambda name: (-(exact[name] - np.floor(exact[name])), name))
+    for name in order[:missing]:
+        counts[name] += 1
+    return counts
+
+
+def _parse_date(value: Any) -> date | None:
+    """Parse an ISO date (``YYYY-MM-DD``) coming from the configuration.
+
+    Args:
+        value: Raw configuration value (``str``, ``date`` or ``None``).
+
+    Returns:
+        The parsed date, or ``None`` when the value is absent or unreadable.
+    """
+    if isinstance(value, date):
+        return value
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        logger.warning("Unreadable reference_date '{}': falling back to the declared default", value)
+        return None
+
+
+__all__ = ["MAX_ENTITIES_PER_DOCUMENT", "SyntheticEntityCorpusGenerator"]
