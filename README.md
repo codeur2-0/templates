@@ -14,9 +14,9 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**31 projets** — 25 sur sept familles tabulaires (sections 1.1 à 1.7) et 6 sur les trois familles
-texte `ai-eng/rag` (section 1.8), `ai-eng/question-answering` (section 1.9) et `ai-eng/embeddings`
-(section 1.10) — tous verts dans
+**33 projets** — 25 sur sept familles tabulaires (sections 1.1 à 1.7) et 8 sur les quatre familles
+texte `ai-eng/rag` (section 1.8), `ai-eng/question-answering` (section 1.9), `ai-eng/embeddings`
+(section 1.10) et `ai-eng/text-classification` (section 1.11) — tous verts dans
 `tools/verify.py` (lint, formatage, typage, tests, six notebooks exécutés, pipeline complet
 `data → train → evaluate → predict`).
 
@@ -415,6 +415,48 @@ autres écritures d'un fait, et la suite de tests l'affirme pour **toutes** les 
 pré-entraîné, aucun téléchargement, aucun appel réseau : l'index est appris sur le corpus, à graine
 fixée, et le `n_components` publié est celui que la SVD a réellement produit, pas celui demandé.
 
+### 1.11 `ai-eng/text-classification` — routage de tickets de support, deux stacks
+
+Quatrième cas d'usage texte, et le plus proche d'un besoin de service : **attribuer** un ticket à son
+catégorie. Le corpus synthétique compte 1 200 tickets, six catégories (facturation, livraison,
+produit défectueux, remboursement, compte client et une classe « autre » sans vocabulaire propre,
+12 % du corpus) et trois styles rédactionnels : 50 % des tickets emploient le vocabulaire de leur
+catégorie, 30 % reformulent la même demande sans ce vocabulaire, 20 % ajoutent une politesse et une
+signature partagées par toutes les classes. La priorité déclarée par le client est tirée
+**indépendamment** du libellé : c'est un distracteur déclaré, mesuré par un test de raccourci. Enfin
+chaque pool de formulations est coupé en deux, deux tournures par couple (classe, style) étant
+réservées aux splits d'évaluation : une F1 élevée ne peut pas venir d'un gabarit mémorisé.
+
+| Projet | Stack | Modèle | F1 macro (test) | Exactitude | Kappa | ECE | F1 canonique / paraphrase | Latence p95 | Ajustement |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-tfidf_classifier`](ai-eng/text-classification/with-tfidf_classifier) | scikit-learn (TF-IDF, classification de texte) | régression logistique multinomiale sur TF-IDF | **0,8408** | **0,8531** | **0,8217** | 0,2363 | 0,9262 / 0,7352 | **0,78 ms** | 0,4 s |
+| [`with-transformers`](ai-eng/text-classification/with-transformers) | Hugging Face Transformers (entraîné sur le corpus) | encodeur BERT minuscule (2 couches, 344 582 paramètres) | 0,7942 | 0,7853 | 0,7426 | **0,2099** | 0,7892 / **0,8285** | 2,22 ms | ≈ 150 s |
+
+Les deux projets partagent le corpus, les six classes, le découpage (719 / 243 / 61 / 177 tickets) et
+le seuil contractuel (`macro_f1 >= 0,70`) : l'écart entre les deux colonnes est donc un résultat, pas
+un artefact de protocole. Le classifieur lexical apprend un poids par terme et par classe, expose ses
+poids — chaque décision se relit terme à terme — et reste la meilleure moyenne du dépôt sur ce
+corpus (0,8408). La variante neuronale apprend son vocabulaire WordPiece et ses poids **sur le
+train** : pré-entraînement masqué sans aucun libellé, puis affinage supervisé avec
+`class_weight='balanced'` ; aucun poids pré-entraîné n'est téléchargé, l'artefact est un `model.pt`
+(joblib + JSON, aucun pickle Hugging Face) et l'explication d'une décision est une occlusion (le
+terme affiché est retiré du texte, la baisse de probabilité est publiée).
+
+**Lecture honnête** : la moyenne reste au lexical, mais le partage est instructif. Sur les tickets
+écrits avec le vocabulaire de leur catégorie, le TF-IDF écrase l'encodeur (0,9262 contre 0,7892) ;
+sur les **paraphrases**, l'encodeur gagne de 0,09 (0,8285 contre 0,7352) — un modèle contextuel ne
+dépend plus des mots de la catégorie, et c'est précisément ce que la famille mesure. La même grille
+d'architectures, mesurée sur le split de validation (719 tickets d'entraînement), départage les trois
+modèles neuronaux : encodeur à deux couches **0,8022**, moyenne des vecteurs de termes 0,7455,
+encodeur à quatre couches 0,0559 — cette dernière ne décolle pas, sur aucun des réglages testés
+(zéro à cinq époques de masquage, taux d'apprentissage de 0,005 à 0,03), et le projet le publie au
+lieu de le retirer. Le facteur décisif n'est donc pas la profondeur mais le **régime
+d'entraînement** : un encodeur initialisé au hasard diverge au taux d'apprentissage qui fait
+converger un sac d'embeddings, et les réglages gagnants de la grille sont devenus les défauts de la
+stack. Coût assumé : trois secondes d'ajustement pour le sac d'embeddings (~18 000 paramètres)
+contre environ deux minutes et demie pour l'encodeur servi (344 582 paramètres, mesuré entre 136 s et
+150 s selon la charge de la machine).
+
 ---
 
 ## 2. Démarrage rapide (cinq commandes)
@@ -603,11 +645,12 @@ python -m tools.verify data-science/classification/with-pytorch
 État au dernier passage : **25/25 projets tabulaires conformes** (ruff check, ruff format, mypy
 strict, 4 235 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les
 tests de leur couche tâche —, 150 notebooks exécutés, `python -m src.main mode=all` de bout en
-bout) et **6/6 projets `ai-eng` conformes** : `rag/with-tfidf` (85,4 s, 107 tests),
+bout) et **8/8 projets `ai-eng` conformes** : `rag/with-tfidf` (85,4 s, 107 tests),
 `rag/with-langchain` (168,3 s, 112 tests), `question-answering/with-tfidf` (56,1 s, 107 tests),
 `question-answering/with-langchain` (90,5 s, 112 tests), `embeddings/with-embedding` (42,9 s,
-109 tests) et `embeddings/with-tfidf` (38,5 s, 107 tests) — mêmes six notebooks et même pipeline
-complet. Chaque projet est rejoué intégralement — lint, typage, tests, exécution des six notebooks
+109 tests), `embeddings/with-tfidf` (38,5 s, 107 tests), `text-classification/with-tfidf_classifier`
+(41,8 s, 121 tests) et `text-classification/with-transformers` (1 056,1 s, 127 tests — l'encodeur
+s'entraîne dans les notebooks, d'où la durée) — mêmes six notebooks et même pipeline complet. Chaque projet est rejoué intégralement — lint, typage, tests, exécution des six notebooks
 et pipeline complet — avant d'être considéré comme livré.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
@@ -631,14 +674,14 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 ## 7. Feuille de route
 
 État du générateur : `registry/families.yaml` déclare **29 familles** et `registry/stacks.yaml`
-**20 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
-`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval}/`,
-`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering,embedding_pipeline}/`
-et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,tfidf,langchain,embedding}/` sont
-écrites et vérifiées : les **sept familles tabulaires**, la **famille RAG** (section 1.8), la
-**famille questions-réponses** (section 1.9) et la **famille d'index d'embeddings** (section 1.10)
-sont livrées — six projets `ai-eng`, tous mesurés sur un corpus synthétique et un split de test
-dédié. Ce qui reste, par ordre de valeur pédagogique :
+**21 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
+`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval,text_multiclass}/`,
+`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering,embedding_pipeline,text_classification}/`
+et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,tfidf,tfidf_classifier,langchain,embedding,transformers}/`
+sont écrites et vérifiées : les **sept familles tabulaires**, la **famille RAG** (section 1.8), la
+**famille questions-réponses** (section 1.9), la **famille d'index d'embeddings** (section 1.10) et
+la **famille de classification de texte** (section 1.11) sont livrées — huit projets `ai-eng`, tous
+mesurés sur un corpus synthétique et un split de test dédié. Ce qui reste, par ordre de valeur pédagogique :
 
 1. **Stacks tabulaires déclarées, pas encore livrées** — `clustering` et `anomaly_detection` en
    PyTorch et TensorFlow (auto-encodeurs), `recommendation` en PyTorch (modèle à deux tours),
@@ -646,18 +689,18 @@ dédié. Ce qui reste, par ordre de valeur pédagogique :
    manifeste par stack et, comme pour la prévision, des notebooks paramétrés par stack
    (`extras.notebook_<famille>`) : les commentaires chiffrés d'un notebook doivent parler de la
    stack réellement mesurée.
-2. **Suite du périmètre ai-eng et nlp** — la modalité texte, la tâche `retrieval` et les familles
-   `retrieval_augmented_generation`, `question_answering` et `embedding_pipeline` sont en place
-   (sections 1.8 à 1.10) : la suite réutilise ces couches. Restent `ai-eng/` (agents : Deepagents,
-   Strands, CrewAI ; Transformers ; serving FastAPI) et `nlp/` (classification de texte, NER avec
-   spaCy, résumé, fine-tuning LLM). La famille `agent_tools` réutilise `modality/text/` +
-   `task/retrieval/` comme l'a fait `embedding_pipeline` ; `nlp/` ajoute ses propres couches
-   `family/`.
+2. **Suite du périmètre ai-eng et nlp** — la modalité texte, les tâches `retrieval` et
+   `text_multiclass` et les familles `retrieval_augmented_generation`, `question_answering`,
+   `embedding_pipeline` et `text_classification` sont en place (sections 1.8 à 1.11) : la suite
+   réutilise ces couches. Restent `ai-eng/` (agents : Deepagents, Strands, CrewAI ; serving FastAPI),
+   `nlp/` (NER avec spaCy, résumé, fine-tuning LLM) et les familles `summarization`, `llm_finetuning`
+   et `agent_tools` — cette dernière réutilise `modality/text/` + `task/retrieval/` comme l'a fait
+   `embedding_pipeline`.
 3. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
    GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
    `computer-vision/`. Chacune demande une nouvelle couche `modality/` (loaders, pré-traitement,
    pipelines, tests) en plus des couches `family/` et `task/`.
-4. **Stacks déjà déclarées, non implémentées** — `spacy`, `transformers`, `duckdb`, `pandas`,
+4. **Stacks déjà déclarées, non implémentées** — `spacy`, `duckdb`, `pandas`,
    `prefect`, `mlflow`, `fastapi`, `jinja2`, `scipy`, `github-actions`, `pandera` : l'entrée de
    registre existe, le dossier `templates/stack/<clé>/` reste à écrire ; elles serviront `nlp/`,
    `data-eng/`, `mlops/` et le serving.
