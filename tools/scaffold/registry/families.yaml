@@ -91,12 +91,12 @@ text_classification:
   display_name: "Classification de texte"
   modality: text
   task: multiclass
-  notebook_builder: text
+  notebook_builder: text_classification
   template_dir: text_classification
   description: >-
     Classer des documents courts (tickets support, avis clients). Représentations :
     TF-IDF, embeddings, transformers. Métriques : macro-F1, accuracy, matrice de confusion.
-  allowed_stacks: [tfidf, transformers]
+  allowed_stacks: [tfidf_classifier, transformers]
 
 named_entity_recognition:
   display_name: "Reconnaissance d'entités nommées (NER)"

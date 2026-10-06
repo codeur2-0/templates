@@ -1,0 +1,103 @@
+# ==============================================================================================
+# ai-eng / text-classification / with-tfidf
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/text_classification.yaml` (routage de tickets de support).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet, représentation
+# lexicale et point de fonctionnement. Le corpus, les six classes et la métrique principale sont
+# ceux de la famille — c'est ce qui rendra la comparaison avec la variante `with-transformers`
+# honnête, à corpus et à découpage identiques.
+# ==============================================================================================
+
+key: ai-eng-text-classification-tfidf
+title: "Routage de tickets de support par TF-IDF — la référence explicable"
+summary: >-
+  Six catégories de support, 1 200 tickets synthétiques écrits trois fois — vocabulaire de la
+  catégorie, paraphrase, bruit partagé — et une classe « autre » volontairement sans vocabulaire
+  propre. Le classifieur est une régression logistique multinomiale sur TF-IDF : un poids par terme
+  et par classe, donc une décision qui se relit terme à terme et une explication affichable au
+  conseiller. Ce projet est la **référence** de la famille : il chiffre ce qu'un modèle qui lit les
+  mots obtient quand un tiers des tickets ne les emploie pas, publie l'écart entre le segment
+  canonique et le segment paraphrase, et laisse le notebook 04 comparer les trois algorithmes de la
+  stack sur le split de validation.
+
+family: text_classification
+domain: ai-eng
+problem: text-classification
+stack: tfidf_classifier
+project_slug: tickets-routage-tfidf
+package_name: tickets_routage_tfidf
+
+business:
+  # Mesures reproductibles : `make all` puis `make evaluate` (graine 42, 1 200 tickets, split de
+  # test de 177 tickets). La variante `with-transformers` rejouera exactement le même protocole.
+  measured_results:
+    - label: "F1 macro sur le split de test (six classes, chacune pesant pareil)"
+      value: "0,8408"
+    - label: "Exactitude sur le split de test (plancher trivial : 0,2034 ; tirage stratifié : 0,1661)"
+      value: "0,8531"
+    - label: "F1 macro du segment canonique (93 tickets) / du segment paraphrase (52)"
+      value: "0,9262 / 0,7352"
+    - label: "F1 macro du segment bruité (32 tickets : politesse et signature partagées)"
+      value: "0,7487"
+    - label: "Référence « règle à mots-clés » publiée avec le corpus"
+      value: "0,5492"
+    - label: "Kappa de Cohen / exactitude équilibrée"
+      value: "0,8217 / 0,8337"
+    - label: "Écart de calibration (confiance moyenne 0,6168 contre exactitude 0,8531)"
+      value: "0,2363"
+    - label: "Latence p50 / p95 d'une prédiction (TF-IDF, 6 classes)"
+      value: "0,67 ms / 0,78 ms"
+    - label: "Formulations réservées par classe et par style, jamais vues à l'entraînement"
+      value: "2 sur 6"
+
+model:
+  display_name: "Régression logistique multinomiale sur TF-IDF de mots"
+  algorithm: tfidf_logreg
+  rationale: >-
+    Les tickets d'une même catégorie partagent un vocabulaire (« facture », « prélèvement » pour la
+    facturation ; « colis », « livraison » pour la livraison) et unigrammes comme bigrammes suffisent
+    à les séparer. La régression logistique apprend un coefficient par terme et par classe
+    (`class_weight='balanced'`, sinon la classe « autre » — 12 % du corpus — serait sacrifiée au
+    profit des cinq autres), et le modèle expose ses poids : chaque décision peut être expliquée par
+    les trois termes qui l'ont emporté. Sa limite est mesurée, pas supposée : un ticket qui parle de
+    « colis jamais reçu » et un qui parle de « livraison en retard » n'ont aucun terme en commun, et
+    le segment paraphrase existe pour chiffrer ce que cela coûte — c'est la raison d'être de la
+    variante `with-transformers`.
+  params:
+    lexical:
+      mode: tfidf
+      ngram_range: [1, 2]
+      min_df: 2
+      sublinear_tf: true
+    estimator:
+      C: 4.0
+      max_iter: 400
+      class_weight: balanced
+  alternatives:
+    - "`tfidf_nb` (bayésien naïf complémentaire, α = 0,3) : plus rapide et robuste au déséquilibre, mais il suppose les termes indépendants ; il sert de témoin dans le notebook 04."
+    - "`tfidf_centroid` : le centroïde de chaque classe, sans apprentissage de poids — le plancher de la famille."
+    - "Variante `with-transformers` : même corpus, mêmes splits, même évaluation ; l'écart entre les deux variantes est exactement ce qu'un modèle contextualisé apporte sur les paraphrases."
+    - "Fusion des deux variantes (`text_classification` + `transformers` + TF-IDF) : la pratique industrielle quand le lexical garde l'avantage sur les tickets bruités (caractères, références de commande)."
+
+extras:
+  data_conf:
+    corpus:
+      reference_date: "2025-03-03"
+      style_shares:
+        canonique: 0.5
+        paraphrase: 0.3
+        bruite: 0.2
+      split_shares:
+        train: 0.6
+        val: 0.2
+        calibration: 0.05
+        test: 0.15
+      # Formulations réservées aux splits d'évaluation, par couple (classe, style) : sans cette
+      # réserve, un modèle lexical se contenterait de recopier des gabarits mémorisés.
+      phrasing_holdout: 2
+  model_conf:
+    text_column: text
+  root_conf:
+    train:
+      artifacts:
+        model_file: classifier.joblib

@@ -1,0 +1,44 @@
+# =================================================================================================
+# Modèle : Régression logistique multinomiale sur TF-IDF de mots
+# -------------------------------------------------------------------------------------------------
+# Les tickets d'une même catégorie partagent un vocabulaire (« facture », « prélèvement » pour la
+# facturation ; « colis », « livraison » pour la livraison) et unigrammes comme bigrammes
+# suffisent à les séparer. La régression logistique apprend un coefficient par terme et par classe
+# (`class_weight='balanced'`, sinon la classe « autre » — 12 % du corpus — serait sacrifiée au
+# profit des cinq autres), et le modèle expose ses poids : chaque décision peut être expliquée par
+# les trois termes qui l'ont emporté. Sa limite est mesurée, pas supposée : un ticket qui parle de
+# « colis jamais reçu » et un qui parle de « livraison en retard » n'ont aucun terme en commun, et
+# le segment paraphrase existe pour chiffrer ce que cela coûte — c'est la raison d'être de la
+# variante `with-transformers`.
+#
+# Alternatives considérées : `tfidf_nb` (bayésien naïf complémentaire, α = 0,3) : plus rapide et robuste au déséquilibre, mais il suppose les termes indépendants ; il sert de témoin dans le notebook 04., `tfidf_centroid` : le centroïde de chaque classe, sans apprentissage de poids — le plancher de la famille., Variante `with-transformers` : même corpus, mêmes splits, même évaluation ; l'écart entre les deux variantes est exactement ce qu'un modèle contextualisé apporte sur les paraphrases., Fusion des deux variantes (`text_classification` + `transformers` + TF-IDF) : la pratique industrielle quand le lexical garde l'avantage sur les tickets bruités (caractères, références de commande)..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.lexical=...
+# =================================================================================================
+
+name: "Régression logistique multinomiale sur TF-IDF de mots"
+algorithm: tfidf_logreg
+class: TfidfClassifier
+task: multiclass
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `TfidfClassifier(params=...)` (voir src/models/model.py).
+params:
+  lexical:
+    mode: tfidf
+    ngram_range:
+    - 1
+    - 2
+    min_df: 2
+    sublinear_tf: true
+  estimator:
+    C: 4.0
+    max_iter: 400
+    class_weight: balanced
+
+# --- options spécifiques à la stack `tfidf_classifier` ---------------------------------------
+text_column: text

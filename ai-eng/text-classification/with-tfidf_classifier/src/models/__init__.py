@@ -1,0 +1,41 @@
+"""Couche modèles de la stack **scikit-learn (TF-IDF, classification de texte)**.
+
+Surface publique, importée partout ailleurs dans le projet::
+
+    from src.models import build_model, load_model        # fabrique + rechargement
+    from src.models.contract import BaseTextClassifier    # contrat et objets de retour
+    from src.models.factory import available_algorithms   # classifieurs servis par la stack
+
+Rien en dehors de ce paquet n'importe scikit-learn : le framework reste un détail
+d'implémentation derrière :class:`~src.models.contract.BaseTextClassifier` (inversion de
+dépendance), ce qui permet de comparer deux stacks sur le même corpus sans toucher au pipeline.
+"""
+
+from src.models.base import FitResult, ModelCard
+from src.models.classifier import TfidfClassifier
+from src.models.contract import BaseTextClassifier, TextPrediction, softmax
+from src.models.factory import (
+    ALGORITHMS,
+    AlgorithmSpec,
+    available_algorithms,
+    build_model,
+    describe_algorithm,
+    load_model,
+    supported_tasks,
+)
+
+__all__ = [
+    "ALGORITHMS",
+    "AlgorithmSpec",
+    "BaseTextClassifier",
+    "FitResult",
+    "ModelCard",
+    "TextPrediction",
+    "TfidfClassifier",
+    "available_algorithms",
+    "build_model",
+    "describe_algorithm",
+    "load_model",
+    "softmax",
+    "supported_tasks",
+]

@@ -1,0 +1,208 @@
+# =================================================================================================
+# Famille « text_classification » — router des tickets de support vers le bon service.
+# -------------------------------------------------------------------------------------------------
+# Même modalité que les familles RAG / QA / embedding (texte), mais un objet différent : ici, le
+# texte **est** la cible. Un ticket arrive, il faut lui donner une catégorie — six en tout, dont
+# une classe « autre » minoritaire et sans vocabulaire propre. Le corpus est construit pour que la
+# tâche soit honnête : un tiers des tickets est écrit en **paraphrase**, c'est-à-dire la même
+# demande sans les mots de sa catégorie, et la priorité déclarée par le client est tirée
+# **indépendamment** du libellé (c'est un distracteur, et la suite de tests le vérifie). La
+# métrique principale est une **F1 macro** : sur six classes dont une minoritaire, une exactitude
+# globale récompenserait un modèle qui ignore la classe difficile.
+# =================================================================================================
+
+domain: ai-eng
+problem: text-classification
+modality: text
+family: text_classification
+
+business:
+  persona: >-
+    Responsable du support de niveau 1 d'un distributeur de matériel électronique (300 personnes),
+    avec un ingénieur IA qui outille le routage des tickets et une équipe qualité qui mesure les
+    réclamations mal orientées.
+  context: >-
+    Le support reçoit 1 200 tickets par semaine par quatre canaux (formulaire, courriel, chat,
+    courrier). Aujourd'hui, chaque ticket est lu par un conseiller qui le réaffecte à la main au bon
+    service : facturation, livraison, produit défectueux, remboursement, compte client — ou « autre »
+    quand la demande ne rentre dans aucune case. Le réaiguillage coûte une demi-journée par semaine
+    et, surtout, il se voit : un ticket de remboursement routé vers la livraison repart pour un tour
+    et le client attend deux jours de plus.
+  problem: >-
+    Attribuer automatiquement à chaque ticket sa catégorie de service, **avec une décision
+    explicable** (les termes qui ont pesé), sans jamais sacrifier la classe minoritaire « autre »
+    au profit de l'exactitude globale — et sans dépendre d'un vocabulaire que le client n'emploie
+    pas forcément.
+  inputs: >-
+    Un ticket de support : texte libre reçu par formulaire, courriel, chat ou courrier, avec sa
+    date de réception, sa priorité déclarée par le client et son canal d'arrivée.
+  outputs: >-
+    La catégorie du ticket, la confiance associée, la probabilité de chacune des six classes, les
+    termes qui ont décidé (pour les modèles linéaires) et une table de prédictions jointe aux
+    artefacts, prête à être comparée au routage humain.
+  value: >-
+    Le temps de réaiguillage passe de la demi-journée par semaine à une relecture des seuls tickets
+    douteux, et chaque erreur devient diagnosticable : la ventilation par style montre que le modèle
+    lit les mots plutôt qu'il ne comprend la demande, ce qui est un résultat **publié**, pas caché.
+  success_criteria:
+    - "F1 macro ≥ 0,70 sur le split de test : la métrique principale pèse chaque classe à égalité, donc la classe minoritaire « autre » compte autant que les cinq autres."
+    - "Exactitude ≥ 0,75 : le plancher trivial (classe majoritaire) vaut ≈ 0,20, il est publié à côté des métriques pour que le chiffre soit situé."
+    - "Écart canonique / paraphrase **publié** : l'écart de F1 macro entre les tickets écrits avec le vocabulaire de leur catégorie et ceux qui ne l'utilisent pas mesure la limite de l'approche, et figure dans le rapport."
+    - "La priorité déclarée et le canal d'arrivée sont des distracteurs **déclarés** : leur gain de raccourci reste sous 0,20 par rapport à la meilleure règle constante, et la suite de tests le vérifie à chaque exécution."
+    - "Chaque prédiction est explicable : les modèles servis exposent les termes qui ont décidé, et l'explication ne cite que des termes réellement présents dans le texte."
+    - "Le classifieur est reproductible (graine fixée) et son artefact, rechargé, classe exactement comme le modèle ajusté — probabilités et explications comprises."
+    - "Aucune dépendance réseau à l'exécution : corpus synthétique, vocabulaire appris sur le train, aucune clé d'API."
+    - "Les tournures du test ne sont **jamais** vues à l'entraînement (deux formulations par classe et par style sont réservées aux splits d'évaluation) : la F1 publiée mesure une généralisation, pas une recopie."
+  cadence: "Entraînement mensuel sur les tickets étiquetés ; classification en ligne à la réception."
+  constraints:
+    - "Aucune donnée personnelle : le corpus est synthétique et les textes sont des gabarits paramétrés."
+    - "La classe « autre » ne doit jamais être absorbée : c'est elle qui justifie une métrique macro plutôt qu'une exactitude globale."
+    - "Une réponse n'est acceptée que si elle est explicable : un score sans termes associés n'est pas relu par un conseiller."
+
+data:
+  dataset_name: support_tickets
+  title: "Tickets de support multiclasse, écrits trois fois (canonique, paraphrase, bruité)"
+  description: >-
+    Un corpus synthétique de 1 200 tickets répartis sur six catégories de support — facturation,
+    livraison, produit défectueux, remboursement, compte client et « autre » — et trois styles
+    rédactionnels : cinquante pour cent des tickets réutilisent le vocabulaire de leur catégorie,
+    trente pour cent reformulent la même demande sans ce vocabulaire, vingt pour cent ajoutent une
+    formule de politesse et une signature partagées par toutes les classes. Chaque catégorie a son
+    vocabulaire propre, sauf « autre » : cette classe n'a aucun mot commun par construction, elle
+    est minoritaire (12 %) et c'est pour elle que la métrique principale est une F1 macro. La
+    priorité déclarée par le client est tirée indépendamment du libellé, et le canal d'arrivée
+    n'est pas non plus un signal : ce sont deux distracteurs déclarés, mesurés par un test de
+    raccourci. Enfin, chaque pool de formulations est coupé en deux : quelques tournures par
+    couple (classe, style) sont **réservées aux splits d'évaluation** et n'apparaissent jamais à
+    l'entraînement, sans quoi le score publié mesurerait une recopie de gabarits plutôt qu'une
+    généralisation.
+  n_samples: 1200
+  seed: 42
+  formats: [parquet, csv]
+  target: label
+  id_column: doc_id
+  time_column: published_at
+  columns:
+    - name: doc_id
+      dtype: str
+      role: identifier
+      description: "Identifiant stable du ticket (clé de jointure, jamais une feature)."
+      unique: true
+      checks: { regex: "^TKT-[0-9]{4}$" }
+      generator: { kind: sequence }
+    - name: text
+      dtype: str
+      role: feature
+      description: "Texte du ticket tel qu'il a été reçu, gabarit paramétré par produit et référence de commande."
+      checks: { min_length: 40, max_length: 1200 }
+      generator: { kind: template }
+    - name: label
+      dtype: category
+      role: target
+      description: "Catégorie du ticket : la cible du modèle, celle que le conseiller aurait choisie."
+      checks: { isin: [facturation, livraison, produit_defectueux, remboursement, compte_client, autre] }
+      distribution: "≈ 20 / 20 / 18 / 15 / 15 / 12 % : « autre » est la classe minoritaire"
+      generator: { kind: choice }
+    - name: source
+      dtype: category
+      role: feature
+      description: "Canal d'arrivée du ticket : formulaire, courriel, chat ou courrier."
+      checks: { isin: [formulaire, email, chat, courrier] }
+      distribution: "≈ 45 / 30 / 15 / 10 %"
+      generator: { kind: choice }
+    - name: style
+      dtype: category
+      role: metadata
+      description: "Style rédactionnel : canonique (vocabulaire de la catégorie), paraphrase (la même demande sans ce vocabulaire), bruite (formule de politesse et signature partagées)."
+      checks: { isin: [canonique, paraphrase, bruite] }
+      distribution: "≈ 50 / 30 / 20 %"
+      generator: { kind: choice }
+    - name: priority
+      dtype: category
+      role: metadata
+      description: "Priorité déclarée par le client : un distracteur, tiré indépendamment du libellé."
+      checks: { isin: [basse, normale, haute] }
+      distribution: "≈ 35 / 45 / 20 %"
+      generator: { kind: choice }
+    - name: published_at
+      dtype: datetime
+      role: timestamp
+      description: "Date de réception du ticket (les dates remontent sur six mois)."
+      generator: { kind: date }
+    - name: n_tokens
+      dtype: int
+      role: metadata
+      description: "Nombre de tokens du texte, calculé avec le tokenizer du projet."
+      checks: { ge: 8, le: 400 }
+      generator: { kind: derived }
+    - name: split
+      dtype: category
+      role: group
+      description: "Découpage du corpus (train / val / calibration / test), stratifié par classe et par style au moment de la génération."
+      checks: { isin: [train, val, calibration, test] }
+      distribution: "60 / 20 / 5 / 15 % : le test n'est mesuré qu'une fois"
+      generator: { kind: sequence }
+  insights:
+    - "Chaque catégorie possède un vocabulaire propre et une seule n'en a pas : la classe « autre » est donc structurellement la plus difficile, et c'est elle qu'une métrique macro protège d'un modèle qui l'ignorerait."
+    - "Un tiers des tickets est écrit en paraphrase : sans ce tiers, un modèle de mots-clés suffirait et le projet ne mesurerait rien."
+    - "La priorité déclarée est tirée indépendamment du libellé : un modèle qui l'utiliserait gagnerait de la variance, pas de l'information — le test de raccourci le chiffre."
+    - "Le bruit (formule de politesse, signature) est identique dans toutes les classes : il ne peut pas servir de signal, mais il dégrade les modèles qui le suivent."
+    - "Le découpage est écrit dans le corpus, pas tiré à l'entraînement : deux exécutions mesurent les mêmes lignes de test."
+    - "Les formulations d'évaluation sont réservées : par couple (classe, style), les tournures des splits val, calibration et test sont disjointes de celles du train — un score élevé ne peut donc pas venir d'un gabarit mémorisé."
+  recommendations:
+    - "Comparer les trois algorithmes de la stack (régression logistique, bayésien naïf complémentaire, centroïde) sur le split de validation, puis figer le choix : ce que le bayésien perd mesure ce que la pondération apprise apporte."
+    - "Lire la matrice de confusion avant la F1 : sur six classes, la F1 macro moyenne cache toujours une classe sacrifiée — ici « autre » contre « produit défectueux »."
+    - "Ventiler les métriques par style rédactionnel : c'est la seule lecture qui distingue « lire un mot » de « comprendre une demande »."
+    - "Mesurer la calibration (écart confiance / exactitude) avant de publier un seuil de tri automatique : une confiance de 0,9 qui ne vaut que 0,7 envoie les mauvais tickets en relecture."
+    - "Relire les erreurs les plus confiantes avant de croire une F1 : c'est là que se cachent les gabarits ambigus, pas dans les erreurs de faible confiance."
+  notes:
+    - "Le corpus est déterministe : même graine, mêmes textes, mêmes découpages, mêmes métriques."
+    - "Les tickets sont générés par gabarits paramétrés (produit, référence de commande) : aucune donnée personnelle, aucun texte recopié."
+
+model:
+  display_name: "Régression logistique sur TF-IDF de caractères de mot"
+  algorithm: tfidf_logreg
+  rationale: >-
+    Un vecteur TF-IDF (uni- et bigrammes de mots) suivi d'une régression logistique multinomiale
+    apprend un poids par terme et par classe : la décision s'explique terme à terme, la classe
+    minoritaire est protégée par `class_weight='balanced'`, et l'entraînement comme l'inférence
+    restent instantanés. C'est la référence de la famille, et la référence est **mesurable** : le
+    vocabulaire est appris sur le train, donc le taux de termes hors vocabulaire est publié et la
+    paraphrase est la limite assumée de l'approche.
+  params:
+    lexical:
+      mode: tfidf
+      ngram_range: [1, 2]
+      min_df: 2
+      sublinear_tf: true
+    estimator:
+      C: 4.0
+      max_iter: 400
+      class_weight: balanced
+  alternatives:
+    - "`tfidf_nb` (bayésien naïf complémentaire) : plus rapide, robuste au déséquilibre, mais l'hypothèse d'indépendance des termes est fausse — il sert de témoin dans le notebook 04."
+    - "`tfidf_centroid` (centroïde de classe) : aucun poids appris, donc le plancher honnête de la famille."
+    - "Stack `transformers` : même corpus, mêmes splits, même évaluation — la comparaison chiffre ce qu'un modèle contextualisé apporte sur des paraphrases."
+    - "Modèle de règles à mots-clés : la référence métier publiée avec le corpus (chaque classe a son vocabulaire), meilleure que la classe majoritaire mais aveugle aux paraphrases."
+
+metrics:
+  task: multiclass
+  primary: macro_f1
+  secondary:
+    - accuracy
+    - weighted_f1
+    - balanced_accuracy
+    - macro_precision
+    - macro_recall
+    - cohen_kappa
+    - mean_confidence
+    - expected_calibration_error
+    - latency_p50_ms
+    - latency_p95_ms
+    - coverage
+  baseline: majorite
+  # Le seuil contractuel de la famille, lu par le rapport d'évaluation : la F1 macro du split de
+  # test doit rester au-dessus de 0,70. C'est le critère annoncé dans le README, et il s'applique
+  # aux deux variantes (TF-IDF et transformers), qui partagent corpus et découpage.
+  min_primary: 0.70
+  direction: maximize
