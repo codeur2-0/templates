@@ -29,11 +29,12 @@ package_name: tickets_routage_tfidf
 
 business:
   # Mesures reproductibles : `make all` puis `make evaluate` (graine 42, 1 200 tickets, split de
-  # test de 177 tickets). La variante `with-transformers` rejouera exactement le même protocole.
+  # test de 177 tickets). La variante `with-transformers` rejoue le même protocole et publie l'autre
+  # moitié du résultat : ce qu'un encodeur gagne sur les paraphrases, il le perd sur le canonique.
   measured_results:
     - label: "F1 macro sur le split de test (six classes, chacune pesant pareil)"
       value: "0,8408"
-    - label: "Exactitude sur le split de test (plancher trivial : 0,2034 ; tirage stratifié : 0,1661)"
+    - label: "Exactitude sur le split de test (plancher trivial 0,2034)"
       value: "0,8531"
     - label: "F1 macro du segment canonique (93 tickets) / du segment paraphrase (52)"
       value: "0,9262 / 0,7352"
@@ -61,8 +62,12 @@ model:
     profit des cinq autres), et le modèle expose ses poids : chaque décision peut être expliquée par
     les trois termes qui l'ont emporté. Sa limite est mesurée, pas supposée : un ticket qui parle de
     « colis jamais reçu » et un qui parle de « livraison en retard » n'ont aucun terme en commun, et
-    le segment paraphrase existe pour chiffrer ce que cela coûte — c'est la raison d'être de la
-    variante `with-transformers`.
+    le segment paraphrase existe pour chiffrer ce que cela coûte. La variante `with-transformers` a
+    été construite pour répondre à cette limite, et la réponse est publiée : sur ce corpus, un
+    encodeur appris sur le train réduit l'écart de 0,09 sur les paraphrases (0,8285 contre 0,7352
+    de F1 macro) mais perd 0,14 sur les tickets canoniques (0,7892 contre 0,9262) — au total, le
+    lexical reste devant (0,8408 contre 0,7942 en test), et c'est l'arbitrage que les deux variantes
+    documentent.
   params:
     lexical:
       mode: tfidf
@@ -76,7 +81,7 @@ model:
   alternatives:
     - "`tfidf_nb` (bayésien naïf complémentaire, α = 0,3) : plus rapide et robuste au déséquilibre, mais il suppose les termes indépendants ; il sert de témoin dans le notebook 04."
     - "`tfidf_centroid` : le centroïde de chaque classe, sans apprentissage de poids — le plancher de la famille."
-    - "Variante `with-transformers` : même corpus, mêmes splits, même évaluation ; l'écart entre les deux variantes est exactement ce qu'un modèle contextualisé apporte sur les paraphrases."
+    - "Variante `with-transformers` : même corpus, mêmes splits, même évaluation ; elle mesure ce qu'un modèle neuronal appris **sur le corpus** apporte — un encodeur à deux couches gagne 0,09 de F1 macro sur les paraphrases (0,8285 contre 0,7352) et perd 0,14 sur les tickets canoniques, pour un total de 0,7942 en test contre 0,8408 : le compromis est publié, pas caché."
     - "Fusion des deux variantes (`text_classification` + `transformers` + TF-IDF) : la pratique industrielle quand le lexical garde l'avantage sur les tickets bruités (caractères, références de commande)."
 
 extras:

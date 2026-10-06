@@ -29,6 +29,7 @@ régression, sans en recopier le contenu.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -49,6 +50,14 @@ THRESHOLD_GRID = (0.0, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
 
 #: Exactitude visée sur les tickets routés automatiquement (la cible de service).
 TARGET_AUTOMATION_ACCURACY = 0.95
+
+#: Budget d'époques de la **grille de comparaison** du notebook 04. Le manifeste peut demander
+#: quarante époques pour le modèle servi ; comparer trois architectures neuronales à ce budget
+#: prendrait une vingtaine de minutes sur le corpus complet, pour un notebook qui doit rester
+#: exécutable. La grille tourne donc à budget réduit, et c'est un résultat **en soi** : à budget
+#: réduit, un encodeur n'a pas encore appris ce qu'un sac d'embeddings apprend en une époque. Les
+#: valeurs de référence, elles, sont publiées au budget du manifeste (section suivante).
+COMPARISON_EPOCHS = 10
 
 
 def _labels(context: NotebookContext) -> tuple[str, ...]:
@@ -84,6 +93,45 @@ def _column_values(context: NotebookContext, name: str) -> tuple[str, ...]:
     return ()
 
 
+def _literal(values: Sequence[str]) -> str:
+    """Render a sequence of strings as a Python list literal, one item per line.
+
+    Les six libellés du corpus dépassent la centaine de colonnes sur une seule ligne ; écrits un
+    par ligne, le littéral reste indenté et lisible, exactement comme le ferait un développeur.
+
+    Args:
+        values: Values to render.
+
+    Returns:
+        The list literal (``[]`` when empty).
+    """
+    items = [str(value) for value in values]
+    if not items:
+        return "[]"
+    body = "".join(f"    {item!r},\n" for item in items)
+    return f"[\n{body}]"
+
+
+def _measured_results_source(context: NotebookContext) -> str:
+    """Render the manifest's measured results as a Python list literal, one row per line.
+
+    Une seule ligne pour onze mesures dépasserait la limite de 100 colonnes du projet : le
+    littéral est donc écrit mesure par mesure, exactement comme un développeur l'écrirait à la
+    main, et reste indenté à l'intérieur de la cellule.
+
+    Args:
+        context: Notebook context.
+
+    Returns:
+        The ``REFERENCE_RESULTS`` literal (``[]`` when the manifest declares no measurement).
+    """
+    rows = [(str(item.label), str(item.value)) for item in context.spec.business.measured_results]
+    if not rows:
+        return "[]"
+    body = "".join(f"    ({label!r}, {value!r}),\n" for label, value in rows)
+    return f"[\n{body}]"
+
+
 def _tokens(context: NotebookContext) -> dict[str, str]:
     """Build the substitution table of the classification notebooks.
 
@@ -107,13 +155,18 @@ def _tokens(context: NotebookContext) -> dict[str, str]:
         "__TARGET__": str(spec.data.target or "label"),
         "__REPORT_NAME__": str(artifacts.get("report_file", "evaluation_report.md")),
         "__MODEL_FILE__": str(artifacts.get("model_file", "classifier.joblib")),
-        "__LABELS__": repr(list(_labels(context))),
-        "__STYLES__": repr(list(_column_values(context, "style"))),
+        "__LABELS__": _literal(_labels(context)),
+        "__STYLES__": _literal(_column_values(context, "style")),
         "__THRESHOLDS__": repr(list(THRESHOLD_GRID)),
-        "__MEASURED_RESULTS__": repr(
-            [(str(item.label), str(item.value)) for item in spec.business.measured_results]
-        ),
+        "__MEASURED_RESULTS__": _measured_results_source(context),
         "__TARGET_AUTOMATION__": str(TARGET_AUTOMATION_ACCURACY),
+        "__COMPARISON_EPOCHS__": str(COMPARISON_EPOCHS),
+        # Le budget d'époques n'a de sens que pour une stack entraînée par époques : une stack à
+        # passage unique (TF-IDF, centroïde) reçoit un dictionnaire vide, sinon elle se verrait
+        # passer un paramètre qu'elle ne comprend pas.
+        "__COMPARISON_PARAMS__": (
+            f'{{"epochs": {COMPARISON_EPOCHS}}}' if context.stack.epochs_based else "{}"
+        ),
     }
 
 
@@ -1001,9 +1054,9 @@ def build_04_model_exploration(context: NotebookContext, destination: Path) -> P
         _text(LOAD_CORPUS, context),
         _md(
             "## 2. Les algorithmes de la stack\n\n"
-            "La stack en déclare trois : régression logistique sur TF-IDF, bayésien naïf "
-            "complémentaire, centroïde de classe. Un seul est **servi** (celui du manifeste) ; les "
-            "autres servent de témoins, et c'est leur écart qui donne un sens au choix."
+            f"La stack en déclare trois : {context.stack.candidate_algorithms or 'trois algorithmes'}. "
+            "Un seul est **servi** (celui du manifeste) ; les autres servent de témoins, et c'est "
+            "leur écart qui donne un sens au choix."
         ),
         _text(
             """
@@ -1020,10 +1073,16 @@ print("algorithmes déclarés par le registre de la stack :", sorted(ALGORITHMS)
         _md(
             "## 3. Comparaison sur le split de validation\n\n"
             "Une seule règle : on **choisit** sur `val`, on ne juge jamais sur `test`. Les modèles "
-            "sont montés avec les **défauts du registre** (`params={}`), sinon chaque algorithme "
-            "recevrait les hyper-paramètres d'un autre — la comparaison doit être loyale. Le "
-            "tableau mélange qualité (F1 macro, exactitude, kappa), calibration (ECE), coût "
-            "(latence par ticket) et une lecture métier : le rappel de la classe minoritaire."
+            "sont montés avec les **défauts du registre** — sinon chaque algorithme recevrait les "
+            "hyper-paramètres d'un autre — et ces défauts incluent le taux d'apprentissage **propre "
+            "à chaque architecture** (0,02 pour le sac d'embeddings, 0,005 pour les encodeurs, qui "
+            "divergent au taux du sac). Sur une stack entraînée par époques, seul le **budget "
+            "d'époques** est réduit ici (`params=__COMPARISON_PARAMS__`) pour tenir dans la durée "
+            "d'un notebook : un encodeur qui démarre de zéro n'a pas fini d'apprendre en dix "
+            "époques, et la comparaison le montre — les valeurs du budget du manifeste sont "
+            "imprimées juste après, à partir des mesures publiées du run de référence. Le tableau "
+            "mélange qualité (F1 macro, exactitude, kappa), calibration (ECE), coût (latence par "
+            "ticket) et une lecture métier : le rappel de la classe minoritaire."
         ),
         _text(
             """
@@ -1036,7 +1095,7 @@ validation_truth = VALIDATION[TARGET_COLUMN].astype(str)
 rows = []
 fitted = {}
 for name in algorithms:
-    candidate = build_model(CONFIG, algorithm=name, params={})
+    candidate = build_model(CONFIG, algorithm=name, params=__COMPARISON_PARAMS__)
     started = time.perf_counter()
     candidate.fit(TRAIN, target=TARGET_COLUMN)
     fit_seconds = time.perf_counter() - started
@@ -1070,10 +1129,21 @@ display(comparison)
 
 reference = str(CONFIG.model.algorithm)
 print(f"algorithme servi par le manifeste : {reference}")
+if __COMPARISON_PARAMS__:
+    print(f"budget de la grille : __COMPARISON_EPOCHS__ époques par architecture "
+          f"(le manifeste en demande {CONFIG.train.epochs} pour le modèle servi)")
 for name in comparison.index:
     delta = comparison.loc[name, "F1 macro"] - comparison.loc[reference, "F1 macro"]
     print(f"  {name:16s} F1 macro {comparison.loc[name, 'F1 macro']:.4f} ({delta:+.4f} "
           f"contre le modèle servi)")
+
+# Les valeurs du **budget du manifeste** sont publiées par le manifeste lui-même : les lire ici
+# évite de conclure d'une grille à budget réduit ce qui vaut au budget de référence.
+PUBLISHED_RESULTS = __MEASURED_RESULTS__
+published = [row for row in PUBLISHED_RESULTS if "architecture" in row[0].lower()]
+if published:
+    print("mesures publiées (budget du manifeste) :", published[0][0])
+    print("   ", published[0][1])
 """,
             context,
         ),
@@ -1081,9 +1151,13 @@ for name in comparison.index:
             [
                 "Les trois algorithmes vivent derrière le même contrat : le pipeline ne change pas "
                 "quand l'algorithme change — c'est ce qui rend la comparaison possible.",
-                "Le bayésien naïf suppose les termes indépendants et paie cette hypothèse sur les "
-                "classes qui se ressemblent ; le centroïde n'apprend aucun poids et sert de "
-                "plancher.",
+                context.stack.candidate_note
+                or "Chaque algorithme a ses hypothèses, et c'est leur écart qui donne un sens au "
+                "choix : la qualité seule ne dit pas ce qu'un modèle sait faire.",
+                "Le budget d'entraînement fait partie du résultat : à dix époques, un encodeur "
+                "n'a pas encore appris ce qu'un sac d'embeddings apprend en une — c'est pourquoi "
+                "les valeurs de référence du projet sont publiées au budget du manifeste, juste "
+                "au-dessus, et pas au budget de cette grille.",
                 "Le temps d'ajustement se lit en secondes et la latence en millisecondes par "
                 "ticket : à ces échelles, le choix se fait sur la qualité, pas sur la vitesse.",
             ]
@@ -1397,6 +1471,9 @@ display(pd.Series({key: str(value) for key, value in card.items()}).to_frame("fi
                 "rejouable par quelqu'un d'autre.",
                 "Les métriques sont écrites en JSON : un portail de CI peut les comparer d'un run à "
                 "l'autre sans lire un notebook.",
+                "Le pipeline du notebook écrit `data/raw` avec le corpus de la configuration du "
+                "notebook (__NB_DOCUMENTS__ tickets) : pour relire le corpus de référence, il faut "
+                "le régénérer par `make data`.",
             ]
         ),
         _md(
@@ -1404,7 +1481,31 @@ display(pd.Series({key: str(value) for key, value in card.items()}).to_frame("fi
             "Un artefact qu'on ne recharge pas est un artefact dont on ne sait rien. On vérifie que "
             "le modèle **rechargé** produit les mêmes probabilités qu'un modèle ajusté dans la "
             "session — c'est le test qui garantit que l'inférence ne dépend pas du hasard d'un "
-            "processus."
+            "processus.\n\n"
+            "Comparer l'artefact à un modèle ajusté sur un **autre** corpus ne prouverait rien : "
+            "l'artefact a été produit par le pipeline sur le corpus de la configuration du "
+            "notebook, alors que `data/raw` peut contenir le corpus de référence (1 200 tickets, "
+            "écrit par `make data`). On reconstruit donc le corpus du pipeline — même graine, même "
+            "configuration, donc mêmes textes — et la comparaison porte sur deux chemins de code, "
+            "pas sur deux jeux de données."
+        ),
+        _text(
+            """
+from src.data.generators import SyntheticTicketGenerator
+
+PIPELINE_BUNDLE = SyntheticTicketGenerator.from_config(CONFIG.data, seed=CONFIG.seed).generate()
+PIPELINE_TRAIN = LOADER.split("train", frame=PIPELINE_BUNDLE.documents)
+PIPELINE_VALIDATION = LOADER.split("val", frame=PIPELINE_BUNDLE.documents)
+print(
+    f"corpus du pipeline : {len(PIPELINE_TRAIN)} tickets d'entraînement, "
+    f"{len(PIPELINE_VALIDATION)} en validation"
+)
+print(
+    f"corpus de référence chargé : {len(TRAIN)} / {len(VALIDATION)} "
+    "(c'est celui du notebook 01 ; l'artefact, lui, vient du corpus du pipeline)"
+)
+""",
+            context,
         ),
         _text(
             """
@@ -1415,7 +1516,7 @@ reloaded = load_model(model_path, config=node(CONFIG, "model"))
 print("modèle rechargé :", reloaded.summary())
 
 memory_model = build_model(CONFIG)
-memory_model.fit(TRAIN, target=TARGET_COLUMN)
+memory_model.fit(PIPELINE_TRAIN, target=TARGET_COLUMN)
 
 texts = TEST[TEXT_COLUMN].astype(str).tolist()
 same = np.allclose(memory_model.predict_proba(texts), reloaded.predict_proba(texts), atol=1e-9)
@@ -1444,12 +1545,12 @@ display(
             """
 from src.training.metrics import classification_metrics
 
-validation_truth = VALIDATION[TARGET_COLUMN].astype(str)
+validation_truth = PIPELINE_VALIDATION[TARGET_COLUMN].astype(str)
 second_model = build_model(CONFIG)
-second_model.fit(TRAIN, target=TARGET_COLUMN)
+second_model.fit(PIPELINE_TRAIN, target=TARGET_COLUMN)
 
-first_scores = memory_model.predict_proba(VALIDATION[TEXT_COLUMN].astype(str).tolist())
-second_scores = second_model.predict_proba(VALIDATION[TEXT_COLUMN].astype(str).tolist())
+first_scores = memory_model.predict_proba(PIPELINE_VALIDATION[TEXT_COLUMN].astype(str).tolist())
+second_scores = second_model.predict_proba(PIPELINE_VALIDATION[TEXT_COLUMN].astype(str).tolist())
 first_metrics = classification_metrics(
     validation_truth,
     np.asarray(memory_model.labels)[first_scores.argmax(axis=1)],
@@ -1632,14 +1733,19 @@ plt.show()
             [
                 "Sur le corpus complet, le segment canonique est nettement au-dessus du segment "
                 "paraphrase : le modèle lit un vocabulaire et paie l'absence de ces mots — la "
-                "limite **assumée** de l'approche lexicale, et ce qu'une variante `transformers` "
-                "doit venir chercher.",
+                "limite **assumée** de l'approche lexicale.",
                 "Un écart de signe **inverse** n'est pas une bonne nouvelle : sur un petit segment, "
                 "quelques tickets suffisent à retourner une moyenne. On lit donc toujours l'écart "
                 "avec la taille des segments, jamais seul.",
                 "Le segment bruité se situe entre les deux : la politesse et la signature ne portent "
                 "pas d'information, mais elles diluent le signal — sa F1 se lit avec la longueur du "
                 "segment.",
+                "L'écart canonique / paraphrase est **le** résultat publié de la famille, et il se lit "
+                "dans les deux sens : sur le corpus de référence, la variante `with-transformers` "
+                "(encodeur appris sur le corpus) obtient 0,8285 de F1 macro sur les paraphrases "
+                "contre 0,7352 pour l'approche lexicale — mais 0,7892 sur le canonique contre "
+                "0,9262. Un modèle contextuel ne dépend plus du vocabulaire de sa catégorie ; en "
+                "revanche, il ne bat pas un modèle lexical sur les tournures les plus standardisées.",
             ]
         ),
         _md(
@@ -1749,8 +1855,8 @@ recommendations = [
     "première classe qui souffre quand la distribution des tickets glisse.",
     "Rejouer la ventilation par style après chaque changement de corpus : un écart "
     "canonique / paraphrase qui se réduit est le signe d'un corpus qui s'appauvrit.",
-    "Comparer avec la variante `transformers` sur le même corpus : l'écart de F1 sur le segment "
-    "paraphrase est exactement ce qu'un modèle contextualisé apporte.",
+    "Reporter l'écart entre cette variante et `with-transformers` à chaque réentraînement : il "
+    "mesure si le corpus a grossi au point de justifier un encodeur, au lieu de le supposer.",
     "Relire les erreurs les plus confiantes avant toute mise en production : c'est là que se "
     "cachent les tournures ambiguës, pas dans les erreurs de faible confiance.",
 ]

@@ -459,7 +459,7 @@ Résultats de l'exécution de référence (`make all`, graine 42) :
 | Indicateur | Valeur mesurée |
 | --- | --- |
 | F1 macro sur le split de test (six classes, chacune pesant pareil) | **0,8408** |
-| Exactitude sur le split de test (plancher trivial : 0,2034 ; tirage stratifié : 0,1661) | **0,8531** |
+| Exactitude sur le split de test (plancher trivial 0,2034) | **0,8531** |
 | F1 macro du segment canonique (93 tickets) / du segment paraphrase (52) | **0,9262 / 0,7352** |
 | F1 macro du segment bruité (32 tickets : politesse et signature partagées) | **0,7487** |
 | Référence « règle à mots-clés » publiée avec le corpus | **0,5492** |

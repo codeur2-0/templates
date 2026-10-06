@@ -107,7 +107,9 @@ def test_the_model_card_documents_the_run(
 ) -> None:
     """La fiche de modèle est l'objet que relit un auditeur : elle doit être complète."""
     card = fitted_model.model_card(
-        metrics={"val_macro_f1": 0.5}, artifact="classifier.joblib", notes=["corpus synthétique"]
+        metrics={"val_macro_f1": 0.5},
+        artifact=fitted_model.default_model_file,
+        notes=["corpus synthétique"],
     )
 
     assert card.model_name == type(fitted_model).__name__
@@ -125,10 +127,15 @@ def test_the_model_card_documents_the_run(
 def test_the_artefact_is_written_in_the_directory_it_receives(
     fitted_model: BaseTextClassifier, tmp_path: Path
 ) -> None:
-    """Un dossier reçoit le nom de fichier par défaut : le pipeline n'a pas à le composer."""
+    """Un dossier reçoit le nom de fichier par défaut : le pipeline n'a pas à le composer.
+
+    Le nom vient de la stack (``classifier.joblib`` pour la pile lexicale, ``model.pt`` pour un
+    encodeur) : c'est ``default_model_file``, déclaré par le contrat, qui fait foi ici comme dans
+    ``conf/train/default.yaml``.
+    """
     path = fitted_model.save(tmp_path)
 
-    assert path.name == "classifier.joblib"
+    assert path.name == type(fitted_model).default_model_file
     assert path.exists()
 
 
@@ -136,7 +143,8 @@ def test_the_artefact_reloaded_by_the_factory_is_usable(
     fitted_model: BaseTextClassifier, tmp_path: Path, test_split: pd.DataFrame
 ) -> None:
     """``load_model`` rend un objet qui prédit, explique et se décrit comme l'original."""
-    path = fitted_model.save(tmp_path / "classifier.joblib")
+    suffix = Path(type(fitted_model).default_model_file).suffix
+    path = fitted_model.save(tmp_path / f"renamed{suffix}")
 
     reloaded = load_model(path)
 

@@ -7,8 +7,12 @@ suffisent à les séparer. La régression logistique apprend un coefficient par 
 profit des cinq autres), et le modèle expose ses poids : chaque décision peut être expliquée par
 les trois termes qui l'ont emporté. Sa limite est mesurée, pas supposée : un ticket qui parle de
 « colis jamais reçu » et un qui parle de « livraison en retard » n'ont aucun terme en commun, et
-le segment paraphrase existe pour chiffrer ce que cela coûte — c'est la raison d'être de la
-variante `with-transformers`.
+le segment paraphrase existe pour chiffrer ce que cela coûte. La variante `with-transformers` a
+été construite pour répondre à cette limite, et la réponse est publiée : sur ce corpus, un
+encodeur appris sur le train réduit l'écart de 0,09 sur les paraphrases (0,8285 contre 0,7352 de
+F1 macro) mais perd 0,14 sur les tickets canoniques (0,7892 contre 0,9262) — au total, le
+lexical reste devant (0,8408 contre 0,7942 en test), et c'est l'arbitrage que les deux variantes
+documentent.
 
 La fabrique est le seul endroit où la configuration devient un objet :
 

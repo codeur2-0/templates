@@ -142,8 +142,14 @@ def test_the_callbacks_receive_the_documented_hooks(
 
     _trainer(app_config, callbacks=[spy]).run(documents)
 
-    assert spy.hooks == ["begin", "epoch", "end"]
-    assert spy.logs and "val_macro_f1" in spy.logs[0]
+    # Le contrat est une **séquence**, pas un compte : le dresseur ouvre et ferme le run, et il
+    # émet au moins un événement d'époque. Un modèle à époques (encodeur) émet les siens pendant
+    # `fit`, un estimateur en un coup laisse le dresseur le faire — les deux sont valides, et le
+    # dernier événement porte toujours les métriques de validation, calculées après l'ajustement.
+    assert spy.hooks[0] == "begin"
+    assert spy.hooks[-1] == "end"
+    assert spy.hooks.count("epoch") >= 1
+    assert spy.logs and "val_macro_f1" in spy.logs[-1]
 
 
 def test_the_split_helper_selects_the_rows_of_a_split(
