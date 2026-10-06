@@ -4,7 +4,9 @@
 - **Statut** : design validé, tranches 1, 2, 2b et 3 livrées et vérifiées (`ai-eng/rag/with-{tfidf,langchain}`,
   `ai-eng/question-answering/with-{tfidf,langchain}`, `ai-eng/embeddings/with-{embedding,tfidf}`,
   `ai-eng/text-classification/with-{tfidf_classifier,transformers}` et
-  `ai-eng/named-entity-recognition/with-spacy` conformes dans `tools.verify`), tranches 4 et 5 à venir
+  `ai-eng/named-entity-recognition/with-spacy` conformes dans `tools.verify`), tranche 4 **en cours**
+  (`nlp/summarization` : socle de la couche tâche écrit et testé, stack `seq2seq` et projet à venir),
+  tranche 5 à venir
 - **Branche** : `arena/3402658e-templates`
 - **Périmètre** : point 2 de la feuille de route du README racine — `ai-eng/` (LangChain, RAG,
   Transformers, serving FastAPI) et `nlp/` (spaCy, Transformers). Ce document couvre la couche
@@ -12,8 +14,8 @@
 
 ## 1. Objectif
 
-Le dépôt déclare **29 familles** et **21 stacks** (18 au moment de la rédaction, plus
-`tfidf_classifier`, `embedding` et `spacy`), mais une seule modalité était implémentée au départ
+Le dépôt déclare **29 familles** et **22 stacks** (18 au moment de la rédaction, plus
+`tfidf_classifier`, `embedding`, `spacy` et `seq2seq`), mais une seule modalité était implémentée au départ
 (`modality/tabular/`). Les huit familles texte du registre — `text_classification`,
 `named_entity_recognition`, `summarization`, `question_answering`,
 `retrieval_augmented_generation`, `agent_tools`, `embedding_pipeline`, `llm_finetuning` — n'ont
@@ -138,7 +140,7 @@ templates/
 | 2 | `question_answering` (mutualise `modality/text`, `task/retrieval`, `stack/{tfidf,langchain}`) | **livrée** : `ai-eng/question-answering/with-tfidf` (106 tests, 48,8 s) et `with-langchain` (111 tests, 85,4 s), exact match 0,6212 et F1 0,7381 dans les deux cas |
 | 2b | `embedding_pipeline` (stack `embedding` : hachage + SVD, voisins, fidélité) et `agent_tools` (familles restantes de la modalité texte) | **livrée pour `embedding_pipeline`** : `ai-eng/embeddings/with-embedding` (109 tests, 46,0 s) et `with-tfidf` (107 tests, 39,2 s), recall@5 0,9412 dans les deux cas ; `agent_tools` à venir |
 | 3 | `ai-eng/` : `text_classification` (tfidf, transformers), `named_entity_recognition` (spacy) | **livrée** : `ai-eng/text-classification/with-tfidf_classifier` (121 tests, 41,8 s) et `with-transformers` (127 tests, 1 056,1 s), F1 macro 0,8408 / 0,7942 ; `ai-eng/named-entity-recognition/with-spacy` (101 tests, 153,6 s), F1 entité 0,9340 |
-| 4 | `nlp/` : `summarization`, `llm_finetuning` (transformers, architecture minuscule, poids aléatoires) | à venir |
+| 4 | `nlp/` : `summarization`, `llm_finetuning` (transformers, architecture minuscule, poids aléatoires) | **en cours** : `summarization` — registre (famille re-câblée sur la stack `seq2seq`), contrats Pandera (documents, résumés de référence, faits), loader des trois tables, graphe de phrases, contrat des générateurs, baseline TextRank+MMR et évaluation ROUGE-1/2/L écrits, formatés et testés hors projet ; restent l'évaluateur de fidélité, les pipelines, la stack `seq2seq`, le générateur de la famille, les notebooks et le projet vérifié. `llm_finetuning` à venir |
 | 5 | `mlops/model_serving` (fastapi) au-dessus d'un modèle entraîné | à venir |
 
 ## 7. Tranche 2 — famille `question_answering`

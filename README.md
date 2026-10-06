@@ -672,7 +672,7 @@ tools/
 │   ├── engine.py                 # rendu Jinja2 + post-traitement (ruff format / ruff --fix)
 │   ├── context.py                # contexte de rendu (spec, stack, family, helpers comme wrap())
 │   ├── registry/
-│   │   ├── stacks.yaml           # 21 stacks : dépendances, classe, format du fichier modèle, docs
+│   │   ├── stacks.yaml           # 22 stacks : dépendances, classe, format du fichier modèle, docs
 │   │   └── families.yaml         # familles de problèmes : modalité, tâche, builder de notebooks
 │   ├── defaults/
 │   │   ├── global.yaml           # valeurs par défaut de tous les projets (train, preprocessing…)
@@ -744,7 +744,7 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 ## 7. Feuille de route
 
 État du générateur : `registry/families.yaml` déclare **29 familles** et `registry/stacks.yaml`
-**21 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
+**22 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
 `task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval,text_multiclass,named_entity_recognition}/`,
 `family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering,embedding_pipeline,text_classification,named_entity_recognition}/`
 et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,tfidf,tfidf_classifier,langchain,embedding,transformers,spacy}/`

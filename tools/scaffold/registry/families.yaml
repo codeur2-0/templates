@@ -113,12 +113,13 @@ summarization:
   display_name: "Résumé automatique"
   modality: text
   task: generation
-  notebook_builder: text
+  notebook_builder: summarization
   template_dir: summarization
   description: >-
-    Résumer des documents métier (comptes-rendus, tickets). Baseline extractive (TextRank-like)
-    puis seq2seq. Métriques : ROUGE-1/2/L, compression, couverture.
-  allowed_stacks: [transformers]
+    Résumer des documents métier longs (comptes-rendus d'intervention) en quelques phrases qui
+    gardent les faits saillants. Baseline extractive (TextRank) puis encodeur-décodeur appris sur
+    le corpus. Métriques : ROUGE-1/2/L, compression, couverture des faits, faits non supportés.
+  allowed_stacks: [seq2seq]
 
 question_answering:
   display_name: "Question answering"

@@ -301,6 +301,45 @@ transformers:
     initialisé au hasard diverge à celui qui fait converger un sac d'embeddings, et cette grille est
     un résultat publié, pas un réglage caché.
 
+seq2seq:
+  display_name: Encodeur-décodeur entraîné sur le corpus (résumé)
+  category: deep-learning
+  template_dir: seq2seq
+  class_name: EncoderDecoderSummarizer
+  epochs_based: true
+  supports_proba: false
+  model_file: summarizer.pt
+  dependencies:
+    - "numpy>=1.26"
+    - "pandas>=2.2"
+    - "pyarrow>=15.0"
+    - "scikit-learn>=1.4"
+    - "joblib>=1.3"
+    - "torch>=2.2"
+    - "transformers>=4.40"
+    - "tokenizers>=0.19"
+  docs:
+    - name: "Vaswani et al. (2017), Attention is all you need"
+      url: "https://arxiv.org/abs/1706.03762"
+    - name: "Lewis et al. (2019), BART : dénoising seq2seq pre-training"
+      url: "https://arxiv.org/abs/1910.13461"
+    - name: "Lin (2004), ROUGE : a package for automatic evaluation of summaries"
+      url: "https://aclanthology.org/W04-1013/"
+  notes:
+    - "Aucun poids pré-entraîné n'est téléchargé : le vocabulaire WordPiece partagé par l'encodeur et le décodeur, puis les poids, sont appris sur le split d'entraînement — le seul réglage possible hors ligne, et il est publié dans la fiche de modèle."
+    - "Trois étapes dans `fit` : pré-entraînement dénoising (le résumé de référence est tronqué et bruité, le modèle apprend à le reconstruire), affinage supervisé enseignant-forcé, puis étalonnage de la longueur de sortie sur le split de validation."
+    - "Le décodage est glouton et déterministe (`temperature` n'existe pas ici) : un résumé doit être reproductible ligne à ligne, et le rapport publie le taux de résumés qui atteignent la longueur maximale, signe d'un décodeur qui ne sait pas s'arrêter."
+    - "Deux architectures servies : `transformer_tiny` (2 couches, 128 unités) et une baseline extractive `textrank` qui ne dépend d'aucun apprentissage et sert de plancher publié ; la comparaison est mesurée sur les mêmes lignes de test."
+    - "La troncature, le taux de jetons `[UNK]` et le taux de résumés coupés à `max_output_length` sont publiés : trois raisons de ne pas lire le ROUGE seul."
+  commands:
+    train: "python -m src.main mode=train"
+  candidate_algorithms: "baseline extractive (textrank), encodeur-décodeur à deux couches (transformer_tiny)"
+  candidate_note: >-
+    La baseline extractive ne réécrit rien : elle sélectionne des phrases du document, donc son
+    ROUGE mesure la qualité de la sélection et son texte est toujours fidèle. L'encodeur-décodeur
+    réécrit, donc il peut gagner en concision et perdre en fidélité : les deux mesures sont
+    publiées côte à côte, avec le taux de faits non supportés du second.
+
 langchain:
   display_name: LangChain (LCEL)
   category: ai-engineering
