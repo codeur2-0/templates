@@ -307,7 +307,11 @@ def validate_corpus(
     outside = facts["sentence_index"] >= facts["_n_sentences"]
     if bool(outside.any()):
         offenders = facts.loc[outside, ["fact_id", "doc_id", "sentence_index"]].head(5)
-        msg = f"{int(outside.sum())} fact(s) point outside the sentences of their document: {offenders.to_dict('records')}"
+        detail = offenders.to_dict("records")
+        msg = (
+            f"{int(outside.sum())} fact(s) point outside the sentences "
+            f"of their document: {detail}"
+        )
         raise ValueError(msg)
     facts = facts.drop(columns="_n_sentences")
     return documents, references, facts

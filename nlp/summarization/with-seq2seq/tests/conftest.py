@@ -230,12 +230,23 @@ def fitted_model(
 
 
 @pytest.fixture(scope="session")
-def evaluator(app_config: AppConfig, project_paths: ProjectPaths) -> SummaryEvaluator:
-    """Return the evaluator wired to the real configuration."""
+def evaluator(
+    lead_model: LeadSummarizer,
+    app_config: AppConfig,
+    project_paths: ProjectPaths,
+) -> SummaryEvaluator:
+    """Return the evaluator of the extractive floor, wired to the real configuration.
+
+    La stratégie mesurée est la **baseline extractive** : elle ne coûte rien à ajuster, donc une
+    fixture de session peut la garder en cache, alors que le chemin exercé (génération, ROUGE,
+    fidélité, ventilation par segment, verdict publié) est celui de la production. Un test qui veut
+    comparer plusieurs stratégies construit son propre évaluateur, avec l'argument ``baselines``.
+    """
     model_node = node(app_config, "model")
     return SummaryEvaluator(
+        lead_model,
         config=app_config.model_dump(),
-        metrics_config=app_config.metrics,
+        metrics_config=app_config.metrics.model_dump(),
         paths=project_paths,
         text_column=str(model_node.get("text_column", "text")),
         id_column=str(app_config.data.id_column or "doc_id"),
@@ -290,13 +301,17 @@ def published_predictions(
 
 @pytest.fixture(scope="session")
 def evaluation(
-    lead_model: LeadSummarizer,
     evaluator: SummaryEvaluator,
     test_split: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame],
 ) -> SummaryEvaluation:
-    """Score the extractive floor on the test split (the cheapest measurable strategy)."""
+    """Measure the extractive floor on the test split, as ``mode=evaluate`` does.
+
+    L'évaluation passe par :meth:`~src.evaluation.evaluator.SummaryEvaluator.evaluate`, et non par
+    ``score_model`` : c'est la seule façon d'obtenir le verdict, la ventilation par segment, les
+    références publiées et la trame d'erreurs — c'est-à-dire ce que le rapport publie.
+    """
     documents, references_frame, facts_frame = test_split
-    return evaluator.score_model(lead_model, documents, references_frame, facts_frame)
+    return evaluator.evaluate(documents, references_frame, facts_frame)
 
 
 @pytest.fixture(scope="session")
@@ -304,18 +319,21 @@ def training_outcome(
     lead_model: LeadSummarizer,
     app_config: AppConfig,
     tmp_path_factory: pytest.TempPathFactory,
-    train_split: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame],
+    documents: pd.DataFrame,
+    references: pd.DataFrame,
+    facts: pd.DataFrame,
 ) -> SummaryTrainingOutcome:
     """Run the trainer on the extractive floor, as ``mode=train`` does.
 
     Le modèle entraîné est la baseline extractive : elle ne coûte rien, donc la fixture reste
-    rapide, alors que le chemin exercé (découpage, comparaison, verdict, persistance) est celui du
-    projet. Le corpus entier lui est donné : c'est le *trainer* qui découpe, comme en production.
+    rapide, alors que le chemin exercé (découpage, comparaison sur la validation, verdict,
+    persistance) est celui du projet. Le corpus **entier** lui est donné : c'est le *trainer* qui
+    découpe train et validation, comme en production — lui donner directement le train laisserait
+    ``validation_metrics`` vide, et une fixture qui ne mesure rien ne prouve rien.
     """
     root = tmp_path_factory.mktemp("training")
     paths = ProjectPaths.from_root(root)
     paths.ensure()
-    train_documents, train_references, train_facts = train_split
     trainer = SummaryTrainer(
         lead_model,
         config=app_config.train.model_dump(),
@@ -327,7 +345,7 @@ def training_outcome(
         comparison_documents=8,
         baseline=lead_model,
     )
-    return trainer.run(train_documents, train_references, train_facts)
+    return trainer.run(documents, references, facts)
 
 
 @pytest.fixture

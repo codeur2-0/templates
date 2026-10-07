@@ -7,18 +7,18 @@ la reproductibilité du projet :
 
 * les identifiants des jetons spéciaux ne bougent jamais (un décalage d'un seul identifiant produit
   un modèle qui apprend un bruit parfaitement reproductible) ;
-* deux apprentissages sur le même corpus donnent le **même** vocabulaire, aussi bien dans le même
-  processus qu'entre deux processus — c'est la raison pour laquelle l'apprentissage est écrit dans le
-  projet plutôt que délégué à l'apprenti de la bibliothèque ;
-* la taille cible est respectée, et un mot hors corpus reste lisible en pièces plutôt qu'effacé en un
-  seul ``[UNK]``.
+* deux apprentissages sur le même corpus donnent le **même** vocabulaire, aussi bien dans le
+  même processus qu'entre deux processus — c'est la raison pour laquelle l'apprentissage est
+  écrit dans le projet plutôt que délégué à l'apprenti de la bibliothèque ;
+* la taille cible est respectée, et un mot hors corpus reste lisible en pièces plutôt
+  qu'effacé en un seul ``[UNK]``.
 """
 
 from __future__ import annotations
 
 import pandas as pd
 
-from src.models.tokenizer import SPECIAL_TOKENS, SharedWordPieceTokenizer
+from src.models.tokenizer import SPECIAL_TOKENS, TOKENIZER_VERSION, SharedWordPieceTokenizer
 
 
 def _learner(vocab_size: int = 320) -> SharedWordPieceTokenizer:
@@ -34,7 +34,7 @@ def test_the_special_ids_never_move() -> None:
 
 
 def test_two_learners_learn_the_same_vocabulary(documents: pd.DataFrame) -> None:
-    """Deux apprentissages sur le même corpus produisent le **même** vocabulaire, identifiants inclus.
+    """Deux apprentissages sur le même corpus produisent le **même** vocabulaire, ids inclus.
 
     C'est le test de non-régression de la reproductibilité : l'apprenti de ``tokenizers`` départage
     les fréquences égales par l'ordre d'une table de hachage, donc deux vocabulaires de même taille
@@ -68,7 +68,9 @@ def test_a_word_of_the_corpus_becomes_a_single_piece(documents: pd.DataFrame) ->
     tokenizer = _learner(vocab_size=600).fit(corpus)
     words = [word for text in corpus for word in str(text).lower().split() if len(word) > 2]
     word = str(pd.Series(words).value_counts().idxmax())
-    assert word in tokenizer.tokenizer.get_vocab()
+    encoder = tokenizer.tokenizer
+    assert encoder is not None
+    assert word in encoder.get_vocab()
 
 
 def test_decoding_drops_the_special_tokens() -> None:
@@ -109,8 +111,8 @@ def test_the_tokenizer_publishes_how_it_was_learned(documents: pd.DataFrame) -> 
     """La fiche modèle reçoit la version de l'apprenti, ses fusions et le taux d'inconnus."""
     corpus = documents["text"].head(20).tolist()
     tokenizer = _learner().fit(corpus)
-    assert tokenizer.meta["version"] == "shared-wordpiece-v2"
-    assert tokenizer.meta["words"] > 0
+    assert tokenizer.meta["version"] == TOKENIZER_VERSION
+    assert tokenizer.meta["segments"] > 0
     assert tokenizer.meta["merges"] >= 0
     # Le taux publié est celui du corpus d'apprentissage, mesuré par le tokenizer lui-même.
     assert tokenizer.meta["unknown_rate"] == tokenizer.unknown_rate(corpus)

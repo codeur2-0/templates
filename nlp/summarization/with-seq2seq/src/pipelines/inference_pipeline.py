@@ -58,7 +58,7 @@ class InferencePipeline(BasePipeline):
             self.config.predict.input, n_samples=int(self.config.predict.n_samples)
         )
         predictions = predictor.predict(frame)
-        path = predictor.save(predictions, path=self.config.predict.output)
+        path = predictor.save(predictions, path=self._output_path())
         summary = predictor.summary_frame(predictions)
         logger.info("Prédictions écrites : {}", path)
         return PipelineResult(
@@ -68,6 +68,20 @@ class InferencePipeline(BasePipeline):
             payload=predictions,
             messages=self._notes(predictions, summary),
         )
+
+    def _output_path(self) -> Path:
+        """Resolve the published prediction table against the project layout.
+
+        ``predict.output`` est écrit relativement dans la configuration (``artifacts/reports/…``) :
+        le résoudre contre la racine du projet, et non contre le répertoire courant, est ce qui
+        permet d'exécuter ce pipeline depuis un bac à sable (notebooks, tests) sans écrire dans les
+        artefacts publiés du dépôt.
+
+        Returns:
+            The absolute destination of the prediction table.
+        """
+        output = Path(str(self.config.predict.output))
+        return output if output.is_absolute() else self.paths.root / output
 
     def _load_model(self) -> BaseTextGenerator:
         """Reload the artefact written by the training pipeline.

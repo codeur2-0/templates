@@ -148,7 +148,9 @@ class EvaluationPipeline(BasePipeline):
           afficherait deux lignes « transformer_tiny » aux chiffres différents dans le même
           rapport ;
         * **une référence que la fabrique ne sait pas construire est ignorée avec un
-          avertissement**, jamais au prix de l'évaluation entière.
+          avertissement**, jamais au prix de l'évaluation entière ; un même algorithme enregistré
+          sous deux noms (``baseline_extractive`` et ``lead``) n'est mesuré qu'une fois, sinon le
+          rapport publie deux lignes identiques avec un effectif doublé.
 
         Args:
             train: ``(documents, references)`` du split d'entraînement, servis à l'ajustement.
@@ -171,6 +173,11 @@ class EvaluationPipeline(BasePipeline):
         model_node = node(self.config, "model")
         for name in model_node.get("strategies_to_compare", []) or []:
             candidates.setdefault(str(name), str(name))
+        # Un **algorithme** ne se mesure qu'une fois, même s'il est enregistré sous plusieurs noms
+        # (`baseline_extractive` est le nom publié de `lead`) : sans ce garde-fou, la même stratégie
+        # apparaît deux fois dans le rapport, avec un effectif doublé et deux lignes identiques — de
+        # quoi faire douter du reste du tableau.
+        measured: dict[str, str] = {}
         for name, algorithm in candidates.items():
             if algorithm in {"aucune", "none", ""}:
                 continue
@@ -180,6 +187,13 @@ class EvaluationPipeline(BasePipeline):
                     algorithm,
                 )
                 continue
+            if algorithm in measured:
+                logger.info(
+                    "Référence '{}' déjà mesurée sous le nom '{}' : pas de doublon",
+                    algorithm,
+                    measured[algorithm],
+                )
+                continue
             try:
                 candidate = build_model(self.config, algorithm=algorithm)
             except (ValueError, KeyError) as exc:
@@ -187,6 +201,7 @@ class EvaluationPipeline(BasePipeline):
                 continue
             candidate.fit(train_documents, train_references, validation=validation_pair)
             baselines[name] = candidate
+            measured[algorithm] = name
         logger.info(
             "Références ajustées sur {} document(s) de train : {}",
             len(train_documents),

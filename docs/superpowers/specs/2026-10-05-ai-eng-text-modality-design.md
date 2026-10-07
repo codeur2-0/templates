@@ -1,12 +1,12 @@
 # Modalité `text` et familles `ai-eng` — RAG, QA, embeddings, agents
 
 - **Date** : 2026-10-05
-- **Statut** : design validé, tranches 1, 2, 2b et 3 livrées et vérifiées (`ai-eng/rag/with-{tfidf,langchain}`,
+- **Statut** : design validé, tranches 1, 2, 2b, 3 et **4a** livrées et vérifiées (`ai-eng/rag/with-{tfidf,langchain}`,
   `ai-eng/question-answering/with-{tfidf,langchain}`, `ai-eng/embeddings/with-{embedding,tfidf}`,
-  `ai-eng/text-classification/with-{tfidf_classifier,transformers}` et
-  `ai-eng/named-entity-recognition/with-spacy` conformes dans `tools.verify`), tranche 4 **en cours**
-  (`nlp/summarization` : socle de la couche tâche écrit et testé, stack `seq2seq` et projet à venir),
-  tranche 5 à venir
+  `ai-eng/text-classification/with-{tfidf_classifier,transformers}`,
+  `ai-eng/named-entity-recognition/with-spacy` et `nlp/summarization/with-seq2seq` conformes dans
+  `tools.verify`) ; la fin de la tranche 4 (`llm_finetuning`) et la tranche 5 (`mlops/model_serving`,
+  fastapi) restent à livrer
 - **Branche** : `arena/3402658e-templates`
 - **Périmètre** : point 2 de la feuille de route du README racine — `ai-eng/` (LangChain, RAG,
   Transformers, serving FastAPI) et `nlp/` (spaCy, Transformers). Ce document couvre la couche
@@ -140,7 +140,9 @@ templates/
 | 2 | `question_answering` (mutualise `modality/text`, `task/retrieval`, `stack/{tfidf,langchain}`) | **livrée** : `ai-eng/question-answering/with-tfidf` (106 tests, 48,8 s) et `with-langchain` (111 tests, 85,4 s), exact match 0,6212 et F1 0,7381 dans les deux cas |
 | 2b | `embedding_pipeline` (stack `embedding` : hachage + SVD, voisins, fidélité) et `agent_tools` (familles restantes de la modalité texte) | **livrée pour `embedding_pipeline`** : `ai-eng/embeddings/with-embedding` (109 tests, 46,0 s) et `with-tfidf` (107 tests, 39,2 s), recall@5 0,9412 dans les deux cas ; `agent_tools` à venir |
 | 3 | `ai-eng/` : `text_classification` (tfidf, transformers), `named_entity_recognition` (spacy) | **livrée** : `ai-eng/text-classification/with-tfidf_classifier` (121 tests, 41,8 s) et `with-transformers` (127 tests, 1 056,1 s), F1 macro 0,8408 / 0,7942 ; `ai-eng/named-entity-recognition/with-spacy` (101 tests, 153,6 s), F1 entité 0,9340 |
-| 4 | `nlp/` : `summarization`, `llm_finetuning` (transformers, architecture minuscule, poids aléatoires) | **en cours** : `summarization` — registre (famille re-câblée sur la stack `seq2seq`), contrats Pandera (documents, résumés de référence, faits), loader des trois tables, graphe de phrases, contrat des générateurs, baseline TextRank+MMR et évaluation ROUGE-1/2/L écrits, formatés et testés hors projet ; restent l'évaluateur de fidélité, les pipelines, la stack `seq2seq`, le générateur de la famille, les notebooks et le projet vérifié. `llm_finetuning` à venir |
+| 4a | `nlp/summarization` (stack `seq2seq`, notebooks, projet vérifié) | **livrée** : `nlp/summarization/with-seq2seq` — 600 comptes-rendus, 5 036 faits annotés, encodeur-décodeur appris sur le corpus (1 151 599 paramètres, vocabulaire WordPiece v3), ROUGE-1 de test **0,6958** pour un seuil de 0,45 et une référence extractive à 0,4351, couverture des faits **0,6145** / précision 0,9794 ; 50 tests, six notebooks en 108 s, `mode=all` vert |
+| 4b | `nlp/llm_finetuning` (transformers, architecture minuscule, poids aléatoires) | à venir |
+| 5 | `mlops/model_serving` (fastapi) au-dessus d'un modèle entraîné, et `agent_tools` (Deepagents, Strands, CrewAI) | à venir |
 | 5 | `mlops/model_serving` (fastapi) au-dessus d'un modèle entraîné | à venir |
 
 ## 7. Tranche 2 — famille `question_answering`
@@ -236,3 +238,46 @@ impose une métrique principale qui ne dépende pas du rang du premier candidat 
 | `abstention_balanced_accuracy` | 0,7563 | 0,6555 | publiée avec la couverture (0,94 / 0,88) |
 | Index | 128 dimensions, 0,16 Mo, fidélité 1,0000 | 138 termes, index creux | le sujet de la famille |
 | Latence p95 | 4,64 ms | 7,44 ms | cache de requêtes armé (512 entrées) |
+
+## 8. Tranche 4a — famille `summarization`
+
+Le contrat de cette famille est double : **ressembler** à la référence (ROUGE) et **être vrai**
+(couverture des faits saillants, valeurs non supportées). Un résumé peut gagner la première métrique
+en recopiant le document, et perdre la seconde dès qu'il invente une durée : les deux colonnes sont
+donc publiées côte à côte, avec un plancher mesuré (résumé vide 0,0), une référence extractive
+publiée (`lead`, 0,4351) et un second extractif (`textrank`, 0,3888) sur les **mêmes** 60 documents
+de test.
+
+### Ce que la tranche a appris (et corrigé)
+
+1. **Un pré-traitement mal découpé coûte la moitié d'une métrique de fidélité.** Le vocabulaire
+   WordPiece appris par `tokenizers` découpait `P-12`, `CBL-045` et `NIV-202` en pièces inconnues :
+   le modèle ne *pouvait pas* recopier un identifiant, et la couverture plafonnait à 0,3358. Le
+   vocabulaire est désormais appris **par le projet** sur la découpe de `BertPreTokenizer` (les
+   signes de ponctuation sont des segments à part entière, recollés au décodage par
+   `rejoin_punctuation`), et la couverture est passée à **0,6145** sur le même corpus, à
+   architecture constante. La leçon publiée : quand une métrique de fidélité stagne, le premier
+   endroit à regarder n'est pas le modèle mais le tokenizer.
+2. **Un apprenti de bibliothèque n'est pas reproductible.** `WordPieceTrainer` départage les
+   fréquences égales par l'ordre d'une table de hachage interne (Rust) : deux exécutions sur le même
+   corpus donnent deux vocabulaires de même taille mais de composition différente, donc deux modèles
+   non comparables. L'apprenti du projet (fusions par fréquence, ex æquo départagés par ordre
+   lexicographique, identifiants attribués par ordre alphabétique après les jetons spéciaux) rend
+   deux exécutions identiques, y compris entre deux processus — ce qu'un test vérifie.
+3. **Un réglage écrit à plat était écrasé en silence.** `model.params.units` et
+   `model.params.vocab_size` étaient ignorés dès que le registre déclarait le même nom dans un
+   bloc : un notebook qui réduisait l'architecture tournait en réalité sur l'architecture de
+   référence. `_effective_params` possède désormais une table de propriété des clés, et
+   `tests/test_factory.py` verrouille la précédence des quatre sources (registre → plat → bloc →
+   surcharge).
+4. **Une référence mesurée deux fois fausse l'effectif.** `baseline_extractive` étant l'alias
+   publié de `lead`, la même stratégie était évaluée deux fois : la table publiée affichait deux
+   lignes identiques avec `n_documents` doublé. Un même **algorithme** n'est mesuré qu'une fois,
+   quel que soit le nombre de noms sous lesquels il est enregistré.
+
+### Ce que la tranche laisse ouvert
+
+- `piece` (couverture 0,0000) et `action` (0,1667) : la recopie d'un identifiant rare reste le
+  poste le plus rentable, et il est publié dans le rapport.
+- 58,3 % des résumés atteignent leur borne de 90 tokens : le critère d'arrêt du décodeur mérite un
+  réglage (longueur cible par phrase plutôt que budget global).

@@ -14,10 +14,10 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**34 projets** — 25 sur sept familles tabulaires (sections 1.1 à 1.7) et 9 sur les cinq familles
+**35 projets** — 25 sur sept familles tabulaires (sections 1.1 à 1.7) et 10 sur les six familles
 texte `ai-eng/rag` (section 1.8), `ai-eng/question-answering` (section 1.9), `ai-eng/embeddings`
-(section 1.10), `ai-eng/text-classification` (section 1.11) et `ai-eng/named-entity-recognition`
-(section 1.12) — tous verts dans
+(section 1.10), `ai-eng/text-classification` (section 1.11), `ai-eng/named-entity-recognition`
+(section 1.12) et `nlp/summarization` (section 1.13) — tous verts dans
 `tools/verify.py` (lint, formatage, typage, tests, six notebooks exécutés, pipeline complet
 `data → train → evaluate → predict`).
 
@@ -516,6 +516,71 @@ la suite de tests vérifie. Coût assumé : environ une minute et demie d'entra�
 fige pas) ; les six notebooks tournent sur un corpus réduit (320 messages) et re-dérivent leurs
 propres chiffres.
 
+### 1.13 `nlp/summarization` — résumé de comptes-rendus d'intervention, encodeur-décodeur appris
+
+Sixième famille texte, et la première du répertoire `nlp/` : il ne s'agit plus de **retrouver**
+l'information (RAG, questions-réponses, entités) mais de la **produire**. 600 comptes-rendus
+d'intervention techniques synthétiques (126,8 tokens par document pour 52,5 par résumé de référence,
+sept types de faits annotés : équipement, symptôme, cause, action, pièce, durée, statut — 5 036 faits
+dont 3 573 saillants) doivent être résumés en quelques phrases **fidèles** : un résumé fluide qui
+oublie la durée d'une intervention est un mauvais résumé, et il est compté comme tel. Les résumés de
+référence sont écrits à partir des faits saillants avec **50 % de réécriture** — recopier les
+phrases du document ne suffit donc pas — et le split est 360 / 120 / 60 / 60.
+
+| Projet | Stack | Modèle | ROUGE-1 F1 (test) | ROUGE-2 | ROUGE-L | Couverture des faits | Précision | Compression | Ajustement |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-seq2seq`](nlp/summarization/with-seq2seq) | `seq2seq` (PyTorch, encodeur-décodeur écrit dans le projet) | **encodeur-décodeur transformer** : 2 couches, 128 unités, 4 têtes, vocabulaire WordPiece appris sur le train | **0,6958** | 0,5496 | 0,4616 | **0,6145** | 0,9794 | 0,4304 | 170 s (12 époques) |
+
+Trois références mesurées sur les **mêmes 60 documents de test** donnent son sens au 0,6958 : le
+résumé vide vaut **0,0** (un score défini, pas une absence), la baseline extractive publiée `lead`
+(les premières phrases du document, même budget) atteint **0,4351** avec une couverture de 0,4915, et
+`textrank` (graphe de phrases + diversification MMR) **0,3888** pour 0,3862. Le modèle apporte donc
+**+0,2607** de ROUGE-1 sur la référence publiée, et **+0,1230** de couverture des faits sur la
+meilleure extractive — deux gains qui ne vont pas de soi : un générateur peut améliorer la forme
+sans améliorer la fidélité, et le rapport publie les deux colonnes côte à côte pour que ce cas soit
+visible.
+
+**Lecture honnête.** (1) La fidélité est mesurée, pas espérée : **0,6145** de couverture en moyenne,
+et seulement **8,3 %** des résumés contiennent une valeur absente du document (précision 0,9794 —
+c'est la seule métrique du projet qui compte les inventions). (2) Le type de fait qui résiste est
+`piece` (couverture **0,0000**), suivi de `action` (0,1667) : ce ne sont pas des types marginaux
+(37,2 % des documents portent un fait de type `piece`, 94,5 % un fait de type `action`), mais les
+seuls dont la valeur est un identifiant consommé (`CRR-241`) ou une opération parmi douze — le modèle
+a appris les gabarits fréquents (`cause` 0,9167, `statut` 0,8167) et pas encore la recopie d'un
+identifiant rare. C'est le premier poste à travailler,
+et il est publié tel quel. (3) Le budget de longueur se lit avec le ROUGE : **58,3 %** des résumés
+atteignent leur borne (90 tokens), pour une compression moyenne de 0,4304 — la marge de progression
+est dans le critère d'arrêt du décodeur autant que dans le modèle. Le projet publie aussi la
+**latence** (p50 181,1 ms, p95 223,4 ms par document sur la machine de référence) : une mesure, pas un
+score — elle dépend de la machine, jamais figée, et c'est écrit dans le manifeste.
+
+La stack `seq2seq` sert **trois algorithmes** interchangeables par `model.algorithm` :
+`transformer_tiny` (appris, servi), `textrank` et `lead` (extractifs, publiés comme références).
+Rien n'est téléchargé : le vocabulaire WordPiece est **appris sur le split d'entraînement par le
+projet** (879 pièces, 797 fusions, taux de jetons inconnus 0,0000) et les poids sont initialisés au
+hasard, pré-entraînés par débruitage (2 époques) puis affinés en enseignant-forcé (12 époques,
+loss 0,810) — 1 151 599 paramètres. Le décodage est **glouton** : un résumé doit être reproductible
+ligne à ligne, ce que la suite de tests vérifie en réentraînant deux fois le même modèle, et un test
+dédié vérifie que deux vocabulaires appris sur le même corpus sont identiques (identifiants
+compris) — l'apprenti de la bibliothèque `tokenizers` départageait les fréquences égales par une
+table de hachage interne, donc deux exécutions produisaient deux vocabulaires, et le projet a écrit
+le sien pour rendre le résultat reproductible.
+
+**Ce que la tranche a appris (et corrigé).** Le premier run de référence mesurait 0,3358 de
+couverture : les identifiants du corpus (`P-12`, `CBL-045`) étaient découpés en `[UNK]` par le
+tokenizer, donc le modèle ne pouvait pas recopier une pièce ou un équipement même quand il le
+voulait. Le vocabulaire a été appris sur la ponctuation comme **segments à part entière**
+(`BertPreTokenizer` côté encodage, recollage explicite au décodage) : le même modèle, le même corpus,
+seuls le vocabulaire et le décodage ont changé, et la couverture est passée de 0,3358 à **0,6145**
+(ROUGE-1 de 0,6876 à 0,6958). C'est l'unique chiffre du dépôt qui montre le prix d'un
+pré-traitement : un caractère mal découpé coûte la moitié d'une métrique de fidélité.
+
+Les six notebooks tournent sur un corpus réduit (200 comptes-rendus) et un bac à sable complet
+(`outputs/notebooks/` : le corpus **et** les artefacts du notebook), donc ils ne peuvent pas écraser
+les chiffres publiés par `make train` / `make evaluate` ; ils re-dérivent leurs propres scores et
+publient leurs recommandations chiffrées. Coût assumé : environ deux minutes d'entraînement sur le
+corpus complet.
+
 ---
 
 ## 2. Démarrage rapide (cinq commandes)
@@ -611,11 +676,12 @@ l'implémentation change. C'est ce qui rend la comparaison possible.
 | **Keras** | API fonctionnelle : graphe déclaré puis `compile`/`fit`, callbacks natifs (`EarlyStopping(restore_best_weights)`, `ReduceLROnPlateau`, `TerminateOnNaN`) pontés vers les callbacks du projet, `class_weight` pour le déséquilibre | archive native `model.keras` + sidecar `model.config.json` |
 | **TensorFlow** | Niveau le plus bas : modèle **subclassé**, couches maison (`DenseBlock`, `ResidualBlock`), pipeline `tf.data`, `GradientTape` + `tf.function`, pertes sur logits, écrêtage du gradient, pondération d'échantillons | poids `model.weights.h5` + sidecar `model.config.json` |
 
-Quatre stacks texte complètent la liste, documentées avec leurs projets : **scikit-learn
+Cinq stacks texte complètent la liste, documentées avec leurs projets : **scikit-learn
 (TF-IDF / BM25)**, **LangChain (LCEL)**, l'**index vectoriel dense** (hachage de n-grammes puis SVD
-tronquée, stack `embedding`) et **spaCy** (tagger à transitions entraîné sur le corpus, corroboré par
-une couche de règles, stack `spacy`) — même contrat `BaseModel`, même corpus annoté d'un côté, corpus
-annoté au caractère de l'autre (sections 1.8 à 1.12).
+tronquée, stack `embedding`), **spaCy** (tagger à transitions entraîné sur le corpus, corroboré par
+une couche de règles) et le **encodeur-décodeur `seq2seq`** (transformer écrit dans le projet,
+vocabulaire WordPiece appris et décodage glouton) — même corpus annoté d'un côté, corpus annoté au
+caractère de l'autre, texte résumé de bout en bout du troisième (sections 1.8 à 1.13).
 
 Pièges documentés dans le code (et résolus) que ces stacks partagent :
 
@@ -680,7 +746,9 @@ tools/
 │   ├── manifests/*.yaml          # UN manifeste = UN projet livré
 │   ├── notebooks/
 │   │   ├── tabular.py            # six notebooks des familles tabulaires
-│   │   └── text.py               # six notebooks des familles texte (RAG, questions-réponses)
+│   │   ├── text.py               # six notebooks des familles texte (RAG, questions-réponses)
+│   │   ├── nel.py                # six notebooks de l'extraction d'entités nommées
+│   │   └── summarization.py      # six notebooks du résumé (bac à sable et stratégies)
 │   └── templates/
 │       ├── base/                 # partagé par tous : Makefile, conf/, utils, schemas, models/base.py
 │       ├── modality/tabular/     # data, preprocessing, features, training, evaluation, inference…
@@ -702,19 +770,21 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **34 projets**, dont **28 rejoués de bout en bout dans l'environnement de
+État au dernier passage : **35 projets**, dont **29 rejoués de bout en bout dans l'environnement de
 cette branche** (ruff check, ruff format, mypy strict, pytest, six notebooks exécutés,
-`python -m src.main mode=all`) — la barrière de qualité a d'ailleurs tenu sur les 34 : `ruff check`,
+`python -m src.main mode=all`) — la barrière de qualité a d'ailleurs tenu sur les 35 : `ruff check`,
 `ruff format` et `mypy` sont verts partout, y compris pour les six projets que l'environnement ne
 peut pas exécuter faute de TensorFlow.
 
-Les **neuf projets `ai-eng`** sont conformes : `rag/with-tfidf` (118,4 s, 107 tests),
+Les **dix projets texte** sont conformes : `rag/with-tfidf` (118,4 s, 107 tests),
 `rag/with-langchain` (203,4 s, 112 tests), `question-answering/with-tfidf` (69,2 s, 107 tests),
 `question-answering/with-langchain` (105,0 s, 112 tests), `embeddings/with-embedding` (61,3 s,
 109 tests), `embeddings/with-tfidf` (59,2 s, 107 tests), `text-classification/with-tfidf_classifier`
 (48,5 s, 121 tests), `text-classification/with-transformers` (893,0 s, 127 tests — l'encodeur
-s'entraîne dans les notebooks, d'où la durée) et `named-entity-recognition/with-spacy` (201,6 s,
-101 tests) — mêmes six notebooks et même pipeline complet. Les **19 projets tabulaires**
+s'entraîne dans les notebooks, d'où la durée), `named-entity-recognition/with-spacy` (201,6 s,
+101 tests) et `summarization/with-seq2seq` (50 tests, six notebooks en 108 s, `mode=all` à ROUGE-1
+0,6958 — le vocabulaire et les poids s'apprennent sur le corpus, d'où la durée) — mêmes six
+notebooks et même pipeline complet. Les **19 projets tabulaires**
 scikit-learn, XGBoost, LightGBM et PyTorch rejoués dans le même environnement sont conformes eux
 aussi (la référence multi-stacks complète, 4 235 tests, reste celle du dernier passage intégral) ;
 les quatre projets **Keras** et les deux **TensorFlow** n'ont pas été rejoués ici — TensorFlow n'est
@@ -725,6 +795,16 @@ livré.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
 reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capture d'écran.
+
+**Trou connu du crible de lint (mesuré).** Les projets déclarent
+`extend-exclude = ["outputs", "multirun", "artifacts", "data", ".venv"]` : le motif `data` n'est pas
+ancré, il exclut donc aussi `src/data/`. Conséquence : `ruff check .` et `ruff format .` sont muets
+sur les générateurs, les schémas Pandera et les chargeurs — le dossier le plus dense de chaque
+projet. Après `ruff format` + `ruff check --fix` appliqués à ces fichiers, il reste **388 erreurs**
+sur les 35 projets (dont **294 E501**), concentrées dans `src/data/{schemas,generators,loaders}.py`.
+Réparer les gabarits `task/*`/`family/*`/`modality/*` de `src/data/`, puis ancrer les motifs
+(`/data`), doit se faire **en une seule tranche** : ancrer d'abord ferait passer 35 projets au rouge
+d'un coup. Le contrôle des 35 projets porte donc, aujourd'hui, sur tout sauf `src/data/`.
 
 ---
 
@@ -745,14 +825,15 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 
 État du générateur : `registry/families.yaml` déclare **29 familles** et `registry/stacks.yaml`
 **22 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
-`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval,text_multiclass,named_entity_recognition}/`,
-`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering,embedding_pipeline,text_classification,named_entity_recognition}/`
-et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,tfidf,tfidf_classifier,langchain,embedding,transformers,spacy}/`
+`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval,text_multiclass,named_entity_recognition,summarization}/`,
+`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering,embedding_pipeline,text_classification,named_entity_recognition,summarization}/`
+et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,tfidf,tfidf_classifier,langchain,embedding,transformers,spacy,seq2seq}/`
 sont écrites et vérifiées : les **sept familles tabulaires**, la **famille RAG** (section 1.8), la
 **famille questions-réponses** (section 1.9), la **famille d'index d'embeddings** (section 1.10), la
-**famille de classification de texte** (section 1.11) et la **famille d'extraction d'entités
-nommées** (section 1.12) sont livrées — neuf projets `ai-eng`, tous mesurés sur un corpus
-synthétique et un split de test dédié. Ce qui reste, par ordre de valeur pédagogique :
+**famille de classification de texte** (section 1.11), la **famille d'extraction d'entités nommées**
+(section 1.12) et la **famille de résumé** (section 1.13) sont livrées — neuf projets `ai-eng` et un
+projet `nlp`, tous mesurés sur un corpus synthétique et un split de test dédié. Ce qui reste, par
+ordre de valeur pédagogique :
 
 1. **Stacks tabulaires déclarées, pas encore livrées** — `clustering` et `anomaly_detection` en
    PyTorch et TensorFlow (auto-encodeurs), `recommendation` en PyTorch (modèle à deux tours),
@@ -761,12 +842,12 @@ synthétique et un split de test dédié. Ce qui reste, par ordre de valeur péd
    (`extras.notebook_<famille>`) : les commentaires chiffrés d'un notebook doivent parler de la
    stack réellement mesurée.
 2. **Suite du périmètre ai-eng et nlp** — la modalité texte, les tâches `retrieval`,
-   `text_multiclass` et `named_entity_recognition` et les familles
+   `text_multiclass`, `named_entity_recognition` et `summarization` et les familles
    `retrieval_augmented_generation`, `question_answering`, `embedding_pipeline`,
-   `text_classification` et `named_entity_recognition` sont en place (sections 1.8 à 1.12) : la suite
-   réutilise ces couches. Restent `ai-eng/` (agents : Deepagents, Strands, CrewAI ; serving FastAPI),
-   `nlp/` (résumé, fine-tuning LLM) et les familles `summarization`, `llm_finetuning` et
-   `agent_tools` — cette dernière réutilise `modality/text/` + `task/retrieval/` comme l'a fait
+   `text_classification`, `named_entity_recognition` et `summarization` sont en place (sections 1.8
+   à 1.13) : la suite réutilise ces couches. Restent `ai-eng/` (agents : Deepagents, Strands, CrewAI ;
+   serving FastAPI), `nlp/` (fine-tuning LLM) et les familles `llm_finetuning` et `agent_tools` —
+   cette dernière réutilise `modality/text/` + `task/retrieval/` comme l'a fait
    `embedding_pipeline`.
 3. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
    GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
@@ -779,3 +860,11 @@ synthétique et un split de test dédié. Ce qui reste, par ordre de valeur péd
 
 Chaque ajout suit la même procédure : entrée de registre -> templates de stack ou de famille ->
 manifeste -> `build` -> `verify` -> commit.
+
+**5. Réparer le crible de lint sur `src/data/`** — 388 erreurs mesurées (294 E501, 62 RUF046,
+25 RUF012, 6 F841, le reste en pièces détachées) après `ruff format` + `ruff check --fix`, dans les
+gabarits `src/data/{schemas,generators,loaders}.py` des couches `task/`, `family/` et `modality/`.
+Trois gestes, dans cet ordre : replier la prose des gabarits (`python -m tools.wrapdoc`, livré),
+réparer les longues lignes de code, puis **ancrer** les motifs d'exclusion (`/data`) et rebâtir les
+35 projets. L'ancrage seul transforme un contrôle incomplet en 35 projets rouges ; c'est pourquoi il
+va avec la réparation, pas avant elle.

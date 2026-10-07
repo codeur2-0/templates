@@ -985,8 +985,8 @@ axes[1].set_title("Compression observée")
 plt.tight_layout()
 plt.show()
 
-# La table des références ne porte pas les colonnes d'une **prédiction** : on les construit ici, avec
-# le budget recalculé plus haut, plutôt que d'ajouter de fausses colonnes au corpus.
+# La table des références ne porte pas les colonnes d'une **prédiction** : on les construit
+# ici, avec le budget recalculé plus haut, plutôt que d'ajouter de fausses colonnes.
 reference_lengths = pd.DataFrame(
     {
         "compression": REFERENCES["compression"].to_numpy(),
@@ -1186,7 +1186,7 @@ FLOOR_METRICS = ("rouge1_f", "rouge2_f", "rouge_l_f", "fact_coverage", "compress
 
 
 def mean_scores(frame: pd.DataFrame) -> dict[str, float]:
-    # Moyenne des métriques publiées d'une table de prédictions scorée.
+    '''Moyenne des métriques publiées d'une table de prédictions scorée.'''
     return {name: round(float(frame[name].mean()), 4) for name in FLOOR_METRICS}
 
 
@@ -1700,8 +1700,11 @@ print("résumés contenant au moins une valeur inventée :",
 extractives = EVALUATION.per_strategy.loc[EVALUATION.per_strategy["strategy"] != SERVED.strategy]
 if not extractives.empty and "fact_coverage" in extractives.columns:
     best = extractives.sort_values("fact_coverage", ascending=False).iloc[0]
-    print(f"meilleure couverture extractive : {float(best['fact_coverage']):.4f} ({best['strategy']}) "
-          f"| modèle servi : {float(fidelity['fact_coverage'].mean()):.4f}")
+    print(
+        "meilleure couverture extractive :", round(float(best["fact_coverage"]), 4),
+        f"({best['strategy']}) | modèle servi :",
+        round(float(fidelity["fact_coverage"].mean()), 4),
+    )
 """,
             context,
         ),

@@ -57,7 +57,10 @@ namespaces = false
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["outputs", "multirun", "artifacts", "data", ".venv"]
+# Les motifs sont **ancrés à la racine** (`/data`, `/artifacts`…) : sans le « / », le motif
+# `data` exclurait aussi `src/data/`, et le linter ne verrait plus les générateurs, les
+# schémas ni les chargeurs — le trou le plus coûteux qu'un projet puisse avoir.
+extend-exclude = ["/outputs", "/multirun", "/artifacts", "/data", "/.venv"]
 
 [tool.ruff.lint]
 select = [

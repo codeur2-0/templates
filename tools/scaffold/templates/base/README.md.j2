@@ -174,7 +174,17 @@ Détail complet (distributions attendues, remarques) : [`data/README.md`](data/R
 │   ├── 05_training.ipynb
 │   └── 06_error_analysis.ipynb
 │
-{% if spec.family == "named_entity_recognition" %}├── tests/                       # pytest (corpus, schémas, moteur, évaluation, pipelines)
+{% if spec.family == "summarization" %}├── tests/                       # pytest (schémas, chargeurs, vocabulaire, entraînement, évaluation, pipelines)
+│   ├── conftest.py
+│   ├── test_data_schemas.py
+│   ├── test_loaders.py
+│   ├── test_tokenizer.py
+│   ├── test_factory.py
+│   ├── test_preprocessing.py
+│   ├── test_training.py
+│   ├── test_evaluation.py
+│   └── test_pipeline.py
+{% elif spec.family == "named_entity_recognition" %}├── tests/                       # pytest (corpus, schémas, moteur, évaluation, pipelines)
 │   ├── conftest.py
 │   ├── test_generator.py
 │   ├── test_data_schemas.py
@@ -224,7 +234,17 @@ AppConfig (Pydantic)                 ← conf/*.yaml validé et typé
    │
    ├── ProjectPaths                  ← arborescence disque (résolue depuis src/, pas depuis le CWD)
    │
-{% if spec.family == "named_entity_recognition" %}   ├── SyntheticEntityCorpusGenerator ← produit data/raw/*.parquet : les messages **et** les mentions
+{% if spec.family == "summarization" %}   ├── SyntheticSummaryCorpusGenerator ← produit data/raw/*.parquet : les documents, leurs résumés et les **faits annotés**
+   ├── SummaryCorpusLoader          ← lecture + validation Pandera des trois tables, splits, prédictions
+   ├── SharedWordPieceTokenizer     ← vocabulaire appris sur le train par le projet (aucun poids téléchargé)
+   │
+   ├── {{ model_class }}(BaseModel)   ← implémentation {{ stack.display_name }}
+   │        fit / summarize / model_card / save / load
+   ├── SummaryTrainer               ← découpage, pré-entraînement, comparaison des stratégies, verdict
+   ├── SummaryEvaluator             ← ROUGE, couverture des faits, références publiées, ventilation, erreurs
+   ├── ReportBuilder                ← Markdown + figures dans artifacts/
+   └── SummaryPredictor             ← inférence validée (batch + 1 enregistrement)
+{% elif spec.family == "named_entity_recognition" %}   ├── SyntheticEntityCorpusGenerator ← produit data/raw/*.parquet : les messages **et** les mentions
    ├── EntityCorpusLoader            ← lecture + validation Pandera des deux tables, splits, prédictions
    ├── GazetteerIndex                ← surfaces vues au train → index de règles (motif le plus long d'abord)
    │
@@ -250,7 +270,15 @@ AppConfig (Pydantic)                 ← conf/*.yaml validé et typé
 ### 6.3 Flux de bout en bout
 
 ```text
-{% if spec.family == "named_entity_recognition" %}mode=generate-data → SyntheticEntityCorpusGenerator → data/raw/{messages,spans}.parquet
+{% if spec.family == "summarization" %}mode=generate-data → SyntheticSummaryCorpusGenerator → data/raw/{intervention_reports,reference_summaries,salient_facts}.parquet
+mode=train         → SummaryCorpusLoader (validation Pandera des trois tables)
+                     → vocabulaire WordPiece appris sur le train, encodeur-décodeur pré-entraîné puis affiné
+                     → SummaryTrainer.compare_algorithms (références extractives sur la validation)
+                     → artefacts : checkpoint, fiche de modèle, configuration résolue
+mode=evaluate      → rechargement de l'artefact → ROUGE + couverture des faits sur le test
+                     → SummaryEvaluator → ReportBuilder → artifacts/{metrics,reports,figures}
+mode=predict       → SummaryPredictor.predict → artifacts/reports/predictions.csv
+{% elif spec.family == "named_entity_recognition" %}mode=generate-data → SyntheticEntityCorpusGenerator → data/raw/{messages,spans}.parquet
 mode=train         → EntityCorpusLoader (validation Pandera des deux tables)
                      → GazetteerIndex.from_spans (surfaces du **train** uniquement)
                      → {{ model_class }}.fit (offsets alignés sur les tokens, callbacks)
@@ -393,7 +421,18 @@ print(results["train"].metrics)
 
 Ou directement avec les classes (sans Hydra) :
 
-{% if spec.family == "named_entity_recognition" %}```python
+{% if spec.family == "summarization" %}```python
+from src.data.generators import SyntheticSummaryCorpusGenerator
+from src.models import build_model
+from src.utils.paths import ProjectPaths
+
+corpus = SyntheticSummaryCorpusGenerator.from_config(...).generate()
+settings = {"model": {"algorithm": "lead"}, "seed": 42}
+model = build_model(settings)  # algorithme explicite, défauts du registre
+model.fit(corpus.documents, corpus.queries)
+summaries = model.summarize(corpus.documents["text"].head(3).tolist())
+print(len(summaries), ProjectPaths.from_root().reports_dir, model.summary())
+```{% elif spec.family == "named_entity_recognition" %}```python
 from src.data.generators import SyntheticEntityCorpusGenerator
 from src.data.loaders import EntityCorpusLoader
 from src.models import build_model, load_model
@@ -461,21 +500,31 @@ Après `make all`, le dépôt local contient :
 
 | Chemin | Contenu |
 | --- | --- |
-| `data/raw/{{ spec.data.dataset_name }}.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | jeu de données synthétique, {{ "{:,}".format(spec.data.n_samples) | replace(",", " ") }} lignes |
+{% if spec.family == "summarization" %}| `data/raw/{{ spec.data.dataset_name }}.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | comptes-rendus d'intervention synthétiques, {{ "{:,}".format(spec.data.n_samples) | replace(",", " ") }} documents à résumer |
+| `data/raw/reference_summaries.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | résumés de référence : la supervision du projet, écrite à partir des faits saillants |
+| `data/raw/salient_facts.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | faits annotés (type, valeur, surface, drapeau `salient`) : la vérité terrain de la fidélité |
+{% else %}| `data/raw/{{ spec.data.dataset_name }}.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | jeu de données synthétique, {{ "{:,}".format(spec.data.n_samples) | replace(",", " ") }} lignes |
+{% endif %}
 | `data/raw/generation_metadata.json` | recette de génération : graine, options, empreinte du jeu, fichiers écrits |
 {% if spec.family == "named_entity_recognition" %}| `data/raw/spans.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | mentions annotées : offsets, type, surface, et le drapeau `holdout` (surface réservée à l'évaluation) |
+{% elif spec.family == "summarization" %}| `data/processed/` | vide : le découpage en phrases, l'alignement des faits et le vocabulaire sont reconstruits **en mémoire** depuis le train |
 {% elif spec.modality == "text" %}| `data/processed/chunks.{{ spec.data.formats[0] }}`{% if spec.data.formats | length > 1 %} (+ `{{ spec.data.formats[1:] | join('`, `') }}`){% endif %} | passages indexés : le texte découpé, ses métadonnées et les annotations conservées |
 {% else %}| `data/processed/split_{train,val,test}.parquet` | splits avant transformation (l'évaluation et l'inférence rejouent exactement le même découpage) |
 | `data/processed/features_{X_train,X_val,X_test}.parquet` | matrices prêtes pour le modèle |
 {% endif %}| `artifacts/models/{{ train.artifacts.model_file if train and train.artifacts and train.artifacts.model_file else 'model.joblib' }}` | modèle entraîné |
-{% if spec.family != "named_entity_recognition" %}| `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
+{% if spec.family not in ("named_entity_recognition", "summarization") %}| `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
 {% endif %}{% if spec.modality != "text" %}| `artifacts/models/feature_builder.joblib` | construction des features dérivées, ajustée sur le train uniquement |
+{% endif %}{% if spec.family == "summarization" %}| `artifacts/models/{{ train.artifacts.model_file if train and train.artifacts and train.artifacts.model_file else 'summarizer.pt' }}` | checkpoint du modèle entraîné : poids, vocabulaire WordPiece appris et configuration de décodage |
 {% endif %}| `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
 | `artifacts/models/resolved_config.json` | configuration Hydra résolue : l'artefact entraîné porte sa recette exacte |
 | `artifacts/metrics/training_metrics.json` | métriques d'entraînement et de validation |
 | `artifacts/metrics/evaluation_metrics.json` | métriques sur le split de test + verdict des seuils |
 | `artifacts/reports/evaluation_report.md` | rapport lisible (métriques, analyse d'erreurs, recommandations) |
-{% if spec.family == "named_entity_recognition" %}| `artifacts/reports/per_label.csv` | précision, rappel, F1 et support **par type d'entité**, ligne `micro` incluse |
+{% if spec.family == "summarization" %}| `artifacts/reports/per_strategy.csv` | ROUGE, couverture des faits, compression et latence **par stratégie**, sur le même effectif de test |
+| `artifacts/reports/segment_metrics.csv` | les mêmes métriques par type d'intervention et par urgence déclarée |
+| `artifacts/reports/fidelity.csv` | fidélité **par document** : couverture par type de fait et valeurs absentes du document |
+| `artifacts/reports/errors.csv` | documents les plus éloignés de leur référence, avec les faits saillants oubliés |
+{% elif spec.family == "named_entity_recognition" %}| `artifacts/reports/per_label.csv` | précision, rappel, F1 et support **par type d'entité**, ligne `micro` incluse |
 | `artifacts/reports/segment_metrics.csv` | F1 au niveau entité par style rédactionnel et par canal |
 | `artifacts/reports/confidence.csv` | mentions publiées, correctes et précision observée par niveau de confiance |
 | `artifacts/reports/holdout.csv` | rappel sur les surfaces réservées, à côté des surfaces vues à l'entraînement |
@@ -559,7 +608,16 @@ cellule par cellule, comme un support de formation pour juniors.
 {% set t05 = title_05[task_key] if task_key in title_05 else "Entraînement dans les conditions de production" %}
 {% set t06 = title_06[task_key] if task_key in title_06 else "Analyse d'erreurs et recommandations" %}
 
-{% if spec.family == "named_entity_recognition" %}
+{% if spec.family == "summarization" %}
+{% set notebook_lessons = [
+    ("01_eda.ipynb", "Cartographie d'un **corpus de comptes-rendus** : types d'intervention, urgences, sites, longueurs et vocabulaire, puis lecture des **faits annotés** (sept types, part saillante) et des résumés de référence (compression, taux de réécriture) — ce qu'un résumé doit contenir avant de savoir le produire."),
+    ("02_validation.ipynb", "Les contrats Pandera des **trois** tables (documents, résumés, faits) et leurs liens croisés — référence orpheline, document sans référence, fait hors de son document —, puis **corruption volontaire** pour lire le message d'échec."),
+    ("03_preprocessing.ipynb", "Découpage en phrases et en tokens, alignement des faits annotés sur les phrases, budget de longueur (compression, bornes) et **ce que la référence couvre elle-même** : la cible est mesurée avant le modèle."),
+    ("04_model_exploration.ipynb", "Planchers installés d'abord (résumé vide, `lead`, `textrank`), puis l'encodeur-décodeur appris comparé **à protocole identique** sur la validation — ROUGE, couverture des faits et part de résumés qui butent sur leur borne de longueur."),
+    ("05_training.ipynb", "*Entraînement dans les conditions de production* — Le pipeline réel (`TrainPipeline`) exécuté dans un bac à sable : vocabulaire appris sur le train, artefacts écrits (checkpoint, fiche de modèle, configuration résolue), **rechargement à l'identique** et preuve de déterminisme."),
+    ("06_error_analysis.ipynb", "*Analyse d'erreurs et recommandations* — Verdict contractuel sur le test, couverture **par type de fait** (ce que le modèle oublie), valeurs absentes du document, ventilation par urgence et par site, puis recommandations reliées à un chiffre."),
+] %}
+{% elif spec.family == "named_entity_recognition" %}
 {% set notebook_lessons = [
     ("01_eda.ipynb", "Cartographie d'un corpus **annoté au caractère** : mentions par type et par split, longueurs, styles rédactionnels, canaux, surfaces réservées et distracteurs déclarés — et la mesure de ce qu'une **règle de forme** retrouverait déjà, type par type."),
     ("02_validation.ipynb", "Les contrats Pandera des **deux** tables (messages et annotations) et leur jointure — `surface == text[start:end]`, pas de chevauchement, mention rattachée au split de son message —, puis **corruption volontaire** pour lire le message d'échec."),
@@ -605,7 +663,18 @@ python -m pytest --cov=src --cov-report=term-missing
 
 Ce qui est testé :
 
-{% if spec.family == "named_entity_recognition" %}
+{% if spec.family == "summarization" %}
+{% set test_rows = [
+    ("tests/test_data_schemas.py", "Les contrats Pandera des **trois** tables et leurs liens croisés : référence orpheline, document sans référence, fait hors de son document et identifiant hors format sont refusés, avec le coupable nommé."),
+    ("tests/test_loaders.py", "Chargement Parquet/CSV des trois tables, alignement des identifiants, splits lus dans la colonne `split` (jamais par position), refus d'un corpus corrompu avant qu'il n'atteigne le reste du projet."),
+    ("tests/test_tokenizer.py", "Le vocabulaire partagé : identifiants spéciaux fixes, **deux apprentissages identiques** sur le même corpus (ids compris), taux de jetons inconnus mesuré, troncature et décodage qui ne rendent ni `[BOS]` ni `[EOS]`."),
+    ("tests/test_factory.py", "La fabrique : précédence des quatre sources de réglages (registre → plat → bloc → surcharge), budget partagé par les stratégies extractives, refus d'un algorithme inconnu et description de tous les algorithmes déclarés."),
+    ("tests/test_preprocessing.py", "Les utilitaires de la modalité texte livrés avec le projet (normalisation, tokénisation, découpage en passages, mots vides, vectoriseur lexical, plongement par hachage) : ils sont testés pour eux-mêmes, même si le corpus de résumés ne les traverse pas tous."),
+    ("tests/test_training.py", "L'entraîneur : découpage lu dans le corpus, métriques de validation avec la couverture par type de fait, **une ligne par algorithme comparé**, verdict lu sur la mesure, refus d'un corpus sans train et déterminisme de deux exécutions."),
+    ("tests/test_evaluation.py", "L'évaluateur : ROUGE et fidélité sur l'effectif exact du test, verdict recalculé depuis la métrique contractuelle, une ligne par stratégie publiée, trame d'erreurs bornée, et une valeur absente du document comptée comme telle."),
+    ("tests/test_pipeline.py", "Bout en bout : les quatre pipelines s'enchaînent dans un projet jetable, écrivent leurs artefacts (trois tables, checkpoint, fiche, rapport, figures), publient une ligne par algorithme et refusent de tourner sans artefact."),
+] %}
+{% elif spec.family == "named_entity_recognition" %}
 {% set test_rows = [
     ("tests/test_generator.py", "Le générateur synthétique : reproductibilité à graine fixée, trois à cinq entités par message, mentions jamais chevauchantes, surfaces réservées absentes du train, distracteurs présents dans les textes et **jamais** annotés."),
     ("tests/test_data_schemas.py", "Les contrats Pandera des deux tables : `surface == text[start:end]`, surface décalée ou chevauchement refusés, type inconnu et identifiant hors format rejetés, confiance impossible refusée dans la table de prédictions."),
@@ -672,12 +741,12 @@ et configuration réduite, donc exécution en quelques secondes.
 | Dossier | Responsabilité | Points d'attention |
 | --- | --- | --- |
 | `src/data/` | Génération synthétique, chargement, **contrats Pandera** | Le générateur est déterministe ; les schémas sont la documentation exécutable des données. |
-| `src/preprocessing/` | {% if spec.family == "named_entity_recognition" %}Utilitaires de la modalité texte livrés avec le projet{% else %}Transformers custom + pipeline sklearn-compatible{% endif %} | {% if spec.family == "named_entity_recognition" %}Le corpus d'entités ne les traverse pas ; ils sont testés pour eux-mêmes.{% else %}`fit` sur train uniquement, `transform` partout ; persistable.{% endif %} |
-| `src/features/` | {% if spec.family == "named_entity_recognition" %}Traits de **forme** d'une mention (signature, chiffres, casse, séparateurs){% else %}Feature engineering **déclaratif** (recettes en YAML){% endif %} | {% if spec.family == "named_entity_recognition" %}Le raccourci « signature ⇒ type » est appris sur le train puis mesuré sur un autre split.{% else %}Ajouter une feature = ajouter une entrée dans `conf/preprocessing/default.yaml`.{% endif %} |
+| `src/preprocessing/` | {% if spec.family in ("named_entity_recognition", "summarization") %}Utilitaires de la modalité texte livrés avec le projet{% else %}Transformers custom + pipeline sklearn-compatible{% endif %} | {% if spec.family == "summarization" %}Le corpus ne les traverse pas tous ; ils sont testés pour eux-mêmes.{% elif spec.family == "named_entity_recognition" %}Le corpus d'entités ne les traverse pas ; ils sont testés pour eux-mêmes.{% else %}`fit` sur train uniquement, `transform` partout ; persistable.{% endif %} |
+| `src/features/` | {% if spec.family == "summarization" %}Découpage en phrases et budget de longueur (compression, bornes, part de la borne){% elif spec.family == "named_entity_recognition" %}Traits de **forme** d'une mention (signature, chiffres, casse, séparateurs){% else %}Feature engineering **déclaratif** (recettes en YAML){% endif %} | {% if spec.family == "summarization" %}Le budget de longueur est **déclaré** dans la configuration, jamais recopié dans le modèle : le rapport publie la part de résumés qui l'atteignent.{% elif spec.family == "named_entity_recognition" %}Le raccourci « signature ⇒ type » est appris sur le train puis mesuré sur un autre split.{% else %}Ajouter une feature = ajouter une entrée dans `conf/preprocessing/default.yaml`.{% endif %} |
 | `src/models/` | `BaseModel` (ABC) + implémentation {{ stack.display_name }} | Aucune logique de training loop ici : le modèle expose un contrat. |
-| `src/training/` | {% if spec.family == "named_entity_recognition" %}`EntityTrainer`, callbacks, métriques au niveau entité{% else %}`Trainer`, callbacks, registre de métriques{% endif %} | Les effets de bord (logs, early stopping) sont des callbacks, pas du code inline. |
-| `src/evaluation/` | {% if spec.family == "named_entity_recognition" %}`EntityEvaluator`{% else %}`Evaluator`{% endif %} + `ReportBuilder` | Les métriques sont calculées une seule fois puis sérialisées. |
-| `src/inference/` | {% if spec.family == "named_entity_recognition" %}`EntityPredictor`{% else %}`Predictor`{% endif %} | {% if spec.family == "named_entity_recognition" %}Valide l'entrée avec `MessagesSchema` et publie `PredictedMentionsSchema`.{% else %}Valide l'entrée avec `InferenceDataSchema` avant de prédire.{% endif %} |
+| `src/training/` | {% if spec.family == "summarization" %}`SummaryTrainer`, callbacks, métriques de génération (ROUGE, fidélité, longueurs){% elif spec.family == "named_entity_recognition" %}`EntityTrainer`, callbacks, métriques au niveau entité{% else %}`Trainer`, callbacks, registre de métriques{% endif %} | Les effets de bord (logs, early stopping) sont des callbacks, pas du code inline. |
+| `src/evaluation/` | {% if spec.family == "summarization" %}`SummaryEvaluator`{% elif spec.family == "named_entity_recognition" %}`EntityEvaluator`{% else %}`Evaluator`{% endif %} + `ReportBuilder` | Les métriques sont calculées une seule fois puis sérialisées. |
+| `src/inference/` | {% if spec.family == "summarization" %}`SummaryPredictor`{% elif spec.family == "named_entity_recognition" %}`EntityPredictor`{% else %}`Predictor`{% endif %} | {% if spec.family == "summarization" %}Valide l'entrée avec `DocumentsSchema` et publie `PredictedSummariesSchema` (longueur, latence, couverture).{% elif spec.family == "named_entity_recognition" %}Valide l'entrée avec `MessagesSchema` et publie `PredictedMentionsSchema`.{% else %}Valide l'entrée avec `InferenceDataSchema` avant de prédire.{% endif %} |
 | `src/pipelines/` | Orchestration bout-en-bout | Retourne des `PipelineResult` (statut, métriques, artefacts) exploitables en CI. |
 | `src/schemas/` | Configuration typée (Pydantic) | Fait échouer immédiatement une configuration invalide. |
 | `src/utils/` | Logging, chemins, IO, helpers | Zéro dépendance métier : réutilisable tel quel ailleurs. |

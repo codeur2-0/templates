@@ -792,7 +792,7 @@ class EncoderDecoderSummarizer(BaseTextGenerator):
                 "unknown_rate": self.tokenizer.meta.get("unknown_rate"),
                 "version": self.tokenizer.meta.get("version"),
                 "merges": self.tokenizer.meta.get("merges"),
-                "learned_on_words": self.tokenizer.meta.get("words"),
+                "learned_on_segments": self.tokenizer.meta.get("segments"),
             },
             "training": {
                 "epochs": self._epochs_done,

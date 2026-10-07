@@ -194,13 +194,16 @@ nlp/summarization/with-seq2seq/
 │   ├── 05_training.ipynb
 │   └── 06_error_analysis.ipynb
 │
-├── tests/                       # pytest (schémas, loaders, preprocessing, modèle, training)
+├── tests/                       # pytest (schémas, chargeurs, vocabulaire, entraînement, évaluation, pipelines)
 │   ├── conftest.py
 │   ├── test_data_schemas.py
 │   ├── test_loaders.py
+│   ├── test_tokenizer.py
+│   ├── test_factory.py
 │   ├── test_preprocessing.py
-│   ├── test_models.py
-│   └── test_training.py
+│   ├── test_training.py
+│   ├── test_evaluation.py
+│   └── test_pipeline.py
 │
 └── artifacts/                   # produits générés (ignorés par git)
     ├── models/                  # modèle + pipeline de preprocessing + model card
@@ -232,29 +235,29 @@ AppConfig (Pydantic)                 ← conf/*.yaml validé et typé
    │
    ├── ProjectPaths                  ← arborescence disque (résolue depuis src/, pas depuis le CWD)
    │
-   ├── SyntheticDataGenerator        ← produit data/raw/*.parquet (+ .csv)
-   ├── RawDataLoader / ProcessedDataLoader ← lecture + validation Pandera
-   ├── FeatureBuilder                ← features dérivées déclaratives (ratio, bin, interaction…)
-   ├── PreprocessingPipeline         ← ColumnTransformer : imputation, clipping, scaling, encodage
+   ├── SyntheticSummaryCorpusGenerator ← produit data/raw/*.parquet : les documents, leurs résumés et les **faits annotés**
+   ├── SummaryCorpusLoader          ← lecture + validation Pandera des trois tables, splits, prédictions
+   ├── SharedWordPieceTokenizer     ← vocabulaire appris sur le train par le projet (aucun poids téléchargé)
    │
    ├── EncoderDecoderSummarizer(BaseModel)   ← implémentation Encodeur-décodeur entraîné sur le corpus (résumé)
-   │        fit / predict / save / load
-   ├── Trainer                       ← split, callbacks, métriques, artefacts
-   ├── Evaluator                     ← métriques + matrice/rapport d'erreurs
-   ├── ReportBuilder                 ← Markdown + figures dans artifacts/
-   └── Predictor                     ← inférence validée (batch + 1 enregistrement)
+   │        fit / summarize / model_card / save / load
+   ├── SummaryTrainer               ← découpage, pré-entraînement, comparaison des stratégies, verdict
+   ├── SummaryEvaluator             ← ROUGE, couverture des faits, références publiées, ventilation, erreurs
+   ├── ReportBuilder                ← Markdown + figures dans artifacts/
+   └── SummaryPredictor             ← inférence validée (batch + 1 enregistrement)
 ```
 
 ### 6.3 Flux de bout en bout
 
 ```text
-mode=generate-data → SyntheticDataGenerator → data/raw/*.parquet
-mode=train         → RawDataLoader (validation Pandera)
-                     → FeatureBuilder → PreprocessingPipeline.fit_transform
-                     → EncoderDecoderSummarizer.fit (callbacks)
-                     → Evaluator.evaluate → ReportBuilder → artifacts/{models,metrics,reports,figures}
-mode=evaluate      → chargement des artefacts → nouvelle évaluation + rapports
-mode=predict       → InferenceDataSchema → Predictor.predict → artifacts/reports/predictions.csv
+mode=generate-data → SyntheticSummaryCorpusGenerator → data/raw/{intervention_reports,reference_summaries,salient_facts}.parquet
+mode=train         → SummaryCorpusLoader (validation Pandera des trois tables)
+                     → vocabulaire WordPiece appris sur le train, encodeur-décodeur pré-entraîné puis affiné
+                     → SummaryTrainer.compare_algorithms (références extractives sur la validation)
+                     → artefacts : checkpoint, fiche de modèle, configuration résolue
+mode=evaluate      → rechargement de l'artefact → ROUGE + couverture des faits sur le test
+                     → SummaryEvaluator → ReportBuilder → artifacts/{metrics,reports,figures}
+mode=predict       → SummaryPredictor.predict → artifacts/reports/predictions.csv
 ```
 
 ### 6.4 Comparaison avec les autres stacks
@@ -381,12 +384,16 @@ print(results["train"].metrics)
 Ou directement avec les classes (sans Hydra) :
 
 ```python
-from src.data.generators import SyntheticDataGenerator
-from src.models.model import EncoderDecoderSummarizer
-from src.pipelines import TrainPipeline
-from src.schemas.config import validate_config
+from src.data.generators import SyntheticSummaryCorpusGenerator
+from src.models import build_model
+from src.utils.paths import ProjectPaths
 
-data = SyntheticDataGenerator(n_samples=1000, seed=42).run()
+corpus = SyntheticSummaryCorpusGenerator.from_config(...).generate()
+settings = {"model": {"algorithm": "lead"}, "seed": 42}
+model = build_model(settings)  # algorithme explicite, défauts du registre
+model.fit(corpus.documents, corpus.queries)
+summaries = model.summarize(corpus.documents["text"].head(3).tolist())
+print(len(summaries), ProjectPaths.from_root().reports_dir, model.summary())
 ```
 ### (d) Via le Makefile
 
@@ -429,19 +436,22 @@ Après `make all`, le dépôt local contient :
 
 | Chemin | Contenu |
 | --- | --- |
-| `data/raw/intervention_reports.parquet` (+ `csv`) | jeu de données synthétique, 600 lignes |
+| `data/raw/intervention_reports.parquet` (+ `csv`) | comptes-rendus d'intervention synthétiques, 600 documents à résumer |
+| `data/raw/reference_summaries.parquet` (+ `csv`) | résumés de référence : la supervision du projet, écrite à partir des faits saillants |
+| `data/raw/salient_facts.parquet` (+ `csv`) | faits annotés (type, valeur, surface, drapeau `salient`) : la vérité terrain de la fidélité |
 | `data/raw/generation_metadata.json` | recette de génération : graine, options, empreinte du jeu, fichiers écrits |
-| `data/processed/chunks.parquet` (+ `csv`) | passages indexés : le texte découpé, ses métadonnées et les annotations conservées |
+| `data/processed/` | vide : le découpage en phrases, l'alignement des faits et le vocabulaire sont reconstruits **en mémoire** depuis le train |
 | `artifacts/models/summarizer.pt` | modèle entraîné |
-| `artifacts/models/preprocessing.joblib` | pipeline de preprocessing ajusté (aucune fuite) |
+| `artifacts/models/summarizer.pt` | checkpoint du modèle entraîné : poids, vocabulaire WordPiece appris et configuration de décodage |
 | `artifacts/models/model_card.json` | carte du modèle (params, métriques, features, date) |
 | `artifacts/models/resolved_config.json` | configuration Hydra résolue : l'artefact entraîné porte sa recette exacte |
 | `artifacts/metrics/training_metrics.json` | métriques d'entraînement et de validation |
 | `artifacts/metrics/evaluation_metrics.json` | métriques sur le split de test + verdict des seuils |
 | `artifacts/reports/evaluation_report.md` | rapport lisible (métriques, analyse d'erreurs, recommandations) |
-| `artifacts/reports/per_question.csv` | métriques par question : rappel@k, MRR, citations, abstention, latence |
-| `artifacts/reports/retrieved_passages.csv` | passages servis à chaque question, avec leur rang et leur score |
-| `artifacts/reports/segment_metrics.csv` | ventilation par difficulté, intention et type de réponse |
+| `artifacts/reports/per_strategy.csv` | ROUGE, couverture des faits, compression et latence **par stratégie**, sur le même effectif de test |
+| `artifacts/reports/segment_metrics.csv` | les mêmes métriques par type d'intervention et par urgence déclarée |
+| `artifacts/reports/fidelity.csv` | fidélité **par document** : couverture par type de fait et valeurs absentes du document |
+| `artifacts/reports/errors.csv` | documents les plus éloignés de leur référence, avec les faits saillants oubliés |
 | `artifacts/reports/predictions.csv` | prédictions sur l'échantillon de démonstration |
 | `artifacts/figures/*.png` | figures spécifiques à la tâche |
 | `outputs/<date>/<heure>/` | configuration composée + logs Hydra |
@@ -453,11 +463,20 @@ Résultats de l'exécution de référence (`make all`, graine 42) :
 
 | Indicateur | Valeur mesurée |
 | --- | --- |
-| Documents / phrases par document / tokens par document | **600 / 11,2 / 130,9** |
+| Documents / tokens par document / tokens par résumé de référence | **600 / 126,8 / 52,5** |
 | Faits annotés / saillants / par document | **5 036 / 3 573 / 8,4 et 6,0** |
-| Taux de réécriture des résumés de référence / registres | **≈ 50 % / deux formulations par type de fait** |
+| Taux de réécriture des résumés de référence / registres | **50 % / deux formulations par type de fait** |
 | Part des résumés annotés couverts par la référence elle-même | **1,0000** |
-| Référence « résumé vide » (plancher défini, publié pour être lu) | **0,0000** |
+| Métrique contractuelle (rouge1_f), test 60 documents : modèle servi | **0,6958 — conforme (seuil 0,45, marge +0,2458)** |
+| ROUGE-2 / ROUGE-L du modèle servi (test) | **0,5496 / 0,4616** |
+| Références mesurées sur les mêmes lignes : `lead` / `textrank` / résumé vide | **0,4351 / 0,3888 / 0,0000** |
+| Couverture des faits saillants / précision des faits (test) | **0,6145 / 0,9794** |
+| Résumés contenant au moins une valeur absente du document | **8,3 %** |
+| Couverture par type de fait (cause → pièce) | **0,9167 · 0,8167 · 0,7500 · 0,6333 · 0,5000 · 0,1667 · 0,0000** |
+| Vocabulaire appris (WordPiece v3, appris par le projet) / jetons inconnus | **879 pièces, 797 fusions / 0,0000** |
+| Ajustement (12 époques, 2 couches, 128 unités, 4 têtes) / paramètres | **170 s / 1 151 599** |
+| Compression moyenne du résumé / résumés au budget maximal | **0,4304 / 58,3 %** |
+| Latence p50 / p95 par document (machine de référence) | **181,1 ms / 223,4 ms** |
 
 Ces valeurs sont reproductibles à l'identique ; elles proviennent du split de test, jamais
 du split d'entraînement, et le détail complet est dans `artifacts/reports/evaluation_report.md`.
@@ -472,12 +491,12 @@ cellule par cellule, comme un support de formation pour juniors.
 
 | Notebook | Ce qu'on y apprend |
 | --- | --- |
-| `01_eda.ipynb` | Exploration d'un **corpus documentaire** : sources, sections, longueurs, dates de publication, doublons d'identifiant, puis lecture du **jeu de questions** (difficultés, intentions, questions hors corpus, documents annotés par question). |
-| `02_validation.ipynb` | Contrats Pandera du texte : colonnes, formats d'identifiants et cohérence « question hors corpus ⇔ extrait vide », puis **corruption volontaire** (identifiant hors format, source inconnue, question répondable sans document) pour lire le message d'échec. |
-| `03_preprocessing.ipynb` | Découpage en passages : offsets vérifiés contre le texte source, chevauchement, filtrage des mots vides, puis **mesure** de l'effet de la taille des passages sur le rappel@5 — avec l'intervalle de confiance qui distingue un écart réel d'un bruit d'échantillonnage. |
-| `04_model_exploration.ipynb` | Planchers triviaux installés d'abord (tirage aléatoire, ordre du corpus), comparaison des scorers lexicaux **à protocole identique**, puis courbe du seuil d'abstention sur le split de calibration : refus corrects contre couverture, jamais une exactitude globale. |
-| `05_training.ipynb` | *Entraînement dans les conditions de production* — Le pipeline réel (`TrainPipeline`) exécuté dans un bac à sable, lecture des artefacts (passages indexés, fiche de modèle, configuration résolue) et **preuve de reproductibilité** : reconstruire l'index retrouve les mêmes passages. |
-| `06_error_analysis.ipynb` | *Analyse d'erreurs et recommandations* — Verdict contractuel, ventilation par difficulté et par intention, questions perdues examinées une par une, comportement d'abstention mesuré, puis recommandations reliées à un chiffre. |
+| `01_eda.ipynb` | Cartographie d'un **corpus de comptes-rendus** : types d'intervention, urgences, sites, longueurs et vocabulaire, puis lecture des **faits annotés** (sept types, part saillante) et des résumés de référence (compression, taux de réécriture) — ce qu'un résumé doit contenir avant de savoir le produire. |
+| `02_validation.ipynb` | Les contrats Pandera des **trois** tables (documents, résumés, faits) et leurs liens croisés — référence orpheline, document sans référence, fait hors de son document —, puis **corruption volontaire** pour lire le message d'échec. |
+| `03_preprocessing.ipynb` | Découpage en phrases et en tokens, alignement des faits annotés sur les phrases, budget de longueur (compression, bornes) et **ce que la référence couvre elle-même** : la cible est mesurée avant le modèle. |
+| `04_model_exploration.ipynb` | Planchers installés d'abord (résumé vide, `lead`, `textrank`), puis l'encodeur-décodeur appris comparé **à protocole identique** sur la validation — ROUGE, couverture des faits et part de résumés qui butent sur leur borne de longueur. |
+| `05_training.ipynb` | *Entraînement dans les conditions de production* — Le pipeline réel (`TrainPipeline`) exécuté dans un bac à sable : vocabulaire appris sur le train, artefacts écrits (checkpoint, fiche de modèle, configuration résolue), **rechargement à l'identique** et preuve de déterminisme. |
+| `06_error_analysis.ipynb` | *Analyse d'erreurs et recommandations* — Verdict contractuel sur le test, couverture **par type de fait** (ce que le modèle oublie), valeurs absentes du document, ventilation par urgence et par site, puis recommandations reliées à un chiffre. |
 
 ---
 
@@ -494,13 +513,14 @@ Ce qui est testé :
 
 | Fichier | Objet du test |
 | --- | --- |
-| `tests/test_data_schemas.py` | Les contrats Pandera acceptent un corpus valide **et** rejettent les données corrompues : identifiant hors format, source inconnue, question hors corpus annotée avec un extrait, colonne manquante. |
-| `tests/test_loaders.py` | Chargement Parquet/CSV du corpus et des questions annotées, validation appliquée, répartition calibration / validation / test et rejet d'un fichier corrompu. |
-| `tests/test_preprocessing.py` | Découpage en passages (offsets exacts, chevauchement, longueur), tokenisation et mots vides, vectoriseur lexical (BM25 / TF-IDF) et **persistance** de l'estimateur appris. |
-| `tests/test_models.py` | Contrat `BaseModel` : fit → retrieve → answer, abstention sous le seuil, déterminisme, sauvegarde / rechargement de l'index et garde-fous (modèle non entraîné, `k` invalide). |
-| `tests/test_training.py` | Le `Trainer` produit des métriques par question (recall@k, MRR, nDCG), les callbacks fonctionnent, et une question hors corpus ne fausse pas le rappel. |
-| `tests/test_evaluation.py` | La couche qui publie les chiffres : questions hors corpus **exclues du dénominateur** du rappel, `citation_precision` non applicable (et non nulle) quand rien n'est cité, ventilation par segment qui totalise les questions évaluées, et rapport dont le verdict découle de la mesure. |
-| `tests/test_pipeline.py` | Bout en bout : chaque pipeline (`data`, `train`, `evaluation`, `inference`) s'exécute sur une configuration réduite, écrit ses artefacts et refuse une entrée invalide. |
+| `tests/test_data_schemas.py` | Les contrats Pandera des **trois** tables et leurs liens croisés : référence orpheline, document sans référence, fait hors de son document et identifiant hors format sont refusés, avec le coupable nommé. |
+| `tests/test_loaders.py` | Chargement Parquet/CSV des trois tables, alignement des identifiants, splits lus dans la colonne `split` (jamais par position), refus d'un corpus corrompu avant qu'il n'atteigne le reste du projet. |
+| `tests/test_tokenizer.py` | Le vocabulaire partagé : identifiants spéciaux fixes, **deux apprentissages identiques** sur le même corpus (ids compris), taux de jetons inconnus mesuré, troncature et décodage qui ne rendent ni `[BOS]` ni `[EOS]`. |
+| `tests/test_factory.py` | La fabrique : précédence des quatre sources de réglages (registre → plat → bloc → surcharge), budget partagé par les stratégies extractives, refus d'un algorithme inconnu et description de tous les algorithmes déclarés. |
+| `tests/test_preprocessing.py` | Les utilitaires de la modalité texte livrés avec le projet (normalisation, tokénisation, découpage en passages, mots vides, vectoriseur lexical, plongement par hachage) : ils sont testés pour eux-mêmes, même si le corpus de résumés ne les traverse pas tous. |
+| `tests/test_training.py` | L'entraîneur : découpage lu dans le corpus, métriques de validation avec la couverture par type de fait, **une ligne par algorithme comparé**, verdict lu sur la mesure, refus d'un corpus sans train et déterminisme de deux exécutions. |
+| `tests/test_evaluation.py` | L'évaluateur : ROUGE et fidélité sur l'effectif exact du test, verdict recalculé depuis la métrique contractuelle, une ligne par stratégie publiée, trame d'erreurs bornée, et une valeur absente du document comptée comme telle. |
+| `tests/test_pipeline.py` | Bout en bout : les quatre pipelines s'enchaînent dans un projet jetable, écrivent leurs artefacts (trois tables, checkpoint, fiche, rapport, figures), publient une ligne par algorithme et refusent de tourner sans artefact. |
 
 Les tests utilisent des **fixtures légères** (`tests/conftest.py`) : petit dataset synthétique
 et configuration réduite, donc exécution en quelques secondes.
@@ -532,12 +552,12 @@ et configuration réduite, donc exécution en quelques secondes.
 | Dossier | Responsabilité | Points d'attention |
 | --- | --- | --- |
 | `src/data/` | Génération synthétique, chargement, **contrats Pandera** | Le générateur est déterministe ; les schémas sont la documentation exécutable des données. |
-| `src/preprocessing/` | Transformers custom + pipeline sklearn-compatible | `fit` sur train uniquement, `transform` partout ; persistable. |
-| `src/features/` | Feature engineering **déclaratif** (recettes en YAML) | Ajouter une feature = ajouter une entrée dans `conf/preprocessing/default.yaml`. |
+| `src/preprocessing/` | Utilitaires de la modalité texte livrés avec le projet | Le corpus ne les traverse pas tous ; ils sont testés pour eux-mêmes. |
+| `src/features/` | Découpage en phrases et budget de longueur (compression, bornes, part de la borne) | Le budget de longueur est **déclaré** dans la configuration, jamais recopié dans le modèle : le rapport publie la part de résumés qui l'atteignent. |
 | `src/models/` | `BaseModel` (ABC) + implémentation Encodeur-décodeur entraîné sur le corpus (résumé) | Aucune logique de training loop ici : le modèle expose un contrat. |
-| `src/training/` | `Trainer`, callbacks, registre de métriques | Les effets de bord (logs, early stopping) sont des callbacks, pas du code inline. |
-| `src/evaluation/` | `Evaluator` + `ReportBuilder` | Les métriques sont calculées une seule fois puis sérialisées. |
-| `src/inference/` | `Predictor` | Valide l'entrée avec `InferenceDataSchema` avant de prédire. |
+| `src/training/` | `SummaryTrainer`, callbacks, métriques de génération (ROUGE, fidélité, longueurs) | Les effets de bord (logs, early stopping) sont des callbacks, pas du code inline. |
+| `src/evaluation/` | `SummaryEvaluator` + `ReportBuilder` | Les métriques sont calculées une seule fois puis sérialisées. |
+| `src/inference/` | `SummaryPredictor` | Valide l'entrée avec `DocumentsSchema` et publie `PredictedSummariesSchema` (longueur, latence, couverture). |
 | `src/pipelines/` | Orchestration bout-en-bout | Retourne des `PipelineResult` (statut, métriques, artefacts) exploitables en CI. |
 | `src/schemas/` | Configuration typée (Pydantic) | Fait échouer immédiatement une configuration invalide. |
 | `src/utils/` | Logging, chemins, IO, helpers | Zéro dépendance métier : réutilisable tel quel ailleurs. |
@@ -585,4 +605,4 @@ Pour rejouer une configuration exacte : Hydra sauvegarde la config composée dan
 Code fourni à des fins pédagogiques, licence MIT. Pour proposer une amélioration : conserver la
 structure imposée, ajouter des tests, mettre à jour ce README et vérifier `make verify`.
 
-*Dernière génération : 2026-10-06 · projet `nlp-summarization-seq2seq`*
+*Dernière génération : 2026-10-07 · projet `nlp-summarization-seq2seq`*

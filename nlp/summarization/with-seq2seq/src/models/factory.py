@@ -308,10 +308,10 @@ def _effective_params(
     """
     configured = dict(node.get("params") or {})
     explicit = None if override is None else dict(override)
-    # Un réglage écrit **à plat** (``model.params.vocab_size``) appartient au bloc qui déclare ce nom
-    # dans le registre : c'est ce qui permet à un notebook de réduire l'architecture sans connaître
-    # la disposition interne des blocs. Sans cette table, le défaut du registre l'emporterait
-    # silencieusement sur la configuration du projet.
+    # Un réglage écrit **à plat** (``model.params.vocab_size``) appartient au bloc qui déclare
+    # ce nom dans le registre : c'est ce qui permet à un notebook de réduire l'architecture
+    # sans connaître la disposition interne des blocs. Sans cette table, le défaut du
+    # registre l'emporterait silencieusement sur la configuration du projet.
     owner = {key: block for block in PARAM_BLOCKS for key in (spec.default_params.get(block) or {})}
     flat_configured = {key: value for key, value in configured.items() if key not in PARAM_BLOCKS}
     flat_explicit = (

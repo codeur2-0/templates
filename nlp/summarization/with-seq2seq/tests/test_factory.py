@@ -6,9 +6,10 @@ deux valeurs d'un réglage. L'ordre documenté est **défauts du registre → co
 (``model.params.units``) → bloc explicite (``model.params.training.units``) → surcharge passée à
 ``build_model``**, et ces tests le vérifient source par source.
 
-Le test qui compte le plus est le premier : les réglages à plat de la configuration doivent atteindre
-le modèle. Sans lui, une surcharge silencieusement ignorée fait tourner un notebook avec
-l'architecture complète — c'est-à-dire avec un résultat qui ne correspond plus à ce qu'il annonce.
+Le test qui compte le plus est le premier : les réglages à plat de la configuration doivent
+atteindre le modèle. Sans lui, une surcharge silencieusement ignorée fait tourner un notebook
+avec l'architecture complète — c'est-à-dire avec un résultat qui ne correspond plus à ce qu'il
+annonce.
 """
 
 from __future__ import annotations
@@ -38,9 +39,9 @@ def default_config() -> AppConfig:
 def test_a_flat_setting_reaches_the_model(app_config: AppConfig) -> None:
     """``model.params.layers``, ``units``, ``vocab_size`` : la configuration à plat est appliquée.
 
-    ``app_config`` porte les surcharges minuscules de la suite de tests, écrites **à plat** : si elles
-    n'atteignent pas le modèle, toute la suite tourne sur l'architecture de référence — plus lente, et
-    surtout différente de ce que les tests annoncent.
+    ``app_config`` porte les surcharges minuscules de la suite de tests, écrites **à plat** :
+    si elles n'atteignent pas le modèle, toute la suite tourne sur l'architecture de
+    référence — plus lente, et surtout différente de ce que les tests annoncent.
     """
     model = build_model(app_config, algorithm="transformer_tiny")
     assert isinstance(model, EncoderDecoderSummarizer)
@@ -53,7 +54,7 @@ def test_a_flat_setting_reaches_the_model(app_config: AppConfig) -> None:
 def test_the_registry_defaults_apply_when_the_configuration_is_silent(
     default_config: AppConfig,
 ) -> None:
-    """Sans réglage écrit, ce sont les défauts du registre qui s'appliquent — et ils sont publiés."""
+    """Sans réglage écrit, ce sont les défauts du registre qui s'appliquent, et ils sont publiés."""
     model = build_model(default_config, algorithm="transformer_tiny")
     assert isinstance(model, EncoderDecoderSummarizer)
     defaults = describe_algorithm("transformer_tiny")["default_params"]["training"]
@@ -63,7 +64,7 @@ def test_the_registry_defaults_apply_when_the_configuration_is_silent(
 
 
 def test_a_block_setting_beats_the_flat_setting(default_config: AppConfig) -> None:
-    """Un réglage écrit dans son bloc (``training.units``) l'emporte sur le même nom écrit à plat."""
+    """Un réglage écrit dans son bloc (``training.units``) l'emporte sur le nom écrit à plat."""
     GlobalHydra.instance().clear()
     with initialize_config_dir(config_dir=str(PROJECT_ROOT / "conf"), version_base=None):
         config = validate_config(

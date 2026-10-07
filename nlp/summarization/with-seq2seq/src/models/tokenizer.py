@@ -18,6 +18,7 @@ reproductible, ce qui est la pire des situations.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -25,7 +26,7 @@ from dataclasses import dataclass, field
 from itertools import pairwise
 from typing import Any
 
-from tokenizers import Tokenizer, models, normalizers, pre_tokenizers
+from tokenizers import Tokenizer, decoders, models, normalizers, pre_tokenizers
 from tokenizers.processors import TemplateProcessing
 
 from src.utils.logging import get_logger
@@ -38,8 +39,42 @@ SPECIAL_TOKENS: tuple[str, ...] = ("[PAD]", "[UNK]", "[BOS]", "[EOS]")
 #: Prefix marking a piece that continues the previous one inside a word (WordPiece convention).
 CONTINUATION_PREFIX = "##"
 
+#: Ponctuation que le corpus colle au mot qui la **précède** (``CBL-045.``, ``45 minutes,``).
+PUNCTUATION_BEFORE = ".,;:!?%\"')]}-"
+
+#: Ponctuation que le corpus colle au mot qui la **suit** (``l'automate``, ``(AU-7)``).
+PUNCTUATION_AFTER = "\"'([{-"
+
+#: Espaces à retirer avant la ponctuation qui appartient au mot précédent.
+_SPACE_BEFORE = re.compile(rf"\s+([{re.escape(PUNCTUATION_BEFORE)}])")
+
+#: Espaces à retirer après la ponctuation qui appartient au mot suivant.
+_SPACE_AFTER = re.compile(rf"([{re.escape(PUNCTUATION_AFTER)}])\s+")
+
+#: Découpe d'un texte en segments : un mot (lettres, chiffres, tirets internes) ou un signe.
+_SEGMENT = re.compile(r"\w+|[^\w\s]")
+
 #: Version of the local tokenizer implementation, published in the model card.
-TOKENIZER_VERSION = "shared-wordpiece-v2"
+TOKENIZER_VERSION = "shared-wordpiece-v3"
+
+
+def rejoin_punctuation(text: str) -> str:
+    """Recoller la ponctuation que la segmentation en pièces a isolée.
+
+    ``BertPreTokenizer`` sépare les espaces **et** la ponctuation : ``CBL-045.`` arrive au modèle en
+    pièces ``CBL``, ``-``, ``045``, ``.``. Au décodage, la bibliothèque recolle les pièces de
+    continuation mais laisse un espace autour de la ponctuation — ``CBL - 045 .`` —, ce qui casse la
+    promesse du projet : un résumé doit pouvoir recopier l'identifiant d'un équipement **tel quel**,
+    sinon la couverture des faits compte un oubli. La règle est écrite ici, minuscule et testée,
+    plutôt que laissée au hasard d'un décodeur.
+
+    Args:
+        text: Decoded text.
+
+    Returns:
+        The text with punctuation glued back to its word.
+    """
+    return _SPACE_AFTER.sub(r"\1", _SPACE_BEFORE.sub(r"\1", text))
 
 
 def _normalise(text: str, *, lowercase: bool) -> str:
@@ -54,6 +89,19 @@ def _normalise(text: str, *, lowercase: bool) -> str:
     """
     normalised = unicodedata.normalize("NFKC", str(text))
     return normalised.lower() if lowercase else normalised
+
+
+def segments_of(text: str, *, lowercase: bool) -> list[str]:
+    """Split a text the way the tokenizer's encoder splits it.
+
+    Args:
+        text: Raw text.
+        lowercase: Whether the text is lower-cased.
+
+    Returns:
+        The segments, in order: one per word, one per non-space punctuation mark.
+    """
+    return [match.group(0) for match in _SEGMENT.finditer(_normalise(text, lowercase=lowercase))]
 
 
 def _characters(word: str) -> list[str]:
@@ -71,7 +119,7 @@ def _characters(word: str) -> list[str]:
 
 
 def learn_vocabulary(
-    corpus: Sequence[str], *, vocab_size: int, min_frequency: int, lowercase: bool
+    segments: Sequence[str], *, vocab_size: int, min_frequency: int
 ) -> tuple[dict[str, int], dict[str, Any]]:
     """Learn a WordPiece vocabulary inside the process, with a documented tie-break.
 
@@ -90,18 +138,16 @@ def learn_vocabulary(
     pas.
 
     Args:
-        corpus: Training texts (documents and reference summaries together).
+        segments: Pre-tokenised segments of the training corpus (:func:`segments_of`), c'est-à-dire
+            **exactement** la découpe que l'encodeur appliquera : un segment par mot, un par signe.
         vocab_size: Target size of the vocabulary, special tokens included.
         min_frequency: Minimum number of occurrences for a pair to be merged.
-        lowercase: Whether the corpus is lower-cased.
 
     Returns:
         ``(vocabulary, stats)`` : the ``piece -> id`` mapping and the sizes published in the model
-        card (words, unigrams, merges, learned pieces).
+        card (segments, unigrams, merges, learned pieces).
     """
-    word_counts: Counter[str] = Counter()
-    for text in corpus:
-        word_counts.update(_normalise(text, lowercase=lowercase).split())
+    word_counts: Counter[str] = Counter(segments)
     pieces: dict[str, list[str]] = {word: _characters(word) for word in word_counts}
     counts: Counter[tuple[str, str]] = Counter()
     # Index inverse : pour chaque paire, les mots qui la contiennent. Un dictionnaire plutôt qu'un
@@ -156,7 +202,7 @@ def learn_vocabulary(
         vocabulary.setdefault(piece, len(vocabulary))
     stats: dict[str, Any] = {
         "version": TOKENIZER_VERSION,
-        "words": len(word_counts),
+        "segments": len(word_counts),
         "unigrams": sum(
             1 for piece in learned if len(piece.removeprefix(CONTINUATION_PREFIX)) == 1
         ),
@@ -263,11 +309,18 @@ class SharedWordPieceTokenizer:
         if not corpus:
             msg = "Cannot learn a vocabulary from an empty corpus"
             raise ValueError(msg)
+        # L'apprentissage se fait sur la **même** découpe que l'encodage : un mot, un signe de
+        # ponctuation. Apprendre sur des espaces et encoder avec une découpe plus fine produit des
+        # pièces que le modèle ne verra jamais à l'entraînement.
+        segments = [
+            segment
+            for text in corpus
+            for segment in segments_of(text, lowercase=bool(self.lowercase))
+        ]
         vocabulary, stats = learn_vocabulary(
-            corpus,
+            segments,
             vocab_size=int(self.vocab_size),
             min_frequency=int(self.min_frequency),
-            lowercase=bool(self.lowercase),
         )
         backend = Tokenizer(
             models.WordPiece(
@@ -279,12 +332,17 @@ class SharedWordPieceTokenizer:
         backend.normalizer = normalizers.Sequence(
             [normalizers.NFKC(), *([normalizers.Lowercase()] if self.lowercase else [])]
         )
-        backend.pre_tokenizer = pre_tokenizers.Whitespace()
+        # La ponctuation est un segment à part entière — c'est ce qui permet à un identifiant comme
+        # ``CBL-045`` de rester composé de pièces connues, et donc d'être recopié par le modèle.
+        backend.pre_tokenizer = pre_tokenizers.BertPreTokenizer()
         backend.post_processor = TemplateProcessing(
             single="[BOS] $A [EOS]",
             pair="[BOS] $A [EOS] $B:1 [EOS]:1",
             special_tokens=[("[BOS]", 2), ("[EOS]", 3)],
         )
+        # Le décodeur recolle les pièces de continuation et nettoie les espaces ; la ponctuation
+        # isolée est recollée par :func:`rejoin_punctuation`, côté projet.
+        backend.decoder = decoders.WordPiece(prefix=CONTINUATION_PREFIX, cleanup=True)
         self.tokenizer = backend
         self.meta = {
             **stats,
@@ -292,9 +350,9 @@ class SharedWordPieceTokenizer:
             "unknown_rate": self.unknown_rate(corpus),
         }
         logger.info(
-            "Vocabulaire appris : {} pièces sur {} mots ({} fusions, fréquence minimale {})",
+            "Vocabulaire appris : {} pièces sur {} segments ({} fusions, fréquence minimale {})",
             self.vocabulary_size,
-            stats["words"],
+            stats["segments"],
             stats["merges"],
             self.min_frequency,
         )
@@ -380,7 +438,13 @@ class SharedWordPieceTokenizer:
         if skip_special:
             specials = set(self.special_ids())
             values = [value for value in values if value not in specials]
-        return self.tokenizer.decode(values, skip_special_tokens=False)
+        # Les jetons inconnus sont retirés du texte publié : ``[UNK]`` n'est pas un mot, et un
+        # résumé qui affiche ``[UNK]`` au milieu d'une phrase n'est pas lisible par un humain.
+        unknown = self.unk_id
+        text = self.tokenizer.decode(
+            [value for value in values if value != unknown], skip_special_tokens=False
+        )
+        return rejoin_punctuation(text)
 
     def pieces(self, text: str) -> list[str]:
         """Return the WordPiece pieces of a text (used by the notebooks).

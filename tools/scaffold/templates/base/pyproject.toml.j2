@@ -53,6 +53,11 @@ namespaces = false
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Symptôme connu : `data` **non ancré** exclut aussi `src/data/`, donc `ruff check .` ne voit ni les
+# générateurs, ni les schémas, ni les chargeurs — le linter est muet sur le dossier le plus dense du
+# projet. Mesuré : 388 erreurs (dont 294 E501) après `ruff format` + `ruff check --fix` sur les 35
+# projets. Réparer d'abord les gabarits `*/src/data/*`, puis ancrer les motifs (`/data`) : la
+# réparation et l'ancrage doivent être livrés ensemble, sinon le rouge apparaît d'un coup.
 extend-exclude = ["outputs", "multirun", "artifacts", "data", ".venv"]
 
 [tool.ruff.lint]
