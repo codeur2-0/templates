@@ -9,9 +9,9 @@ parlent plus du même texte.
 
 Trois décisions sont explicites ici :
 
-* la pondération TF-IDF est calculée **document par document**, pas sur le corpus : un terme rare dans
-  le corpus entier n'est pas plus informatif pour *ce* document, et une IDF apprise sur le train
-  ferait fuiter la fréquence des documents de test dans la représentation ;
+* la pondération TF-IDF est calculée **document par document**, pas sur le corpus : un terme
+  rare dans le corpus entier n'est pas plus informatif pour *ce* document, et une IDF apprise
+  sur le train ferait fuiter la fréquence des documents de test dans la représentation ;
 * la similarité est un cosinus sur des vecteurs normalisés, avec une diagonale mise à zéro : une
   phrase n'est pas son propre voisin, sinon la marche aléatoire de TextRank converge vers la phrase
   la plus longue ;
@@ -27,7 +27,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-
 from src.preprocessing.pipelines import TextPreprocessor
 from src.preprocessing.transformers import split_sentences
 from src.utils.logging import get_logger
@@ -214,7 +213,8 @@ class SentenceFeatureBuilder:
 
         Args:
             documents: Document table (``n_sentences``, ``n_tokens``).
-            references: Reference summary table (``n_tokens``, ``compression``, ``n_salient_facts``).
+            references: Reference summary table (``n_tokens``,
+                ``compression``, ``n_salient_facts``).
 
         Returns:
             Finite metrics describing the compression the task actually asks for.

@@ -1,0 +1,35 @@
+# =================================================================================================
+# Preprocessing & feature engineering
+# -------------------------------------------------------------------------------------------------
+# Décrit le pipeline appliqué aux données (nettoyage, encodage, scaling) ainsi que les features
+# dérivées construites par `src/features/build_features.py`.
+#
+# Règle d'or : tout ce qui est **appris** sur les données (moyennes, médianes, catégories,
+# encodeurs) doit être appris sur le train uniquement, puis appliqué au val/test. C'est le rôle
+# du pipeline scikit-learn encapsulé dans `src/preprocessing/pipelines.py`.
+# =================================================================================================
+
+numeric:
+  imputer: median
+  imputer_fill_value: 0.0
+  clip_outliers: true
+  clip_quantiles:
+  - 0.01
+  - 0.99
+  scaler: standard
+  log1p_columns: []
+categorical:
+  imputer: most_frequent
+  imputer_fill_value: unknown
+  encoder: onehot
+  handle_unknown: ignore
+  min_frequency: 0.01
+  max_categories: 25
+features: []
+columns: {}
+validation:
+  raw: true
+  processed: true
+  inference: true
+  strict: true
+  lazy: false

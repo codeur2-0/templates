@@ -1,7 +1,7 @@
 """Génération du corpus : documents, résumés de référence, faits et métadonnées.
 
-``mode=generate-data`` (et ``make data``) exécute ce pipeline. C'est le seul endroit où le générateur
-de la famille est appelé et le seul qui écrit dans ``data/raw`` :
+``mode=generate-data`` (et ``make data``) exécute ce pipeline. C'est le seul endroit
+où le générateur de la famille est appelé et le seul qui écrit dans ``data/raw`` :
 
 1. instancier le générateur depuis le nœud ``data`` de la configuration,
 2. produire les documents, leurs résumés de référence **et** la table des faits,
@@ -9,9 +9,10 @@ de la famille est appelé et le seul qui écrit dans ``data/raw`` :
    manquant, document inconnu, fait hors des phrases) **avant** d'écrire quoi que ce soit,
 4. persister (Parquet pour les machines, CSV pour les humains) et archiver la recette.
 
-Les métadonnées ne sont pas décoratives : elles enregistrent la graine, les effectifs par split, la
-**compression demandée**, le taux de couverture qu'un résumé recopiant le document obtiendrait, et la
-part de faits saillants par type. Le rapport peut donc situer un score au lieu de le présenter seul.
+Les métadonnées ne sont pas décoratives : elles enregistrent la graine, les
+effectifs par split, la **compression demandée**, le taux de couverture qu'un
+résumé recopiant le document obtiendrait, et la part de faits saillants par
+type. Le rapport peut donc situer un score au lieu de le présenter seul.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
-
 from src.data.generators import SyntheticSummaryCorpusGenerator
 from src.data.loaders import SummaryCorpusLoader
 from src.data.schemas import FACT_TYPES, INTERVENTION_TYPES, SPLITS, split_sizes
@@ -79,7 +79,8 @@ class DataGenerationPipeline(BasePipeline):
             artifacts=artifacts,
             payload=bundle,
             messages=[
-                f"{metrics['n_documents']:.0f} comptes-rendus, {metrics['n_references']:.0f} résumés "
+                f"{metrics['n_documents']:.0f} comptes-rendus, "
+                f"{metrics['n_references']:.0f} résumés "
                 f"de référence ({metrics['compression_mean']:.1%} de la longueur du document en "
                 "moyenne).",
                 f"{metrics['n_salient_facts']:.0f} faits saillants annotés en "

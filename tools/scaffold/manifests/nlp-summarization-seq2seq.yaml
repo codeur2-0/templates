@@ -1,0 +1,113 @@
+# ==============================================================================================
+# nlp / summarization / with-seq2seq
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/summarization.yaml` (résumer un compte-rendu
+# d'intervention). Ce manifeste ne décrit QUE ce qui change avec la stack : l'identité du projet,
+# l'algorithme servi et les réglages de la boucle d'entraînement. Le corpus, les sept types de faits,
+# la part de réécriture des résumés et la métrique principale sont ceux de la famille — c'est ce qui
+# rend les scores comparables à la baseline publiée avec le corpus.
+#
+# Le seuil contractuel (0,45) est celui de la famille : il est au-dessus de la baseline extractive
+# mesurée sur le corpus (les premières phrases du document, même budget), donc le modèle servi doit
+# la battre pour être déclaré conforme. Les deux valeurs sont mesurées par `mode=evaluate` sur le
+# **même** split de test et publiées ensemble dans le rapport.
+# ==============================================================================================
+
+key: nlp-summarization-seq2seq
+title: "Résumé de comptes-rendus d'intervention — encodeur-décodeur appris, baseline extractive publiée"
+summary: >-
+  Résumer un compte-rendu d'intervention en quelques phrases **fidèles** : 600 documents synthétiques,
+  leurs résumés de référence écrits à partir des faits saillants, et la table des faits annotés
+  (équipement, symptôme, cause, action, pièce, durée, statut). Un encodeur-décodeur minuscule est
+  entraîné **sur le corpus** — vocabulaire WordPiece et poids appris sur le split d'entraînement,
+  aucun modèle pré-entraîné téléchargé —, puis servi avec un décodage glouton et un budget de longueur
+  déclaré. La baseline extractive et le résumé vide sont mesurés sur les **mêmes lignes de test**,
+  donc chaque score se lit par différence. La couverture des faits saillants et les valeurs non
+  supportées sont publiées à côté du ROUGE : un résumé fluide qui oublie la durée d'une intervention
+  est un mauvais résumé, et il est visible.
+
+family: summarization
+domain: nlp
+problem: summarization
+stack: seq2seq
+project_slug: resume-comptes-rendus-intervention
+package_name: resume_comptes_rendus_intervention
+
+business:
+  # Mesures reproductibles : `python -m src.main mode=all` (graine 42, 600 comptes-rendus,
+  # 360 d'entraînement, 120 de validation, 60 de test). Les valeurs ci-dessous sortent des artefacts
+  # du run de référence et sont rejouées à l'identique par le pipeline.
+  measured_results:
+    - label: "Documents / phrases par document / tokens par document"
+      value: "600 / 11,2 / 130,9"
+    - label: "Faits annotés / saillants / par document"
+      value: "5 036 / 3 573 / 8,4 et 6,0"
+    - label: "Taux de réécriture des résumés de référence / registres"
+      value: "≈ 50 % / deux formulations par type de fait"
+    - label: "Part des résumés annotés couverts par la référence elle-même"
+      value: "1,0000"
+    - label: "Référence « résumé vide » (plancher défini, publié pour être lu)"
+      value: "0,0000"
+
+model:
+  display_name: "Encodeur-décodeur transformer (2 couches, 128 unités) entraîné sur le corpus"
+  algorithm: transformer_tiny
+  rationale: >-
+    Le modèle est un encodeur-décodeur de type transformer, volontairement minuscule (2 couches,
+    128 unités, 4 têtes) : le vocabulaire WordPiece partagé par l'encodeur et le décodeur est appris
+    sur le split d'entraînement, les poids sont initialisés au hasard puis pré-entraînés par
+    reconstruction d'un résumé tronqué et bruité, avant l'affinage supervisé enseignant-forcé. Rien
+    n'est téléchargé, donc rien ne dépend du réseau à l'exécution. Trois choix sont publiés plutôt que
+    cachés : le décodage est **glouton** (un résumé doit être reproductible ligne à ligne), le budget
+    de longueur est déclaré, et la part des résumés qui l'atteignent figure dans le rapport — un
+    décodeur qui bute sur sa borne ne conclut pas. Le corpus étant synthétique et les résumés de
+    référence construits sur des gabarits de faits, la tâche est à la portée d'un modèle de cette
+    taille ; c'est précisément ce que le projet démontre.
+  params:
+    layers: 2
+    units: 128
+    heads: 4
+    dropout: 0.1
+    max_input_tokens: 160
+    compression: 0.45
+    max_output_tokens: 90
+    pretraining:
+      epochs: 2
+      mask_rate: 0.25
+  alternatives:
+    - "`textrank` : extractive avec diversification MMR — mesurée sur le même échantillon de validation, publiée dans la comparaison des algorithmes du notebook 04."
+    - "`lead` : plancher extractif, servi comme **référence** dans le rapport d'évaluation."
+    - "Modèle pré-entraîné (`barthez`, `mT5`) : hors périmètre (aucune dépendance réseau à l'exécution)."
+    - "Modèle abstrait de type GPT : hors périmètre, et 360 documents d'entraînement ne justifient pas un modèle de langue."
+
+train:
+  epochs: 12
+  batch_size: 16
+  learning_rate: 0.002
+  callbacks:
+    progress_bar: false
+  early_stopping:
+    enabled: false
+
+extras:
+  data_conf:
+    corpus:
+      split_shares:
+        train: 0.6
+        val: 0.2
+        calibration: 0.1
+        test: 0.1
+      piece_salience: 0.4
+      rewrite_share: 0.5
+      max_compression: 0.6
+  model_conf:
+    text_column: text
+    id_column: doc_id
+    strategies_to_compare:
+      - transformer_tiny
+      - textrank
+      - lead
+  root_conf:
+    train:
+      artifacts:
+        model_file: summarizer.pt

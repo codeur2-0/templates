@@ -8,14 +8,15 @@
 * ``artifacts/reports/inference_summary.json`` — la lecture rapide : longueur moyenne, compression,
   part de résumés qui atteignent leur budget.
 
-Le pipeline refuse de tourner sans artefact : un modèle non entraîné produirait des résumés vides, et
-un tableau vide ne se distingue pas d'un tableau juste.
+Le pipeline refuse de tourner sans artefact : un modèle non entraîné produirait
+des résumés vides, et un tableau vide ne se distingue pas d'un tableau juste.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 from src.data.loaders import SummaryCorpusLoader
 from src.inference.predictor import SummaryPredictor
 from src.models import load_model
@@ -23,6 +24,7 @@ from src.models.contract import BaseTextGenerator
 from src.pipelines.base import BasePipeline, PipelineResult
 from src.utils.config_access import node
 from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
 
 logger = get_logger(__name__)
 
@@ -87,7 +89,7 @@ class InferencePipeline(BasePipeline):
         return model
 
     @staticmethod
-    def _metrics(predictions: object) -> dict[str, float]:
+    def _metrics(predictions: pd.DataFrame) -> dict[str, float]:
         """Aggregate the prediction table into flat metrics.
 
         Args:
@@ -110,7 +112,7 @@ class InferencePipeline(BasePipeline):
         }
 
     @staticmethod
-    def _notes(predictions: object, summary: object) -> list[str]:
+    def _notes(predictions: pd.DataFrame, summary: pd.DataFrame) -> list[str]:
         """Human-readable lines published with the inference.
 
         Args:
@@ -123,7 +125,8 @@ class InferencePipeline(BasePipeline):
         if getattr(predictions, "empty", True):
             return ["Aucun document à résumer : l'entrée est vide."]
         lines = [
-            f"{len(predictions)} document(s) résumé(s), {float(predictions['n_words'].mean()):.1f} mots "
+            f"{len(predictions)} document(s) résumé(s), "
+            f"{float(predictions['n_words'].mean()):.1f} mots "
             f"produits en moyenne ({float(predictions['compression'].mean()):.1%} du document)."
         ]
         if getattr(summary, "empty", True) is False:
@@ -141,19 +144,19 @@ class InferencePipeline(BasePipeline):
         return lines
 
 
-def predictions_path(paths: object) -> Path:
+def predictions_path(paths: ProjectPaths) -> Path:
     """Return the expected path of the published predictions.
 
     Args:
-        paths: Project filesystem layout (a :class:`~src.utils.paths.ProjectPaths`).
+        paths: Project filesystem layout.
 
     Returns:
         The CSV path inside ``artifacts/reports``.
     """
-    return Path(str(getattr(paths, "reports_dir"))) / "predictions.csv"
+    return paths.reports_dir / "predictions.csv"
 
 
-def loader_for(paths: object, dataset_name: str) -> SummaryCorpusLoader:
+def loader_for(paths: ProjectPaths, dataset_name: str) -> SummaryCorpusLoader:
     """Build the corpus loader of a project layout (used by the scripts and the tests).
 
     Args:
@@ -163,7 +166,7 @@ def loader_for(paths: object, dataset_name: str) -> SummaryCorpusLoader:
     Returns:
         The configured loader.
     """
-    return SummaryCorpusLoader(paths, dataset_name=str(dataset_name))  # type: ignore[arg-type]
+    return SummaryCorpusLoader(paths, dataset_name=str(dataset_name))
 
 
 __all__ = ["InferencePipeline", "loader_for", "predictions_path"]

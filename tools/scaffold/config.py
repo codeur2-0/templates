@@ -92,20 +92,24 @@ class ColumnSpec(BaseModel):
 
 
 class AnnotationColumnSpec(BaseModel):
-    """A single column of the **second** table of a span-labelling corpus.
+    """A single column of the **second** table** of a corpus whose supervision is not a column.
 
     Une tâche d'extraction d'entités ne se décrit pas par une table : les messages portent le texte,
     une **table d'annotations** porte la supervision (décalages, type, surface). Ce modèle décrit
     cette seconde table, dont les rôles n'ont rien de commun avec ceux de la première : une clé de
-    jointure, des décalages de caractères, un type d'entité.
+    jointure, des décalages de caractères, un type d'entité. Une table de résumé suit la même forme
+    (une ligne par fait annoté, une ligne par résumé de référence) et a donc besoin d'un rôle de
+    plus : ses lignes portent leur propre **identifiant**.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(description="Column name as it appears in the annotation table.")
     dtype: str = Field(description="Logical dtype: int, float, str, category, bool, datetime.")
-    role: Literal["join_key", "offset", "target", "metadata"] = Field(
-        description="Annotation role: join key, character offset, entity type or metadata."
+    role: Literal["identifier", "join_key", "offset", "target", "metadata"] = Field(
+        description=(
+            "Annotation role: identifier of the annotation, join key, offset, target or metadata."
+        )
     )
     description: str = Field(description="Business meaning (French, used in READMEs).")
     checks: dict[str, Any] = Field(

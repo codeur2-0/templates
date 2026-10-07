@@ -2,10 +2,10 @@
 
 Un projet de résumé compare **des stratégies qui ne partagent rien** : une baseline extractive qui
 choisit des phrases dans le document, un encodeur-décodeur qui les réécrit. Ce qu'elles partagent,
-c'est ce contrat — ``fit`` sur les documents et leurs résumés de référence, ``summarize`` qui rend un
-:class:`TextSummary` par document, ``model_card`` qui publie ce que le modèle a appris et sur quoi il
-a été mesuré. Le reste du projet (évaluateur, rapport, notebooks, API de prédiction) ne connaît que
-lui : ajouter une architecture ne touche ni l'évaluation, ni les figures, ni les tests.
+c'est ce contrat — ``fit`` sur les documents et leurs résumés de référence, ``summarize`` qui rend
+un :class:`TextSummary` par document, ``model_card`` qui publie ce que le modèle a appris et sur
+quoi il a été mesuré. Le reste du projet (évaluateur, rapport, notebooks, API de prédiction) ne
+connaît que lui : ajouter une architecture ne touche ni l'évaluation, ni les figures, ni les tests.
 
 Trois décisions sont dans ce fichier plutôt que dans chaque modèle :
 
@@ -24,13 +24,12 @@ import json
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import joblib
 import pandas as pd
-
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -38,7 +37,7 @@ logger = get_logger(__name__)
 
 def _utc_now() -> str:
     """Return the current UTC timestamp in ISO 8601 (second resolution)."""
-    return datetime.now(tz=UTC).replace(microsecond=0).isoformat()
+    return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat()
 
 
 @dataclass(slots=True)
@@ -210,7 +209,8 @@ class BaseTextGenerator(ABC):
 
         Args:
             texts: Documents to summarise.
-            doc_ids: Identifiers, in the same order as ``texts`` (defaults to ``doc-0``, ``doc-1``…).
+            doc_ids: Identifiers, in the same order as
+                ``texts`` (defaults to ``doc-0``, ``doc-1``…).
 
         Returns:
             One :class:`TextSummary` per text, in input order.

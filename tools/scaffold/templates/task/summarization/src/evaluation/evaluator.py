@@ -6,12 +6,13 @@ L'évaluateur répond à quatre questions, dans l'ordre où un lecteur se les po
    document, plus la couverture des faits saillants. Les deux familles de métriques sont publiées
    ensemble parce qu'aucune ne suffit : le ROUGE récompense la formulation, la couverture la
    *substance* ;
-2. **est-ce que c'est vrai ?** — les valeurs du résumé absentes du document sont comptées et listées.
-   C'est la seule mesure d'hallucination possible sans juge humain, et elle est publiée avec ses
-   limites : elle détecte une durée ou une référence inventée, pas une phrase qui réordonne des faits
-   exacts ;
-3. **où est-ce que ça casse ?** — la ventilation par type d'intervention et par urgence déclarée, les
-   résumés les plus courts, les plus longs, et les documents où le modèle a buté sur son budget ;
+2. **est-ce que c'est vrai ?** — les valeurs du résumé absentes du document sont
+   comptées et listées. C'est la seule mesure d'hallucination possible sans juge
+   humain, et elle est publiée avec ses limites : elle détecte une durée ou une
+   référence inventée, pas une phrase qui réordonne des faits exacts ;
+3. **où est-ce que ça casse ?** — la ventilation par type d'intervention
+   et par urgence déclarée, les résumés les plus courts, les plus longs,
+   et les documents où le modèle a buté sur son budget ;
 4. **par rapport à quoi ?** — trois références mesurées sur les **mêmes lignes** : le résumé vide
    (ROUGE 0,0, un plancher défini), la baseline extractive ``lead`` et la baseline ``textrank``
    publiée par la famille. Le score du modèle servi se lit donc par différence.
@@ -28,7 +29,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-
 from src.data.schemas import fact_columns
 from src.evaluation.rouge import corpus_rouge, rouge_scores
 from src.models.contract import BaseTextGenerator
@@ -75,7 +75,7 @@ class SummaryEvaluation:
     segments: pd.DataFrame = field(default_factory=pd.DataFrame)
     fidelity: pd.DataFrame = field(default_factory=pd.DataFrame)
     errors: pd.DataFrame = field(default_factory=pd.DataFrame)
-    baselines: dict[str, dict[str, float]] = field(default_factory=dict)
+    baselines: dict[str, dict[str, Any]] = field(default_factory=dict)
     verdict: str = "indéterminé"
     verdict_detail: dict[str, Any] = field(default_factory=dict)
     predictions: pd.DataFrame = field(default_factory=pd.DataFrame)
@@ -142,7 +142,7 @@ class SummaryEvaluator:
             top_errors: Number of documents archived in the error table.
             baselines: Extra strategies measured on the same lines and published as references.
         """
-        self.models = list(models) if isinstance(models, (list, tuple)) else [models]
+        self.models = [models] if isinstance(models, BaseTextGenerator) else list(models)
         if not self.models:
             msg = "SummaryEvaluator needs at least one strategy to measure"
             raise ValueError(msg)
@@ -220,7 +220,7 @@ class SummaryEvaluator:
             verdict=verdict,
             verdict_detail=detail,
             predictions=predictions,
-            n_documents=int(len(documents)),
+            n_documents=len(documents),
             strategies=tuple(dict.fromkeys(predictions["strategy"]))
             if not predictions.empty
             else (),
@@ -323,12 +323,15 @@ class SummaryEvaluator:
         Returns:
             ``{reference: {metric: value}}``, with the empty-summary floor always present.
         """
-        baselines: dict[str, dict[str, float]] = {"resume_vide": trivial_floor()}
+        baselines: dict[str, dict[str, Any]] = {"resume_vide": dict(trivial_floor())}
         for name, strategy in self._baseline_strategies().items():
             subset = predictions.loc[predictions["strategy"] == strategy]
             if subset.empty:
                 continue
-            block = {
+            block: dict[str, Any] = {
+                # La clé est le **nom publié** de la référence : le rapport lit `baselines` sans
+                # connaître les stratégies internes.
+                "reference": name,
                 "strategy": strategy,
                 "rouge1_f": round(float(subset["rouge1_f"].mean()), 4),
                 "rouge2_f": round(float(subset["rouge2_f"].mean()), 4),
@@ -337,7 +340,6 @@ class SummaryEvaluator:
                 "unsupported_facts_mean": round(float(subset["unsupported_facts"].mean()), 3),
                 "compression": round(float(subset["compression"].mean()), 4),
             }
-            block["strategy"] = strategy  # type: ignore[assignment]
             baselines[name] = block
         return baselines
 
@@ -371,8 +373,8 @@ class SummaryEvaluator:
             limit: Number of rows to keep (defaults to the evaluator's ``top_errors``).
 
         Returns:
-            The worst documents, with their ROUGE, their coverage, their missing facts and an excerpt
-            of the document — enough to diagnose without reopening the corpus.
+            The worst documents, with their ROUGE, their coverage, their missing facts and
+            an excerpt of the document — enough to diagnose without reopening the corpus.
         """
         if predictions.empty:
             return pd.DataFrame()
@@ -389,7 +391,7 @@ class SummaryEvaluator:
                     "rouge_l_f": round(float(row.rouge_l_f), 4),
                     "fact_coverage": round(float(row.fact_coverage), 4),
                     "unsupported_facts": int(row.unsupported_facts),
-                    "n_predicted_words": int(len(str(row.prediction).split())),
+                    "n_predicted_words": len(str(row.prediction).split()),
                     "intervention_type": str(document["intervention_type"].iloc[0])
                     if not document.empty
                     else "",
@@ -446,7 +448,10 @@ class SummaryEvaluator:
         """
         for column in ("doc_id", "text"):
             if column not in documents.columns:
-                msg = f"Document table is missing the column '{column}' (present: {list(documents.columns)})"
+                msg = (
+                    f"Document table is missing the column '{column}' "
+                    f"(present: {list(documents.columns)})"
+                )
                 raise ValueError(msg)
         for column in ("doc_id", "summary"):
             if column not in references.columns:

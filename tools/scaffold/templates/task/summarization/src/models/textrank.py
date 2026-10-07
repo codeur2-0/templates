@@ -1,25 +1,25 @@
 """Baseline extractive : TextRank sur le graphe de phrases, puis sélection MMR.
 
-La baseline sert deux fois dans ce projet : c'est le **plancher honnête** contre lequel
-l'encodeur-décodeur est comparé (elle ne réécrit rien, donc elle ne peut pas inventer de fait), et
-c'est le modèle de référence qui explique, sur des cas concrets, ce qu'un résumé extractif peut et ne
-peut pas faire.
+La baseline sert deux fois dans ce projet : c'est le **plancher honnête**
+contre lequel l'encodeur-décodeur est comparé (elle ne réécrit rien, donc elle
+ne peut pas inventer de fait), et c'est le modèle de référence qui explique,
+sur des cas concrets, ce qu'un résumé extractif peut et ne peut pas faire.
 
 L'algorithme tient en deux étages, tous les deux déterministes :
 
-1. **TextRank** — la similarité entre phrases est une matrice de poids ; on y fait tourner une marche
-   aléatoire amortie (``damping``) jusqu'à convergence, ce qui donne à chaque phrase un score qui
-   récompense celles qui ressemblent à *beaucoup* d'autres. Un graphe sans arête retombe sur une
-   distribution uniforme plutôt que de renvoyer des zéros ;
+1. **TextRank** — la similarité entre phrases est une matrice de poids ; on y fait tourner
+   une marche aléatoire amortie (``damping``) jusqu'à convergence, ce qui donne à chaque
+   phrase un score qui récompense celles qui ressemblent à *beaucoup* d'autres. Un graphe
+   sans arête retombe sur une distribution uniforme plutôt que de renvoyer des zéros ;
 2. **MMR** — sélectionner les phrases les plus centrales produit un résumé redondant, donc la
-   sélection pénalise la ressemblance avec ce qui est déjà choisi (``mmr_lambda`` proche de 1 favorise
-   la centralité, proche de 0 la diversité). Les phrases retenues sont ensuite **remises dans l'ordre
-   du document** : un résumé se lit, et la sortie d'un MMR brut ne se lit pas.
+   sélection pénalise la ressemblance avec ce qui est déjà choisi (``mmr_lambda`` proche de 1
+   favorise la centralité, proche de 0 la diversité). Les phrases retenues sont ensuite **remises
+   dans l'ordre du document** : un résumé se lit, et la sortie d'un MMR brut ne se lit pas.
 
-``fit`` ne calibre pas de poids : il choisit ``mmr_lambda`` sur le split de validation, si on le lui
-donne, et publie la grille parcourue. C'est un apprentissage d'un seul hyperparamètre, mesuré par
-ROUGE-1 F1 sur un échantillon déterministe — la baseline a donc, elle aussi, une trace de ce qui a été
-arbitré.
+``fit`` ne calibre pas de poids : il choisit ``mmr_lambda`` sur le split de
+validation, si on le lui donne, et publie la grille parcourue. C'est un
+apprentissage d'un seul hyperparamètre, mesuré par ROUGE-1 F1 sur un échantillon
+déterministe — la baseline a donc, elle aussi, une trace de ce qui a été arbitré.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-
 from src.evaluation.rouge import rouge_scores
 from src.features.build_features import SentenceFeatureBuilder, SentenceFeatures
 from src.models.contract import BaseTextGenerator, TextSummary

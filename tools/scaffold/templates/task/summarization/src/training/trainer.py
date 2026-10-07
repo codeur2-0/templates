@@ -4,10 +4,10 @@ Le trainer ne réimplémente pas la boucle d'apprentissage — elle vit dans la 
 orchestre ce qui doit être identique d'une stratégie à l'autre :
 
 1. **l'ajustement** sur le split ``train`` uniquement, la validation n'étant lue que pour suivre ;
-2. **la comparaison** des algorithmes déclarés par la configuration (``strategies_to_compare``) sur un
-   échantillon **déterministe** du split de validation, ROUGE-1 et couverture des faits en main. La
-   grille est publiée telle quelle : c'est ce qui permet de dire *pourquoi* l'encodeur-décodeur est
-   servi plutôt qu'asserté ;
+2. **la comparaison** des algorithmes déclarés par la configuration
+   (``strategies_to_compare``) sur un échantillon **déterministe** du split de validation,
+   ROUGE-1 et couverture des faits en main. La grille est publiée telle quelle : c'est ce
+   qui permet de dire *pourquoi* l'encodeur-décodeur est servi plutôt qu'asserté ;
 3. **la sélection** du meilleur selon la métrique contractuelle, puis la persistance de l'artefact,
    de ses métriques, de sa fiche de modèle et de la configuration résolue.
 
@@ -25,9 +25,8 @@ from time import perf_counter
 from typing import Any
 
 import pandas as pd
-
 from src.data.schemas import FACT_TYPES, fact_columns
-from src.evaluation.rouge import corpus_rouge, rouge_scores
+from src.evaluation.rouge import rouge_scores
 from src.models.contract import BaseTextGenerator
 from src.training.metrics import coverage_scores, latency_stats, verdict_from_metrics
 from src.utils.config_access import node
@@ -37,7 +36,8 @@ from src.utils.paths import ProjectPaths
 
 logger = get_logger(__name__)
 
-#: Number of validation documents used by the algorithm comparison (deterministic head of the split).
+#: Number of validation documents used by the algorithm
+#: comparison (deterministic head of the split).
 COMPARISON_DOCUMENTS = 40
 
 
@@ -123,8 +123,8 @@ class SummaryTrainer:
             id_column: Column holding the document identifiers.
             compare: Algorithms compared on the validation sample before serving.
             comparison_documents: Size of that deterministic sample.
-            builders: Alternative strategies, provided by the pipeline (the trainer never imports the
-                factory itself, so it stays testable with hand-built models).
+            builders: Alternative strategies, provided by the pipeline (the trainer never
+                imports the factory itself, so it stays testable with hand-built models).
             baseline: Published reference measured on the same lines (``lead`` or ``textrank``).
             callbacks: Callbacks fired after each validation measurement.
         """
@@ -452,7 +452,8 @@ class SummaryTrainer:
                     warnings.append(
                         f"La baseline '{self.baseline.strategy}' obtient un meilleur ROUGE-1 "
                         f"({float(rows.iloc[0]):.4f}) que l'algorithme servi "
-                        f"({float(trivial.iloc[0]):.4f}) : c'est un résultat à publier, pas à corriger "
+                        f"({float(trivial.iloc[0]):.4f}) : c'est un résultat à publier, pas "
+                        "à corriger "
                         "en silence."
                     )
         return warnings

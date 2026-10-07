@@ -1,15 +1,16 @@
 """Figures du résumé : ce qu'un tableau de ROUGE ne montre pas.
 
-Quatre figures, choisies parce que chacune répond à une question qu'un chiffre moyen laisse ouverte :
+Quatre figures, choisies parce que chacune répond à
+une question qu'un chiffre moyen laisse ouverte :
 
 * ``rouge_par_strategie`` — le ROUGE-1/2/L de chaque stratégie mesurée sur les mêmes lignes, avec le
   résumé vide à zéro : la comparaison des modèles et de leurs références sur un seul graphique ;
 * ``couverture_par_type`` — la couverture des faits par type : un résumé qui couvre les symptômes et
   oublie les durées est visible immédiatement, alors qu'une moyenne de couverture le cache ;
-* ``compression_couverture`` — le nuage longueur × couverture, où l'on voit si couvrir plus demande
+* ``compression_couverture`` — le nuage longueur x couverture, où l'on voit si couvrir plus demande
   d'écrire plus : c'est l'arbitrage réel du produit, et il est mesuré ;
-* ``couts_sortie`` — la part de résumés qui butent sur leur budget et la distribution des longueurs :
-  un décodeur qui s'arrête au lieu de conclure se voit ici et nulle part ailleurs.
+* ``couts_sortie`` — la part de résumés qui butent sur leur budget et la distribution des
+  longueurs : un décodeur qui s'arrête au lieu de conclure se voit ici et nulle part ailleurs.
 
 Chaque fonction écrit un PNG et n'échoue jamais le pipeline : une figure impossible (table vide) est
 silencieusement ignorée, jamais remplacée par un graphique trompeur.
@@ -17,7 +18,7 @@ silencieusement ignorée, jamais remplacée par un graphique trompeur.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import matplotlib
@@ -26,9 +27,8 @@ import pandas as pd
 
 matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt  # noqa: E402
-
-from src.utils.logging import get_logger  # noqa: E402
+import matplotlib.pyplot as plt
+from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -240,7 +240,7 @@ def plot_all(
     directory = Path(figures_dir)
     directory.mkdir(parents=True, exist_ok=True)
     written: dict[str, Path] = {}
-    jobs: tuple[tuple[str, object], ...] = (
+    jobs: tuple[tuple[str, Callable[[Path], Path | None]], ...] = (
         ("rouge_par_strategie", lambda target: plot_strategy_rouge(per_strategy, target)),
         ("couverture_par_type", lambda target: plot_coverage_by_type(fidelity, target)),
         ("compression_couverture", lambda target: plot_compression_vs_coverage(fidelity, target)),

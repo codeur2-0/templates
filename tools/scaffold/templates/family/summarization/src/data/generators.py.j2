@@ -1,0 +1,730 @@
+{#- Générateur du corpus de comptes-rendus d'intervention (famille summarization). -#}
+"""Générateur synthétique du corpus de résumé automatique.
+
+{{ wrap(spec.data.description, 98) }}
+
+Le corpus est écrit **phrase par phrase** : chaque phrase est produite par un gabarit à slots, et
+lorsqu'elle porte un fait rapportable, la ligne correspondante est écrite dans la table des faits au
+moment de sa rédaction — avec sa surface exacte et l'index de sa phrase. Rien n'est retrouvé après
+coup par une expression régulière : la référence d'un fait est la trace de ce qui a été écrit.
+
+Trois décisions structurent la difficulté de la tâche, et elles sont mesurables :
+
+* **les résumés de référence réécrivent les faits** : ils reprennent les valeurs à l'identique
+  (``45 minutes``, ``JNT-204``) dans des phrases qui ne recopient pas le document. Un modèle qui
+  recopie la phrase la plus centrale du document est donc pénalisé par le ROUGE **et** par la
+  couverture, et l'écart entre les deux est ce que le projet publie ;
+* **tous les faits ne sont pas saillants** : chaque document contient 8 à 16 faits, dont 3 à 7
+  seulement figurent dans le résumé de référence. Les autres restent des faits exacts que le résumé
+  n'a pas à rapporter — un modèle qui les ajoute ne gagne pas de couverture et perd du ROUGE ;
+* **le décor est un distracteur déclaré** : numéros de ticket, de téléphone, de parking, horaires de
+  présence et formules administratives parsèment les documents et n'apparaissent jamais dans les
+  résumés. Le rapport publie les valeurs non supportées, donc un modèle qui invente un numéro est
+  détecté.
+
+Le découpage (``train`` / ``val`` / ``calibration`` / ``test``) est **stratifié
+par type d'intervention** et écrit dans le corpus : deux exécutions à graine
+fixée produisent les mêmes lignes au bit près, et le test ne sert qu'une fois.
+Tout est semé, rien n'est téléchargé, aucune donnée personnelle n'est utilisée.
+"""
+
+from __future__ import annotations
+
+import random
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from typing import Any
+
+import pandas as pd
+
+from src.data.generator_base import BaseCorpusGenerator, GeneratedCorpus
+from src.data.vocabulary import (
+    DISTRACTORS,
+    EQUIPMENT_PROFILES,
+    DOCUMENT_TEMPLATES,
+    FACT_TYPES,
+    FILLER_SENTENCES,
+    INTERVENTION_TYPES,
+    DURATIONS,
+    MAX_COMPRESSION,
+    SECONDARY_ACTIONS,
+    STATUSES,
+    SENTENCE_RANGE,
+    SITES,
+    SPLIT_SHARES,
+    SUMMARY_OPENERS,
+    SUMMARY_SENTENCE_RANGE,
+    SUMMARY_TEMPLATES,
+    TECHNICIANS,
+    URGENCIES,
+    vocabulary_report,
+)
+from src.preprocessing.transformers import tokenize
+from src.utils.config_access import as_mapping
+from src.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+#: Nombre maximal de faits écrits par document (les gabarits en portent huit au minimum).
+MAX_FACTS_PER_DOCUMENT: int = 16
+
+#: Types de faits obligatoires : sans eux, un document ne serait pas un compte-rendu d'intervention.
+MANDATORY_TYPES: tuple[str, ...] = ("equipement", "symptome", "cause", "action", "duree", "statut")
+
+#: Nombre de phrases de décor ajoutées à chaque document (distracteurs).
+FILLER_PER_DOCUMENT: tuple[int, int] = (2, 4)
+
+#: Nombre maximal de phrases de décor ajoutées pour tenir la borne de compression d'un document.
+MAX_EXTRA_FILLERS: int = 6
+
+#: Slot de gabarit qui porte la valeur d'un fait, par type de fait.
+SLOT_OF: dict[str, str] = {
+    "equipement": "equipment",
+    "symptome": "symptom",
+    "cause": "cause",
+    "action": "action",
+    "piece": "part",
+    "duree": "duration",
+    "statut": "status",
+}
+
+
+@dataclass
+class GeneratedSummaryCorpus(GeneratedCorpus):
+    """Les trois tables du résumé, plus les métadonnées de la génération.
+
+    Attributes:
+        documents: Comptes-rendus (une ligne par document, avec son découpage).
+        queries: Résumés de référence — le champ garde le nom du contrat de la modalité texte, parce
+            que tout l'outillage de projets texte (pipelines, générateurs de notebooks) le lit
+            ainsi.
+        metadata: Recette de la génération (graine, tailles, registres, parts de réécriture).
+        facts: Faits rapportables, avec leur type, leur valeur, leur surface et leur saillance.
+    """
+
+    facts: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+
+@dataclass(slots=True)
+class _Fact:
+    """Un fait écrit dans un document, avant mise en table."""
+
+    fact_type: str
+    value: str
+    surface: str
+    sentence_index: int
+    salient: bool
+
+
+@dataclass(slots=True)
+class _DocumentDraft:
+    """Un document en cours d'écriture : ses phrases, ses faits et ses valeurs de décor."""
+
+    sentences: list[str] = field(default_factory=list)
+    facts: list[_Fact] = field(default_factory=list)
+    fillers: dict[str, str] = field(default_factory=dict)
+
+
+def _declared(*values: Any) -> Any:
+    """Return the first declared value of a configuration setting.
+
+    Le projet lit chaque réglage dans deux endroits (la racine du nœud ``data`` et son sous-nœud
+    ``corpus``) : ``None`` veut dire « non configuré », zéro reste une valeur — d'où cette fonction
+    plutôt qu'une chaîne de ``or``, qui écraserait silencieusement un partage de zéro déclaré.
+
+    Args:
+        *values: Candidate values, in precedence order (the last one is the default).
+
+    Returns:
+        The first value that is not ``None``; ``None`` when every candidate is.
+    """
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+class SyntheticSummaryCorpusGenerator(BaseCorpusGenerator):
+    """Génère des comptes-rendus, leurs résumés de référence et la table de leurs faits.
+
+    Attributes:
+        n_documents: Number of documents written.
+        seed: Seed of the generation.
+        site_weights: Relative frequency of each site.
+        piece_salience: Probability that a replaced part is a salient fact.
+        rewrite_share: Share of the reference summaries written with the second register.
+        max_compression: Hard bound on the reference length, relative to its document.
+    """
+
+    dataset_name = "intervention_reports"
+
+    def __init__(
+        self,
+        *,
+        n_documents: int = 600,
+        seed: int = 42,
+        site_weights: Mapping[str, float] | None = None,
+        piece_salience: float = 0.4,
+        rewrite_share: float = 0.5,
+        max_compression: float = MAX_COMPRESSION,
+    ) -> None:
+        """Configure the generator.
+
+        Args:
+            n_documents: Number of documents to write.
+            seed: Seed of the generation (splits, draws, dates).
+            site_weights: Relative frequency of each site (uniform by default).
+            piece_salience: Probability that the replaced part is a salient fact of the summary.
+            rewrite_share: Share of the reference summaries written with the second register.
+            max_compression: Hard bound on the reference length, relative to its document.
+        """
+        if n_documents < 4:
+            msg = f"n_documents must be at least 4 (one per split), got {n_documents}"
+            raise ValueError(msg)
+        if not 0.0 <= rewrite_share <= 1.0:
+            msg = f"rewrite_share must lie in [0, 1], got {rewrite_share}"
+            raise ValueError(msg)
+        self.n_documents = int(n_documents)
+        self.seed = int(seed)
+        self.site_weights = dict(site_weights or {site: 1.0 for site in SITES})
+        self.piece_salience = float(piece_salience)
+        #: Compteur des phrases de décor ajoutées pour tenir la borne de compression (réinitialisé à
+        #: chaque document par :meth:`_write_document`).
+        self._extra_fillers = 0
+        self.rewrite_share = float(rewrite_share)
+        self.max_compression = float(max_compression)
+
+    @classmethod
+    def from_config(
+        cls, config: Any, *, seed: int | None = None
+    ) -> SyntheticSummaryCorpusGenerator:
+        """Build a generator from the ``data`` node of the configuration.
+
+        Args:
+            config: ``data`` configuration node.
+            seed: Optional seed override (defaults to ``data.seed``).
+
+        Returns:
+            The configured generator.
+        """
+        settings = as_mapping(config)
+        corpus_settings = dict(settings.get("corpus") or {})
+        return cls(
+            n_documents=int(_declared(settings.get("n_documents"), settings.get("n_samples"), 600)),
+            seed=int(_declared(seed, settings.get("seed"), 42)),
+            site_weights=settings.get("site_weights"),
+            piece_salience=float(
+                _declared(
+                    settings.get("piece_salience"),
+                    corpus_settings.get("piece_salience"),
+                    0.4,
+                )
+            ),
+            rewrite_share=float(
+                _declared(
+                    settings.get("rewrite_share"),
+                    corpus_settings.get("rewrite_share"),
+                    0.5,
+                )
+            ),
+            max_compression=float(
+                _declared(
+                    settings.get("max_compression"),
+                    corpus_settings.get("max_compression"),
+                    MAX_COMPRESSION,
+                )
+            ),
+        )
+
+    # ------------------------------------------------------------------ génération ---------
+    def generate(self) -> GeneratedSummaryCorpus:
+        """Generate the documents, their reference summaries and their facts.
+
+        Returns:
+            The :class:`GeneratedSummaryCorpus`, plus the generation metadata (also stored in the
+            ``metadata`` attribute of the returned bundle).
+        """
+        documents, references, facts = self._tables()
+        metadata = self._metadata(documents, references, facts)
+        logger.info(
+            "Corpus '{}' generated: {} documents, {} faits ({} saillants)",
+            self.dataset_name,
+            len(documents),
+            len(facts),
+            int(facts["salient"].sum()),
+        )
+        return GeneratedSummaryCorpus(
+            documents=documents,
+            queries=references,
+            metadata=metadata,
+            facts=facts,
+        )
+
+    # ------------------------------------------------------------------ tables -------------
+    def _tables(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Write every document, its reference summary and its facts.
+
+        Returns:
+            ``(documents, references, facts)``, three frames with their dtypes fixed.
+        """
+        rng = random.Random(self.seed)
+        splits = self._split_sequence(rng)
+        self._extra_fillers = 0
+        document_rows: list[dict[str, Any]] = []
+        reference_rows: list[dict[str, Any]] = []
+        fact_rows: list[dict[str, Any]] = []
+        fact_counter = 0
+        start_date = date(2025, 1, 6)
+        for index, split in enumerate(splits):
+            doc_id = f"CR-{index + 1:04d}"
+            intervention_type = INTERVENTION_TYPES[rng.randrange(len(INTERVENTION_TYPES))]
+            urgency = URGENCIES[rng.choices(range(len(URGENCIES)), weights=[0.2, 0.5, 0.3])[0]]
+            site = rng.choices(list(self.site_weights), weights=list(self.site_weights.values()))[0]
+            draft, salient = self._write_document(rng, doc_id, intervention_type, site)
+            # Le résumé est écrit **avant** la lecture du document : il peut allonger le document
+            # (phrases de décor) pour tenir sa borne de compression, et le texte publié doit être
+            # celui qui a servi au calcul — sinon la compression enregistrée serait celle d'une
+            # version antérieure du document.
+            summary, summary_sentences = self._write_summary(rng, draft, salient)
+            text = _join_sentences(draft.sentences)
+            tokens = tokenize(text)
+            published_at = start_date + timedelta(days=index % 90, hours=rng.randrange(6, 20))
+            summary_tokens = tokenize(summary)
+            document_rows.append(
+                {
+                    "doc_id": doc_id,
+                    "text": text,
+                    "intervention_type": intervention_type,
+                    "urgency": urgency,
+                    "site": site,
+                    "n_sentences": len(draft.sentences),
+                    "n_tokens": len(tokens),
+                    "published_at": pd.Timestamp(published_at),
+                    "split": split,
+                }
+            )
+            n_salient = sum(1 for fact in draft.facts if fact.salient)
+            reference_rows.append(
+                {
+                    "doc_id": doc_id,
+                    "summary": summary,
+                    "n_sentences": summary_sentences,
+                    "n_tokens": len(summary_tokens),
+                    "n_salient_facts": n_salient,
+                    "compression": round(len(summary_tokens) / max(len(tokens), 1), 6),
+                }
+            )
+            for fact in draft.facts:
+                fact_counter += 1
+                fact_rows.append(
+                    {
+                        "doc_id": doc_id,
+                        "fact_id": f"F-{fact_counter:05d}",
+                        "fact_type": fact.fact_type,
+                        "value": fact.value,
+                        "surface": fact.surface,
+                        "salient": int(fact.salient),
+                        "sentence_index": fact.sentence_index,
+                    }
+                )
+
+        documents = pd.DataFrame(document_rows)
+        documents["published_at"] = pd.to_datetime(documents["published_at"]).astype("datetime64[ns]")
+        documents["n_sentences"] = documents["n_sentences"].astype("int64")
+        documents["n_tokens"] = documents["n_tokens"].astype("int64")
+        references = pd.DataFrame(reference_rows)
+        references["n_sentences"] = references["n_sentences"].astype("int64")
+        references["n_tokens"] = references["n_tokens"].astype("int64")
+        references["n_salient_facts"] = references["n_salient_facts"].astype("int64")
+        references["compression"] = references["compression"].astype("float64")
+        facts = pd.DataFrame(fact_rows)
+        facts["salient"] = facts["salient"].astype("int64")
+        facts["sentence_index"] = facts["sentence_index"].astype("int64")
+        return documents, references, facts
+
+    def _split_sequence(self, rng: random.Random) -> list[str]:
+        """Draw the split of every document, stratified by intervention type.
+
+        Args:
+            rng: Random generator of the generation.
+
+        Returns:
+            One split name per document, in document order. The counts follow
+            :data:`~src.data.vocabulary.SPLIT_SHARES` exactly (largest remainder), so two
+            runs with the same seed produce the same corpus and the same evaluations.
+        """
+        counts = _largest_remainder(self.n_documents, SPLIT_SHARES)
+        sequence = [name for name, count in counts.items() for _ in range(count)]
+        rng.shuffle(sequence)
+        return sequence
+
+    def _write_document(
+        self,
+        rng: random.Random,
+        doc_id: str,
+        intervention_type: str,
+        site: str,
+    ) -> tuple[_DocumentDraft, list[_Fact]]:
+        """Write one document, sentence by sentence, recording its facts as they are written.
+
+        Args:
+            rng: Random generator of the generation.
+            doc_id: Identifier of the document (kept for the log and the filler values).
+            intervention_type: Nature of the intervention (drives the sentence count).
+            site: Site of the intervention (kept in the metadata of the document).
+
+        Returns:
+            ``(draft, salient_facts)``: the written document and the facts its reference must
+            report.
+        """
+        draft = _DocumentDraft()
+        self._extra_fillers = 0
+        technician = rng.choice(TECHNICIANS)
+        draft.fillers = {
+            "ticket": rng.choice(DISTRACTORS[:2]),
+            "building": rng.choice(DISTRACTORS[3:]),
+            "site": site,
+            "technician": technician,
+        }
+        low, high = SENTENCE_RANGE.get(intervention_type, (9, 14))
+        target = rng.randrange(low, high + 1)
+        # Les six types obligatoires d'un compte-rendu sont toujours saillants : sans eux, le résumé
+        # de référence ne dirait ni sur quoi, ni pourquoi, ni combien de temps. La référence de
+        # pièce est le septième fait, et sa saillance est une probabilité déclarée — c'est elle qui
+        # fait varier la longueur des résumés comme dans un vrai corpus.
+        mandatory = [name for name in MANDATORY_TYPES if name in FACT_TYPES]
+        salient_types = set(mandatory)
+        if rng.random() < self.piece_salience:
+            salient_types.add("piece")
+        # Un seul profil par document : l'équipement, son symptôme, sa cause, son action et sa pièce
+        # sont cohérents entre eux. Les faits non saillants viennent des réserves du profil
+        # (deuxième référence de pièce, action complémentaire), jamais d'un autre équipement.
+        profile = rng.choice(EQUIPMENT_PROFILES)
+        equipment = profile.equipment
+        values: dict[str, list[str]] = {
+            "equipement": [profile.equipment],
+            "symptome": [profile.symptom],
+            "cause": [profile.cause],
+            # Les faits **non saillants** sont exacts et volontairement plus nombreux que les faits
+            # requis : le document porte les détails d'une intervention réelle (deux ou trois
+            # opérations, une ou deux pièces), le résumé n'en retient que l'essentiel. C'est ce
+            # écart qui donne un sens à la mesure de couverture et au ROUGE.
+            "action": _sample(rng, [profile.action, *SECONDARY_ACTIONS], rng.randrange(2, 4)),
+            "piece": _sample(rng, list(profile.parts), rng.randrange(1, 3)),
+            "duree": [rng.choice(DURATIONS)],
+            "statut": [rng.choice(STATUSES)],
+        }
+
+        sentences: list[tuple[str, list[_Fact]]] = []
+        for fact_type in FACT_TYPES:
+            for value in values[fact_type]:
+                template = DOCUMENT_TEMPLATES[fact_type][
+                    rng.randrange(len(DOCUMENT_TEMPLATES[fact_type]))
+                ]
+                # Chaque phrase porte le fait qu'elle déclare **et** le décor dont elle a besoin
+                # pour être lisible : le gabarit d'un symptôme mentionne ainsi l'équipement
+                # concerné. La substitution place donc la valeur du fait dans son propre slot et
+                # laisse les autres slots à la valeur principale de leur type.
+                slots = {
+                    "equipment": equipment,
+                    "symptom": values["symptome"][0],
+                    "cause": values["cause"][0],
+                    "action": values["action"][0],
+                    "part": values["piece"][0],
+                    "duration": values["duree"][0],
+                    "status": values["statut"][0],
+                    "technician": technician,
+                }
+                slots[SLOT_OF[fact_type]] = value
+                sentence = _fill(template, slots)
+                surface = _surface_of(sentence, value)
+                facts = [
+                    _Fact(
+                        fact_type=fact_type,
+                        value=value,
+                        surface=surface,
+                        sentence_index=len(sentences),
+                        salient=fact_type in salient_types and value == values[fact_type][0],
+                    )
+                ]
+                sentences.append((sentence, facts))
+
+        for _ in range(rng.randrange(FILLER_PER_DOCUMENT[0], FILLER_PER_DOCUMENT[1] + 1)):
+            filler = rng.choice(FILLER_SENTENCES)
+            sentences.append((_fill(filler, draft.fillers), []))
+
+        rng.shuffle(sentences)
+        ordered = sentences[: max(target, len(sentences))] if len(sentences) <= target else sentences[:target]
+        # Le décor reste en tête et en queue : un compte-rendu commence par le contexte et finit par
+        # la conclusion, ce qui donne aux baselines extractives une chance honnête.
+        ordered = _order_like_a_report(ordered)
+        for position, (sentence, facts) in enumerate(ordered):
+            draft.sentences.append(sentence)
+            for fact in facts:
+                draft.facts.append(
+                    _Fact(
+                        fact_type=fact.fact_type,
+                        value=fact.value,
+                        surface=fact.surface,
+                        sentence_index=position,
+                        salient=fact.salient,
+                    )
+                )
+        salient_facts = [fact for fact in draft.facts if fact.salient]
+        if not salient_facts:
+            msg = f"Document {doc_id} written without a salient fact: the templates are inconsistent"
+            raise RuntimeError(msg)
+        return draft, salient_facts
+
+    def _write_summary(
+        self,
+        rng: random.Random,
+        draft: _DocumentDraft,
+        salient: Sequence[_Fact],
+    ) -> tuple[str, int]:
+        """Write the reference summary of one document, from its salient facts.
+
+        Args:
+            rng: Random generator of the generation.
+            draft: Written document (used for its length).
+            salient: Facts the summary must report.
+
+        Returns:
+            ``(summary, n_sentences)``: a summary that reports **every** salient fact, one sentence
+            per type, preceded by an opening formula when the length budget allows it.
+        """
+        grouped: dict[str, list[str]] = {}
+        for fact in salient:
+            grouped.setdefault(fact.fact_type, []).append(fact.value)
+        sentences = [
+            _fill(
+                SUMMARY_TEMPLATES[fact_type][rng.randrange(len(SUMMARY_TEMPLATES[fact_type]))],
+                _summary_slots(fact_type, values[0]),
+            )
+            for fact_type, values in grouped.items()
+        ]
+        opener = SUMMARY_OPENERS[1 if rng.random() < self.rewrite_share else 0]
+        # L'ouverture ne rapporte aucun fait : elle est ajoutée si elle tient dans le budget, jamais
+        # au prix d'une phrase porteuse de fait — la couverture de référence doit rester
+        # atteignable.
+        if len(tokenize(" ".join([opener, *sentences]))) <= self._budget_tokens(draft):
+            sentences.insert(0, opener)
+        # Tant que le résumé dépasse sa borne de longueur, c'est **le document** qui s'allonge : une
+        # phrase de décor de plus ne change aucun fait, alors que couper le résumé en supprimerait
+        # un — et un résumé de référence incomplet rendrait la couverture inatteignable.
+        while (
+            len(tokenize(_join_sentences(sentences))) > self._budget_tokens(draft)
+            and self._extra_fillers < MAX_EXTRA_FILLERS
+        ):
+            draft.sentences.append(_join_sentences([_fill(rng.choice(FILLER_SENTENCES), draft.fillers)]))
+            self._extra_fillers += 1
+        return _join_sentences(sentences), len(sentences)
+
+    def _budget_tokens(self, draft: _DocumentDraft) -> float:
+        """Length budget of a reference summary, for the document as it currently stands.
+
+        Args:
+            draft: Document being written (its sentences may still grow).
+
+        Returns:
+            ``max_compression`` times the number of tokens of the document, with a floor
+            of 15 tokens so that a very short document still yields a readable reference.
+        """
+        document_tokens = len(tokenize(_join_sentences(draft.sentences)))
+        return max(self.max_compression * document_tokens, 15.0)
+
+    # ------------------------------------------------------------------ métadonnées --------
+    def _metadata(
+        self,
+        documents: pd.DataFrame,
+        references: pd.DataFrame,
+        facts: pd.DataFrame,
+    ) -> dict[str, Any]:
+        """Describe the corpus just written (the recipe that makes it reproducible).
+
+        Args:
+            documents: Generated document table.
+            references: Generated reference summary table.
+            facts: Generated fact table.
+
+        Returns:
+            The metadata written next to the corpus (``generation_metadata.json``).
+        """
+        salient = facts.loc[facts["salient"] == 1]
+        return {
+            "dataset_name": self.dataset_name,
+            "seed": self.seed,
+            "n_documents": int(len(documents)),
+            "n_salient_facts": int(len(salient)),
+            "n_facts": int(len(facts)),
+            "n_splits": int(documents["split"].nunique()),
+            "document_tokens_mean": round(float(documents["n_tokens"].mean()), 2),
+            "reference_tokens_mean": round(float(references["n_tokens"].mean()), 2),
+            "compression_mean": round(float(references["compression"].mean()), 4),
+            "compression_max": round(float(references["compression"].max()), 4),
+            "salient_facts_mean": round(float(references["n_salient_facts"].mean()), 2),
+            "rewrite_share": round(float((references["summary"].str.startswith("Synthèse")).mean()), 4),
+            "share_scenario_depannage": round(
+                float((documents["intervention_type"] == "depannage").mean()), 4
+            ),
+            "share_scenario_maintenance": round(
+                float((documents["intervention_type"] == "maintenance").mean()), 4
+            ),
+            "share_scenario_installation": round(
+                float((documents["intervention_type"] == "installation").mean()), 4
+            ),
+            "share_scenario_expertise": round(
+                float((documents["intervention_type"] == "expertise").mean()), 4
+            ),
+            "trivial_rouge1": 0.0,
+            "copy_rouge1_ceiling": 1.0,
+            "scenarios": list(INTERVENTION_TYPES),
+            "fact_types": list(FACT_TYPES),
+            "vocabulary": vocabulary_report(),
+        }
+
+
+def _summary_slots(fact_type: str, value: str) -> dict[str, str]:
+    """Fill the slots of a summary template for one fact.
+
+    Args:
+        fact_type: Type of the fact reported.
+        value: Value of the fact.
+
+    Returns:
+        The slot mapping the template expects (the value is repeated under the two spellings a
+        template may use).
+    """
+    return {
+        "equipment": value,
+        "symptom": value,
+        "cause": value,
+        "action": value,
+        "part": value,
+        "duration": value,
+        "status": value,
+    }
+
+
+def _fill(template: str, slots: Mapping[str, str]) -> str:
+    """Replace the slots of a template and tidy the whitespace.
+
+    Args:
+        template: Sentence template with ``{slot}`` placeholders.
+        slots: Slot values.
+
+    Returns:
+        The filled sentence, whitespace collapsed.
+    """
+    sentence = template
+    for name, value in slots.items():
+        sentence = sentence.replace("{" + name + "}", str(value))
+    return " ".join(sentence.split())
+
+
+def _join_sentences(sentences: Sequence[str]) -> str:
+    """Join sentences into a readable text, capitalising each initial.
+
+    Les gabarits ne peuvent pas capitaliser eux-mêmes : la valeur d'un fait est écrite en minuscule
+    (« la pompe P-12 »), et elle peut tomber en tête de phrase. La règle est appliquée ici, une
+    fois, au moment de l'assemblage — jamais dans la valeur, qui doit rester identique partout.
+
+    Args:
+        sentences: Sentences, in reading order.
+
+    Returns:
+        The joined text; a sentence already starting with an
+        uppercase letter or a non-letter is left untouched.
+    """
+    joined: list[str] = []
+    for sentence in sentences:
+        stripped = " ".join(str(sentence).split())
+        if stripped and stripped[0].islower():
+            stripped = stripped[0].upper() + stripped[1:]
+        joined.append(stripped)
+    return " ".join(joined)
+
+
+def _surface_of(sentence: str, value: str) -> str:
+    """Return the exact surface of a value inside its sentence.
+
+    Args:
+        sentence: Sentence that carries the value.
+        value: Value written in that sentence.
+
+    Returns:
+        The value itself: the templates write values verbatim, so the surface is the value. The
+        function exists to make that claim explicit and testable.
+    """
+    if value not in sentence:
+        msg = f"Value '{value}' is not present as-is in '{sentence}'"
+        raise ValueError(msg)
+    return value
+
+
+def _sample(rng: random.Random, pool: Sequence[str], count: int) -> list[str]:
+    """Draw ``count`` distinct values from a pool, deterministically.
+
+    Args:
+        rng: Random generator of the generation.
+        pool: Values to draw from.
+        count: Number of values to draw.
+
+    Returns:
+        The drawn values, in draw order (at most ``len(pool)``).
+    """
+    return rng.sample(list(pool), k=min(count, len(pool)))
+
+
+def _order_like_a_report(sentences: list[tuple[str, list[_Fact]]]) -> list[tuple[str, list[_Fact]]]:
+    """Order the sentences of a document like a written report.
+
+    Un compte-rendu commence par le décor et l'équipement, présente les faits, puis conclut : les
+    phrases sans fait sont donc poussées en tête et en queue. Sans cela, un document mélangé
+    donnerait un avantage artificiel aux baselines extractives, qui ne lisent que le début.
+
+    Args:
+        sentences: ``(sentence, facts)`` pairs, in draw order.
+
+    Returns:
+        The same pairs, filler sentences placed first and last.
+    """
+    with_facts = [item for item in sentences if item[1]]
+    without = [item for item in sentences if not item[1]]
+    head = without[:1]
+    tail = without[1:]
+    return [*head, *with_facts, *tail]
+
+
+def _largest_remainder(total: int, shares: Mapping[str, float]) -> dict[str, int]:
+    """Split an integer total according to shares, with the largest-remainder method.
+
+    Args:
+        total: Total to split.
+        shares: Relative weights, keyed by name.
+
+    Returns:
+        ``{name: count}`` whose sum is exactly ``total`` (deterministic, ties broken by name).
+    """
+    weights = {name: float(value) for name, value in shares.items()}
+    weight_sum = sum(weights.values())
+    exact = {name: total * value / weight_sum for name, value in weights.items()}
+    floors = {name: int(value) for name, value in exact.items()}
+    remainder = total - sum(floors.values())
+    remainders = sorted(
+        exact, key=lambda name: (-(exact[name] - floors[name]), name)
+    )
+    for name in remainders[:remainder]:
+        floors[name] += 1
+    return floors
+
+
+__all__ = [
+    "FILLER_PER_DOCUMENT",
+    "MAX_EXTRA_FILLERS",
+    "MANDATORY_TYPES",
+    "MAX_FACTS_PER_DOCUMENT",
+    "GeneratedSummaryCorpus",
+    "SyntheticSummaryCorpusGenerator",
+]

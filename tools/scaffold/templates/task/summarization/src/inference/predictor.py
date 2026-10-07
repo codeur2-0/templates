@@ -1,9 +1,9 @@
 """Inférence : produire les résumés d'un corpus ou d'un échantillon, et les lire.
 
-Le prédicteur est le seul endroit qui décide **ce qui est publié** d'une génération : le résumé, sa
-longueur, sa compression, la couverture des faits saillants quand la vérité terrain est disponible, et
-les valeurs non supportées. Il ne contient aucune logique de modèle — il charge l'artefact écrit par
-``mode=train``, l'applique, et refuse de deviner :
+Le prédicteur est le seul endroit qui décide **ce qui est publié** d'une génération : le
+résumé, sa longueur, sa compression, la couverture des faits saillants quand la vérité
+terrain est disponible, et les valeurs non supportées. Il ne contient aucune logique de
+modèle — il charge l'artefact écrit par ``mode=train``, l'applique, et refuse de deviner :
 
 * sans fichier d'entrée, il échantillonne le corpus **déterministe** (les cinq premiers documents du
   split de test) plutôt que d'inventer des textes ;
@@ -21,7 +21,6 @@ from time import perf_counter
 from typing import Any
 
 import pandas as pd
-
 from src.data.loaders import SummaryCorpusLoader
 from src.data.schemas import validate_predictions
 from src.models.contract import BaseTextGenerator
@@ -122,7 +121,8 @@ class SummaryPredictor:
         """Summarise the given documents.
 
         Args:
-            frame: Documents to summarise (``doc_id``, ``text``), plus their segments when available.
+            frame: Documents to summarise (``doc_id``,
+                ``text``), plus their segments when available.
 
         Returns:
             The prediction table: identifier, strategy, summary, lengths, latency, ROUGE and fact
@@ -172,7 +172,7 @@ class SummaryPredictor:
             rows.append(row)
         table = pd.DataFrame(rows)
         logger.info(
-            "Inférence terminée : {} document(s), {} mots produits en moyenne, {:.1f} ms par document",
+            "Inférence terminée : {} document(s), {} mots en moyenne, {:.1f} ms par document",
             len(table),
             round(float(table["n_words"].mean()), 1) if not table.empty else 0.0,
             (perf_counter() - started) * 1000.0 / max(len(table), 1),
@@ -186,8 +186,8 @@ class SummaryPredictor:
             predictions: Prediction rows.
 
         Returns:
-            One row per strategy: documents, mean words, mean compression, mean latency, coverage and
-            the share of summaries that hit their budget.
+            One row per strategy: documents, mean words, mean compression, mean
+            latency, coverage and the share of summaries that hit their budget.
         """
         if predictions.empty:
             return pd.DataFrame()
@@ -196,7 +196,7 @@ class SummaryPredictor:
             rows.append(
                 {
                     "strategy": str(strategy),
-                    "n_documents": int(len(group)),
+                    "n_documents": len(group),
                     "n_words_mean": round(float(group["n_words"].mean()), 2),
                     "compression_mean": round(float(group["compression"].mean()), 4),
                     "sentences_mean": round(float(group["n_clauses"].mean()), 2),
@@ -276,8 +276,9 @@ class SummaryPredictor:
             frame: Documents to summarise.
 
         Returns:
-            ``(references, facts)``: the reference summary of each known document and its fact table.
-            Both are empty for documents the corpus does not know (an input file provided by hand).
+            ``(references, facts)``: the reference summary of each known
+            document and its fact table. Both are empty for documents
+            the corpus does not know (an input file provided by hand).
         """
         if not self.publish_fidelity:
             return {}, {}

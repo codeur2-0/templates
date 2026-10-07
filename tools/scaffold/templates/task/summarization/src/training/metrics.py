@@ -1,9 +1,9 @@
 """Métriques du résumé : fidélité aux faits, longueurs, segments et verdict.
 
-Le ROUGE dit à quel point un résumé *ressemble* à sa référence ; il ne dit pas si ce qu'il raconte est
-**vrai**. Un décodeur qui recopie « 45 minutes » au hasard dans un document où la durée est de
-30 minutes obtient un bon ROUGE-2 et raconte une contre-vérité. Ce module fournit la seconde moitié
-de la mesure :
+Le ROUGE dit à quel point un résumé *ressemble* à sa référence ; il ne dit pas
+si ce qu'il raconte est **vrai**. Un décodeur qui recopie « 45 minutes » au
+hasard dans un document où la durée est de 30 minutes obtient un bon ROUGE-2 et
+raconte une contre-vérité. Ce module fournit la seconde moitié de la mesure :
 
 * **couverture** — la part des faits saillants du document (durées, références de pièce, symptômes,
   actions, statuts) que le résumé rapporte, globalement et **par type de fait** : un résumé qui
@@ -27,8 +27,7 @@ from collections.abc import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
-
-from src.data.schemas import FACT_TYPES, INTERVENTION_TYPES, URGENCIES, fact_columns
+from src.data.schemas import FACT_TYPES, fact_columns
 
 #: Values that carry a fact and can be checked against the document: reference codes (``JNT-204``),
 #: durations (``45 minutes``), plain numbers (``12``) and decimals with a comma or a dot.
@@ -121,9 +120,9 @@ def coverage_scores(
         document: Source text, used to detect unsupported values (measured only when provided).
 
     Returns:
-        ``fact_coverage``, ``n_salient``, ``n_covered``, ``n_unsupported``, the per-type coverage
-        columns (``covered_<type>``) and the fact precision (covered facts over the facts the summary
-        states, right or wrong).
+        ``fact_coverage``, ``n_salient``, ``n_covered``, ``n_unsupported``, the
+        per-type coverage columns (``covered_<type>``) and the fact precision
+        (covered facts over the facts the summary states, right or wrong).
     """
     normalised = normalise_value(prediction)
     grouped = salient_values(facts)
@@ -262,7 +261,7 @@ def segment_frame(
             row: dict[str, object] = {
                 "segment": str(column),
                 "value": str(value),
-                "n_documents": int(len(group)),
+                "n_documents": len(group),
             }
             for metric in metric_columns:
                 if metric in group.columns:
@@ -304,7 +303,7 @@ def per_strategy_frame(
     grouped = predictions.groupby("strategy", sort=True)
     rows: list[dict[str, object]] = []
     for strategy, group in grouped:
-        row: dict[str, object] = {"strategy": str(strategy), "n_documents": int(len(group))}
+        row: dict[str, object] = {"strategy": str(strategy), "n_documents": len(group)}
         for name in available:
             row[name] = round(float(group[name].mean()), 4)
         rows.append(row)
@@ -377,8 +376,8 @@ def verdict_from_metrics(
         direction: ``maximize`` or ``minimize``.
 
     Returns:
-        ``(verdict, detail)`` where verdict is ``conforme``, ``non conforme`` or ``indéterminé``, and
-        detail carries the observed value, the threshold and the margin.
+        ``(verdict, detail)`` where verdict is ``conforme``, ``non conforme`` or
+        ``indéterminé``, and detail carries the observed value, the threshold and the margin.
     """
     detail: dict[str, object] = {"metric": primary, "direction": direction}
     observed = metrics.get(primary)
@@ -407,14 +406,24 @@ def describe_metrics(names: Sequence[str] | None = None) -> dict[str, str]:
         Mapping ``metric -> one-sentence French definition``.
     """
     catalogue = {
-        "rouge1_f": "ROUGE-1 F1 : recouvrement des unigrams avec la meilleure référence du document.",
-        "rouge2_f": "ROUGE-2 F1 : recouvrement des bigrams — la variante qui récompense l'ordre des mots.",
-        "rouge_l_f": "ROUGE-L F1 : plus longue sous-séquence commune, proche de la structure de phrase.",
+        "rouge1_f": (
+            "ROUGE-1 F1 : recouvrement des unigrams avec la meilleure référence du document."
+        ),
+        "rouge2_f": (
+            "ROUGE-2 F1 : recouvrement des bigrams — la variante qui récompense l'ordre des mots."
+        ),
+        "rouge_l_f": (
+            "ROUGE-L F1 : plus longue sous-séquence commune, proche de la structure de phrase."
+        ),
         "fact_coverage": "Part des faits saillants du document que le résumé rapporte.",
-        "fact_precision": "Faits rapportés justes, divisés par les faits rapportés (justes ou inventés).",
+        "fact_precision": (
+            "Faits rapportés justes, divisés par les faits rapportés (justes ou inventés)."
+        ),
         "unsupported_facts": "Valeurs du résumé absentes du document : hallucination détectable.",
         "compression": "Longueur du résumé rapportée à celle du document.",
-        "hit_max_length": "Part des résumés qui atteignent leur budget de longueur (le décodeur s'arrête).",
+        "hit_max_length": (
+            "Part des résumés qui atteignent leur budget de longueur (le décodeur s'arrête)."
+        ),
         "latency_p50_ms": "Latence médiane de génération, en millisecondes (jamais un critère).",
     }
     if names is None:

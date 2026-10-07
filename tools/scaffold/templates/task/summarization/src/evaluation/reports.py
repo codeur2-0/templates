@@ -1,20 +1,20 @@
 """Lecture d'une évaluation de résumé : la table des faits, le verdict, les références.
 
-Un fichier de métriques JSON ne se lit pas : il faut savoir quel chiffre regarder, contre quoi le
-comparer, et ce que le modèle a oublié. Le constructeur de rapport produit donc **un document** —
-``evaluation_report.md`` — qui commence par le verdict, poursuit par la comparaison des stratégies, la
-couverture par type de fait, la ventilation par segment et une sélection d'erreurs relues en clair, et
-finit par les limites de la mesure. Chaque table citée est écrite séparément en CSV, donc réutilisable
-dans un portail ou un notebook.
+Un fichier de métriques JSON ne se lit pas : il faut savoir quel chiffre regarder, contre
+quoi le comparer, et ce que le modèle a oublié. Le constructeur de rapport produit donc
+**un document** — ``evaluation_report.md`` — qui commence par le verdict, poursuit par la
+comparaison des stratégies, la couverture par type de fait, la ventilation par segment et
+une sélection d'erreurs relues en clair, et finit par les limites de la mesure. Chaque
+table citée est écrite séparément en CSV, donc réutilisable dans un portail ou un notebook.
 
 Deux partis pris de rédaction :
 
 * **les références sont publiées à côté du modèle**, jamais en note : un ROUGE de 0,42 ne veut rien
   dire seul, il vaut ce que valent le résumé vide (0,0) et la baseline extractive mesurée sur les
   mêmes lignes ;
-* **les limites sont écrites noir sur blanc** : le ROUGE mesure la formulation, la couverture mesure la
-  substance, et la détection d'hallucination s'arrête aux valeurs vérifiables. Un rapport qui ne dit
-  pas cela laisse croire que 0,45 est « presque la référence ».
+* **les limites sont écrites noir sur blanc** : le ROUGE mesure la formulation, la couverture
+  mesure la substance, et la détection d'hallucination s'arrête aux valeurs vérifiables. Un
+  rapport qui ne dit pas cela laisse croire que 0,45 est « presque la référence ».
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-
 from src.evaluation.evaluator import SummaryEvaluation
 from src.utils.io import write_table, write_text
 from src.utils.logging import get_logger
@@ -148,9 +147,9 @@ class ReportBuilder:
         project = dict(self.config.get("project", {}) or {})
         data = dict(self.config.get("data", {}) or {})
         model = dict(self.config.get("model", {}) or {})
-        metrics = dict(self.config.get("metrics", {}) or {})
+        title = project.get("title", project.get("name", "résumé automatique"))
         lines: list[str] = [
-            f"# Rapport d'évaluation — {project.get('title', project.get('name', 'résumé automatique'))}",
+            f"# Rapport d'évaluation — {title}",
             "",
             f"- **Projet** : `{project.get('key', 'resume-automatique')}` "
             f"({project.get('domain', 'nlp')}/{project.get('problem', 'summarization')}, "
@@ -201,7 +200,7 @@ class ReportBuilder:
             lines.append("")
         if tables:
             lines.extend(["## 10. Tables publiées", ""])
-            for name, path in sorted(tables.items()):
+            for path in sorted(tables.values()):
                 lines.append(f"- `{_relative(path, self.paths.root)}`")
             lines.append("")
         return "\n".join(lines)
@@ -218,12 +217,13 @@ class ReportBuilder:
         margin = float(detail.get("margin", 0.0))
         verb = "au-dessus" if margin >= 0.0 else "en dessous"
         return (
-            f"**Verdict : {result.verdict.upper()}** — `{result.primary_metric}` vaut **{observed:.4f}** "
-            f"sur {result.n_documents} document(s) de test, soit {abs(margin):.4f} {verb} du seuil "
-            f"contractuel de {threshold:.4f}. "
-            f"La couverture des faits saillants est de {float(result.metrics.get('fact_coverage', 0.0)):.4f} "
-            f"et {float(result.metrics.get('unsupported_share', 0.0)):.1%} des résumés contiennent au "
-            f"moins une valeur absente du document."
+            f"**Verdict : {result.verdict.upper()}** — `{result.primary_metric}` vaut "
+            f"**{observed:.4f}** sur {result.n_documents} document(s) de test, soit "
+            f"{abs(margin):.4f} {verb} du seuil contractuel de {threshold:.4f}. "
+            f"La couverture des faits saillants est de "
+            f"{float(result.metrics.get('fact_coverage', 0.0)):.4f} et "
+            f"{float(result.metrics.get('unsupported_share', 0.0)):.1%} des résumés contiennent "
+            f"au moins une valeur absente du document."
         )
 
     def _metrics_table(self, result: SummaryEvaluation) -> str:
@@ -266,15 +266,18 @@ class ReportBuilder:
         ]
         for name, block in sorted(result.baselines.items()):
             rows.append(
-                f"| {name} | {_format(block.get('rouge1_f', 0.0))} | {_format(block.get('rouge2_f', 0.0))} | "
-                f"{_format(block.get('rouge_l_f', 0.0))} | {_format(block.get('fact_coverage', 0.0))} | "
-                f"{_format(block.get('compression', 0.0))} |"
+                f"| {name} | {_format(block.get('rouge1_f', 0.0))} "
+                f"| {_format(block.get('rouge2_f', 0.0))} "
+                f"| {_format(block.get('rouge_l_f', 0.0))} "
+                f"| {_format(block.get('fact_coverage', 0.0))} "
+                f"| {_format(block.get('compression', 0.0))} |"
             )
         served = result.strategies[0] if result.strategies else "modele"
         rows.append(
-            f"| **{served} (servi)** | {_format(result.metrics.get('rouge1_f', 0.0))} | "
-            f"{_format(result.metrics.get('rouge2_f', 0.0))} | {_format(result.metrics.get('rouge_l_f', 0.0))} | "
-            f"{_format(result.metrics.get('fact_coverage', 0.0))} | "
+            f"| **{served} (servi)** | {_format(result.metrics.get('rouge1_f', 0.0))} "
+            f"| {_format(result.metrics.get('rouge2_f', 0.0))} "
+            f"| {_format(result.metrics.get('rouge_l_f', 0.0))} "
+            f"| {_format(result.metrics.get('fact_coverage', 0.0))} | "
             f"{_format(result.metrics.get('compression_mean', 0.0))} |"
         )
         return "\n".join(rows)
@@ -296,8 +299,9 @@ class ReportBuilder:
         lines.extend(
             [
                 "",
-                f"Le type le mieux couvert est `{strongest}` ({values['covered_' + strongest]:.4f}), le "
-                f"moins bien couvert est `{weakest}` ({values['covered_' + weakest]:.4f}) : c'est le "
+                f"Le type le mieux couvert est `{strongest}` "
+                f"({values['covered_' + strongest]:.4f}), le moins bien couvert est "
+                f"`{weakest}` ({values['covered_' + weakest]:.4f}) : c'est le "
                 "premier endroit à regarder avant de raccourcir un résumé.",
             ]
         )
@@ -316,8 +320,10 @@ class ReportBuilder:
             subset = frame.loc[frame["segment"] == segment].sort_values("rouge1_f", ascending=False)
             for row in subset.itertuples(index=False):
                 lines.append(
-                    f"| `{row.segment}` | {row.value} | {int(row.n_documents)} | {_format(row.rouge1_f)} | "
-                    f"{_format(getattr(row, 'fact_coverage', 0.0))} | {_format(getattr(row, 'compression', 0.0))} |"
+                    f"| `{row.segment}` | {row.value} | {int(row.n_documents)} "
+                    f"| {_format(row.rouge1_f)} "
+                    f"| {_format(getattr(row, 'fact_coverage', 0.0))} "
+                    f"| {_format(getattr(row, 'compression', 0.0))} |"
                 )
         return "\n".join(lines)
 
@@ -330,7 +336,8 @@ class ReportBuilder:
         for row in frame.head(5).itertuples(index=False):
             lines.extend(
                 [
-                    f"### `{row.doc_id}` — ROUGE-1 {_format(row.rouge1_f)}, couverture {_format(row.fact_coverage)}",
+                    f"### `{row.doc_id}` — ROUGE-1 {_format(row.rouge1_f)}, "
+                    f"couverture {_format(row.fact_coverage)}",
                     "",
                     f"- **Type** : {row.intervention_type} · urgence {row.urgency} · "
                     f"{int(row.n_predicted_words)} mots produits",
@@ -343,7 +350,8 @@ class ReportBuilder:
             )
         lines.append(
             f"Les {len(frame)} cas les plus éloignés sont publiés dans "
-            "`artifacts/reports/errors.csv`, avec le type d'intervention, l'urgence et les faits manquants."
+            "`artifacts/reports/errors.csv`, avec le type d'intervention, l'urgence "
+            "et les faits manquants."
         )
         return "\n".join(lines)
 
@@ -352,20 +360,21 @@ class ReportBuilder:
         unsupported_share = float(result.metrics.get("unsupported_share", 0.0))
         return "\n".join(
             [
-                "- **ROUGE mesure la formulation, pas le sens** : un résumé qui dit la même chose avec "
-                "d'autres mots obtient un ROUGE bas, et un résumé qui recopie la référence en changeant un "
-                "chiffre obtient un ROUGE haut.",
-                "- **La couverture est mesurée sur les faits annotés** : elle compte les valeurs du document "
-                "(durées, références, symptômes, actions, statuts) retrouvées dans le résumé, et ne dit rien "
-                "de l'ordre ni de la causalité des phrases.",
-                "- **La détection d'hallucination s'arrête aux valeurs vérifiables** : une valeur absente du "
-                f"document est comptée ({unsupported_share:.1%} des résumés en contiennent au moins une), mais "
-                "une phrase inventée sans valeur numérique n'est pas détectable sans juge humain.",
-                "- **La latence dépend de la machine** : elle est publiée pour la lecture, jamais pour le "
-                "verdict, et n'entre dans aucune comparaison entre stratégies.",
-                "- **Les documents sont synthétiques** : le vocabulaire est un gabarit paramétré, donc les "
-                "valeurs absolues de ROUGE ne se transposent pas à un corpus réel — les écarts entre "
-                "stratégies, eux, se lisent.",
+                "- **ROUGE mesure la formulation, pas le sens** : un résumé qui dit la même "
+                "chose avec d'autres mots obtient un ROUGE bas, et un résumé qui recopie la "
+                "référence en changeant un chiffre obtient un ROUGE haut.",
+                "- **La couverture est mesurée sur les faits annotés** : elle compte les valeurs "
+                "du document (durées, références, symptômes, actions, statuts) retrouvées dans "
+                "le résumé, et ne dit rien de l'ordre ni de la causalité des phrases.",
+                "- **La détection d'hallucination s'arrête aux valeurs vérifiables** : une "
+                "valeur absente du document est comptée "
+                f"({unsupported_share:.1%} des résumés en contiennent au moins une), mais une "
+                "phrase inventée sans valeur numérique n'est pas détectable sans juge humain.",
+                "- **La latence dépend de la machine** : elle est publiée pour la lecture, "
+                "jamais pour le verdict, et n'entre dans aucune comparaison entre stratégies.",
+                "- **Les documents sont synthétiques** : le vocabulaire est un gabarit "
+                "paramétré, donc les valeurs absolues de ROUGE ne se transposent pas à un "
+                "corpus réel — les écarts entre stratégies, eux, se lisent.",
             ]
         )
 
@@ -374,18 +383,23 @@ class ReportBuilder:
         data = dict(self.config.get("data", {}) or {})
         metrics_config = dict(self.config.get("metrics", {}) or {})
         detail = dict(result.verdict_detail)
+        measured = ", ".join(f"`{name}`" for name in result.strategies) or "aucune"
+        references = ", ".join(f"`{name}`" for name in sorted(result.baselines)) or "aucune"
+        direction = "maximiser"
+        if detail.get("direction", "maximize") != "maximize":
+            direction = "minimiser"
         return "\n".join(
             [
                 f"- Graine : `{self.config.get('seed', 42)}` (corpus et modèles).",
                 f"- Corpus : `{data.get('dataset_name', 'intervention_reports')}`, "
                 f"{result.n_documents} document(s) de test, découpage écrit dans le corpus.",
-                f"- Stratégies mesurées : {', '.join(f'`{name}`' for name in result.strategies) or 'aucune'}.",
-                f"- Références publiées : {', '.join(f'`{name}`' for name in sorted(result.baselines)) or 'aucune'}.",
+                f"- Stratégies mesurées : {measured}.",
+                f"- Références publiées : {references}.",
                 f"- Barème : `{detail.get('metric', result.primary_metric)}` "
-                f"({'maximiser' if detail.get('direction', 'maximize') == 'maximize' else 'minimiser'}), "
-                f"seuil {metrics_config.get('min_primary', 'non déclaré')}.",
-                "- Deux exécutions à graine fixée produisent les mêmes résumés, donc les mêmes métriques ; "
-                "la suite de tests le vérifie (`tests/test_training.py`, `tests/test_pipeline.py`).",
+                f"({direction}), seuil {metrics_config.get('min_primary', 'non déclaré')}.",
+                "- Deux exécutions à graine fixée produisent les mêmes résumés, donc les mêmes "
+                "métriques ; la suite de tests le vérifie (`tests/test_training.py`, "
+                "`tests/test_pipeline.py`).",
             ]
         )
 

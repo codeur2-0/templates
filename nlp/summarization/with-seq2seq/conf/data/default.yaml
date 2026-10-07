@@ -1,0 +1,60 @@
+# =================================================================================================
+# Données : Comptes-rendus d'intervention : documents, résumés de référence et faits annotés
+# -------------------------------------------------------------------------------------------------
+# Un corpus synthétique de 600 comptes-rendus d'intervention (131 tokens en moyenne, 11 phrases),
+# leurs **résumés de référence** (53 tokens, 44 % de la longueur du document) et la table des
+# **faits** annotés : 8,4 faits par document en sept types (équipement, symptôme, cause, action,
+# pièce, durée, statut), dont 6 sont saillants — c'est-à-dire que le résumé de référence doit les
+# rapporter. Chaque document est écrit autour d'un **profil d'équipement** (pompe, convoyeur,
+# automate, variateur…), donc le symptôme, la cause, l'action et la pièce sont cohérents entre
+# eux. Les résumés réécrivent les faits : les valeurs sont reprises à l'identique (« 45 minutes »,
+# « JNT-204 »), les phrases non, et la moitié des résumés utilise un second registre de rédaction.
+# Les distracteurs sont **déclarés** : numéros de ticket, de téléphone, de parking et horaires de
+# présence apparaissent dans les documents et jamais dans les résumés. Le découpage (train / val /
+# calibration / test) est écrit dans le corpus.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: intervention_reports
+n_samples: 600
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: null              # apprentissage non supervisé : pas de cible
+id_column: doc_id
+time_column: published_at
+group_column: null
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['doc_id', 'urgency', 'site', 'n_sentences', 'n_tokens', 'published_at']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+corpus:
+  split_shares:
+    train: 0.6
+    val: 0.2
+    calibration: 0.1
+    test: 0.1
+  piece_salience: 0.4
+  rewrite_share: 0.5
+  max_compression: 0.6

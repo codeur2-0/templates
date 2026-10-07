@@ -1,10 +1,10 @@
 """Baseline triviale : les premières phrases du document, sans aucun apprentissage.
 
-C'est la référence que tout lecteur a en tête quand il lit un score extractif — « prendre le début du
-document marche presque toujours » — et c'est pour cela qu'elle est **mesurée sur les mêmes lignes**
-que le modèle servi, puis publiée. Sur un compte-rendu d'intervention, l'ouverture contient le
-contexte, le symptôme et souvent l'équipement : la baseline n'est pas ridicule, et un modèle qui ne
-la bat pas n'apporte rien.
+C'est la référence que tout lecteur a en tête quand il lit un score extractif — «
+prendre le début du document marche presque toujours » — et c'est pour cela qu'elle est
+**mesurée sur les mêmes lignes** que le modèle servi, puis publiée. Sur un compte-rendu
+d'intervention, l'ouverture contient le contexte, le symptôme et souvent l'équipement :
+la baseline n'est pas ridicule, et un modèle qui ne la bat pas n'apporte rien.
 
 Deux nuances la distinguent d'un simple ``head(3)`` :
 
@@ -19,7 +19,6 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-
 from src.models.contract import BaseTextGenerator, TextSummary
 from src.preprocessing.transformers import split_sentences
 from src.utils.logging import get_logger
