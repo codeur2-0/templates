@@ -1,0 +1,186 @@
+# ==============================================================================================
+# data-science / anomaly-detection / with-pytorch
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/anomaly_detection.yaml` (fraude sur transactions de
+# paiement d'un PSP français). Ce manifeste ne décrit QUE ce qui change avec la stack : identité du
+# projet, modèle et point de fonctionnement.
+# ==============================================================================================
+
+key: ds-anomaly-pytorch
+title: "Détection de fraude sur transactions de paiement avec PyTorch"
+summary: >-
+  Pipeline tabulaire de bout en bout (flux de paiements synthétique -> contrats Pandera -> feature
+  engineering de vélocité et de contexte -> auto-encodeur PyTorch entraîné SANS étiquette, dont
+  l'erreur de reconstruction sert de score -> PR AUC, lift et rappel au budget d'investigation,
+  couverture par mode opératoire, scoring des nouvelles transactions avec décision, niveau de
+  risque et raisons) pour une équipe Risques & Fraude, entièrement piloté par Hydra et structuré
+  en objets testables. Les étiquettes de fraude (`is_fraud`, `fraud_scheme`) sont des
+  métadonnées : elles servent à mesurer, jamais à entraîner.
+
+family: anomaly_detection
+domain: data-science
+problem: anomaly-detection
+stack: pytorch
+project_slug: payment-fraud-detection-pytorch
+package_name: fraud_pytorch
+
+business:
+  # Critères et mesures de CETTE stack (exécution de référence `make all`, graine 42, test de
+  # 2 400 transactions dont 56 fraudes) : les valeurs de la famille sont celles du projet
+  # scikit-learn.
+  success_criteria:
+    - "PR AUC ≥ 0.42 sur le split de test hors échantillon (prévalence ~2,3 % : une PR AUC de 0,03 serait un score aléatoire). Mesuré : 0,691 (forêt d'isolation scikit-learn : 0,666)."
+    - "Rappel ≥ 0.45 au budget d'investigation retenu (2 % des transactions, soit la capacité réelle des analystes). Mesuré : 0,625 (35 fraudes sur 56 dans 48 alertes)."
+    - "Précision au budget ≥ 0.50 : plus d'une transaction alertée sur deux est une fraude confirmée. Mesuré : 0,729."
+    - "Lift au budget ≥ 20x par rapport à la prévalence (le classement concentre réellement la fraude). Mesuré : 31,2x."
+    - "Rappel par mode opératoire ≥ 0.30 pour au moins 3 schémas sur 4. Mesuré : 4 sur 4 — prise de compte 0,80, carte absente 0,59, identité synthétique 0,54, fraude amicale 0,33 (2 sur 6, effectif trop petit pour conclure)."
+    - "La fraude amicale reste le schéma le moins couvert : légitime dans sa forme, elle n'est trahie que par l'historique de contestations (`previous_chargebacks_12m`, première variable du détecteur). C'est un plafond structurel documenté, pas un réglage manqué."
+    - "Aucune fuite : les colonnes de diagnostic (is_fraud, fraud_scheme) sont des métadonnées, jamais des features."
+    - "ROC AUC ≥ 0.90 : le score ordonne correctement les fraudes et les transactions légitimes. Mesuré : 0,975."
+    - "Reproductibilité : deux exécutions avec la même seed produisent exactement les mêmes scores (entraînement CPU, graines fixées)."
+  measured_results:
+    - label: "PR AUC (test, 2 400 transactions, 56 fraudes)"
+      value: "0,691 (plancher aléatoire 0,031)"
+    - label: "ROC AUC"
+      value: "0,975"
+    - label: "Rappel / précision au budget (48 alertes, 2 %)"
+      value: "0,625 / 0,729"
+    - label: "Lift au budget"
+      value: "31,2x"
+    - label: "Rappel au budget par mode opératoire"
+      value: "prise de compte 0,80 | carte absente 0,59 | identité synthétique 0,54 | fraude amicale 0,33"
+    - label: "Trois premières variables (importance par permutation)"
+      value: "previous_chargebacks_12m 20,6 % | fresh_device 14,8 % | failed_attempts_1h 10,0 %"
+    - label: "Architecture retenue"
+      value: "51 -> 16 -> 2 -> 16 -> 51, 1 781 paramètres, meilleure époque 55 sur 60"
+    - label: "PR AUC de validation sur 3 graines (sélection)"
+      value: "0,636 ± 0,015"
+
+train:
+  # 60 époques avec un taux d'apprentissage en cosinus : la meilleure époque tombe entre 55 et 60,
+  # la décroissance du pas fait converger la reconstruction sans qu'un arrêt anticipé soit
+  # nécessaire. L'arrêt anticipé reste armé (patience 8) comme garde-fou.
+  epochs: 60
+  batch_size: 128
+  learning_rate: 0.002
+  weight_decay: 0.0001
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    patience: 8
+    min_delta: 0.0
+    mode: min
+    restore_best: true
+
+model:
+  display_name: "Auto-encodeur PyTorch (erreur de reconstruction)"
+  algorithm: autoencoder
+  rationale: >-
+    L'auto-encodeur apprend à **reconstruire** les transactions à travers un goulot étroit : ce
+    qu'il reconstruit mal est ce qui ne ressemble pas au flux habituel, et l'erreur de
+    reconstruction devient un score d'anomalie continu et ordonnable, donc pilotable au budget.
+    Il n'utilise aucune étiquette, comme la forêt d'isolation du projet scikit-learn, mais
+    modélise des **interactions non linéaires** (vélocité x empreinte d'appareil, montant x
+    catégorie) au lieu de coupes axe par axe. Le levier décisif est la **capacité** : un réseau
+    trop large apprend aussi à reconstruire la fraude et perd tout pouvoir de détection (PR AUC
+    de validation 0,29 à 0,41 avec deux couches de 64 et 32 neurones, contre 0,64 avec une seule
+    couche de 16 et un goulot de 2). Ce
+    projet documente aussi ses limites : score moins stable entre graines qu'une forêt
+    d'isolation, et aveugle, comme elle, à la **fraude amicale**.
+  alternatives:
+    - "isolation_forest (voir `data-science/anomaly-detection/with-sklearn`) : référence plus stable entre graines et plus simple à expliquer, sans hypothèse de distribution"
+    - "mlp : réseau dense de reconstruction sans goulot explicite — même principe, mais la capacité n'est pas contrainte, donc il reconstruit aussi les anomalies"
+    - "auto-encodeur variationnel : score probabiliste plus riche, mais entraînement plus instable et interprétation plus délicate pour une équipe fraude"
+  params:
+    # Capacité, réglée sur la validation (3 graines, sélection non supervisée : les étiquettes ne
+    # servent qu'à mesurer). PR AUC moyenne : [8]/code 3 0,675 (écart-type 0,040), [16]/code 2
+    # 0,636 (0,015), [16]/code 3 0,614 (0,055), [32]/code 2 0,601 (0,065), [64, 32]/code 6
+    # ~0,30. L'avance de [8]/code 3 (0,039) est inférieure à deux fois sa dispersion : c'est du
+    # bruit. On retient donc [16]/code 2, la plus stable, qui rend la file d'alertes
+    # reproductible d'un ré-entraînement à l'autre.
+    hidden_layers: [16]
+    # Largeur du goulot : 2 dimensions latentes pour 51 colonnes. Un code plus large (6, 10)
+    # laisse passer les signatures de fraude et fait chuter la PR AUC.
+    code_dim: 2
+    # Pas de dropout : le goulot régularise déjà, et le dropout bruite le score de reconstruction.
+    dropout: 0.0
+    activation: relu
+    optimizer: adamw
+    scheduler: cosine
+
+extras:
+  # Grille explorée par le notebook 04 (6 entraînements de ~20 s) : la capacité est le seul levier
+  # qui compte ici, le taux d'apprentissage n'est pas un hyperparamètre du modèle.
+  notebook_param_grid:
+    hidden_layers: [[8], [16]]
+    code_dim: [2, 3, 4]
+  # Un auto-encodeur n'a pas de paramètre `contamination` : il produit un score, et le seuil est
+  # fixé par le budget d'investigation. La section correspondante du notebook 04 est sans objet.
+  notebook_anomaly:
+    contamination_param: null
+    # Commentaires chiffrés du notebook 04, mesurés sur CETTE stack (validation, 12 époques —
+    # budget des notebooks —, graine 42). Les valeurs par défaut décrivent la forêt d'isolation.
+    prose:
+      algorithms:
+        - "La stack PyTorch sert deux architectures à la tâche `anomaly`, toutes deux par **reconstruction** : `autoencoder` (goulot explicite `code_dim`) et `mlp` (réseau dense qui reconstruit ses entrées, sans goulot déclaré). L'erreur de reconstruction est le score d'anomalie."
+        - "Avec leurs réglages par défaut (`params={}`), le MLP ([64, 32], dropout 0,2) obtient 0,565 de PR AUC et l'auto-encodeur ([32, 16], goulot de 13 dimensions, soit 25 % des 51 colonnes) seulement 0,259. Le détecteur configuré ([16], goulot de 2, 1 781 paramètres) atteint 0,674 en section 1 : même architecture, capacité bien plus faible."
+        - "C'est la leçon centrale d'un auto-encodeur de détection : trop large, il apprend presque l'identité et reconstruit la fraude aussi bien que le normal — son erreur ne discrimine plus rien. Le dropout du MLP par défaut freine ce phénomène, d'où son avance sur l'auto-encodeur par défaut."
+        - "Un écart de PR AUC inférieur à 2x la dispersion entre graines (section 4 : 0,049) n'est pas un signal : ne pas choisir une architecture sur un écart de cet ordre."
+      contamination:
+        - "Un auto-encodeur ne suppose aucune part d'anomalies : il rend une erreur de reconstruction, et le seuil d'alerte est le quantile du budget (2 % du flux) calculé par l'évaluateur. C'est exactement le pilotage au budget que la contamination oblige à simuler avec une forêt d'isolation."
+        - "Conséquence pratique : le seuil n'a pas d'unité métier (1,22 sur le test, en erreur quadratique sur des features standardisées). Il se recalibre à chaque ré-entraînement et ne se copie jamais d'un modèle à l'autre."
+      stability:
+        - "Recouvrement du top-budget de 0,944 pour les trois graines (34 alertes sur 36 identiques) et corrélation de Spearman de 0,92 à 0,97 : la file d'alertes est reproductible, au-dessus du seuil de 0,85 fixé en section 6."
+        - "La PR AUC varie pourtant de 0,612 à 0,707 (écart-type 0,049), plus de dix fois la dispersion de la forêt d'isolation du projet scikit-learn (0,003 avec 500 arbres) : un réseau reste plus sensible à son initialisation qu'un ensemble d'arbres."
+        - "La graine est transmise au modèle lui-même (`candidate.random_state`) : les réseaux ne lisent pas `random_state` dans leurs paramètres, et sans cela la cellule entraînerait trois fois le même modèle — une stabilité parfaite et fausse."
+      grid:
+        - "Le tri respecte le **sens** de la métrique (`direction: maximize` pour une PR AUC) : un tri ascendant par défaut classerait les pires détecteurs en premier."
+        - "À 12 époques et une seule graine, les six combinaisons tiennent en 0,077 de PR AUC (0,618 à 0,695), moins de deux fois la dispersion entre graines de la section 4 (0,049) : aucun point ne se détache statistiquement."
+        - "[8]/code 3 s'affiche en tête (0,695). C'était aussi le meilleur point de l'étude de sélection au budget du pipeline (60 époques, 3 graines : 0,675 ± 0,040), mais son avance sur [16]/code 2 (0,636 ± 0,015) restait inférieure à deux fois sa dispersion. Le réglage retenu est [16]/code 2, le plus stable — la même règle que pour la forêt d'isolation."
+        - "Tendance lisible malgré le bruit : le goulot à 4 dimensions est dernier pour les deux largeurs. Élargir le goulot laisse passer les signatures de fraude."
+        - "Règle pratique : ne retenir un point de grille que si son avance dépasse 2x la dispersion entre graines. En dessous, on tranche sur un critère non statistique — ici la stabilité, ailleurs le coût d'inférence ou la simplicité de maintenance."
+  test_n_samples: 3000
+  reference_date: "2025-01-06"
+  data_conf:
+    fraud_rate: 0.018
+    window_days: 90
+    legit_outlier_rate: 0.025
+    missing_device_rate: 0.04
+    missing_session_rate: 0.06
+    missing_distance_rate: 0.05
+  # Critères de succès du cas d'usage, identiques à toutes les stacks de la famille (voir le
+  # manifeste scikit-learn pour leur calibration).
+  quality:
+    pr_auc_min: 0.42
+    roc_auc_min: 0.90
+    recall_at_budget_min: 0.45
+    precision_at_budget_min: 0.50
+    lift_at_budget_min: 20.0
+    scheme_recall_floor: 0.30
+    covered_schemes_min: 3
+  model_conf:
+    # Entraînement sur CPU : le détecteur doit tourner sans GPU (contrainte du cas d'usage).
+    device: cpu
+    cross_validation:
+      enabled: false
+      folds: 3
+      strategy: kfold
+  root_conf:
+    fraud_detection:
+      threshold: null
+      budget_rate: 0.02
+      review_risk_level: modéré
+
+learning_objectives:
+  - "Comprendre pourquoi la fraude se détecte sans supervision : étiquette tardive (chargeback à J+30), partielle et biaisée par les règles existantes."
+  - "Construire un pipeline sans fuite : `is_fraud` et `fraud_scheme` sont des métadonnées exclues des features par configuration."
+  - "Lire les bonnes métriques en forte imbalance : PR AUC et lift plutôt qu'accuracy et ROC AUC, et toujours relativement au plancher (= prévalence)."
+  - "Piloter au **budget** d'investigation plutôt qu'au seuil arbitraire : table d'arbitrage volume d'alertes -> rappel / précision / lift."
+  - "Transformer une erreur de reconstruction en score d'anomalie, et comprendre pourquoi la **capacité** de l'auto-encodeur décide de sa qualité de détection."
+  - "Distinguer anomalie et outlier légitime : ne PAS rogner les valeurs extrêmes, construire une liste blanche métier."
+  - "Gérer les manquants informatifs (empreinte bloquée, paiement one-click, retrait magasin) sans imputation silencieuse."
+  - "Comparer les architectures de la stack (auto-encodeur, MLP de reconstruction) à protocole et budget égaux."
+  - "Mesurer la stabilité du classement entre graines : un réseau de neurones y est plus sensible qu'une forêt d'isolation."
+  - "Ventiler la performance par mode opératoire : un rappel global correct peut masquer un schéma en croissance non couvert."
+  - "Expliquer une alerte (facteurs contributifs par permutation, schéma probable) pour satisfaire l'exigence LCB-FT."
+  - "Industrialiser l'ensemble : configuration Hydra, artefacts traçables, tests pytest, rapports générés, scoring batch et unitaire."

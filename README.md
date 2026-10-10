@@ -14,7 +14,7 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**25 projets** sur sept familles tabulaires, tous verts dans `tools/verify.py` (lint, formatage,
+**27 projets** sur sept familles tabulaires, tous verts dans `tools/verify.py` (lint, formatage,
 typage, tests, six notebooks exécutés, pipeline complet `data → train → evaluate → predict`).
 
 ### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks
@@ -70,22 +70,45 @@ Rapport de conformité **7/7** : qualité de structure, équilibre des tailles, 
 bootstrap, validité externe contre les segments latents du générateur, et profilage métier de
 chaque segment (le rapport nomme les segments et propose une action par segment).
 
-### 1.4 `data-science/anomaly-detection` — détection de fraude sur paiements, scikit-learn
+### 1.4 `data-science/anomaly-detection` — détection de fraude sur paiements, trois stacks
 
 | Projet | Stack | Modèle | PR AUC | ROC AUC | Rappel au budget | Précision au budget | Lift |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| [`with-sklearn`](data-science/anomaly-detection/with-sklearn) | scikit-learn | `isolation_forest` (500 arbres, 2 variables par coupe) | **0,6661** | 0,9468 | 0,6071 | 0,7083 | **30,4x** |
+| [`with-sklearn`](data-science/anomaly-detection/with-sklearn) | scikit-learn | `isolation_forest` (500 arbres, 2 variables par coupe) | 0,6661 | 0,9468 | 0,6071 | 0,7083 | 30,4x |
+| [`with-pytorch`](data-science/anomaly-detection/with-pytorch) | PyTorch | `autoencoder` 51-16-**2**-16-51 (1 781 paramètres) | **0,6915** | **0,9745** | **0,6250** | **0,7292** | **31,2x** |
+| [`with-tensorflow`](data-science/anomaly-detection/with-tensorflow) | TensorFlow (`GradientTape`) | `autoencoder` 51-8-**3**-8-51 (934 paramètres) | 0,6459 | 0,9672 | **0,6250** | **0,7292** | **31,2x** |
 
 12 000 transactions, prévalence 2,3 % sur le split de test (56 fraudes), budget
 d'investigation fixé à 2 % des lignes — la capacité réelle d'une équipe d'analystes. Une PR AUC
-aléatoire vaudrait 0,0306 ici : le gain est donc de 0,636 en valeur absolue, et le classement
-concentre 30 fois mieux la fraude qu'un tirage au sort.
+aléatoire vaudrait 0,0306 ici : le gain est donc de 0,62 à 0,66 en valeur absolue, et le
+classement concentre 30 fois mieux la fraude qu'un tirage au sort. Aucun des trois détecteurs
+n'a vu une étiquette : ils sont entraînés sur le flux brut et les étiquettes ne servent qu'à mesurer.
 
-Couverture par mode opératoire : identité synthétique 0,85 | carte absente 0,65 | prise de
-compte 0,60 | **fraude amicale 0,00**. Ce dernier zéro n'est pas un bug à masquer : la fraude
-amicale est légitime en apparence (bon appareil, bon historique, bon montant) et aucun détecteur
-transactionnel non supervisé ne peut la voir. C'est un plafond structurel, documenté comme tel
-dans le rapport et le notebook 06.
+| Rappel au budget par mode opératoire | Forêt d'isolation | Auto-encodeur PyTorch | Auto-encodeur TensorFlow |
+| --- | --- | --- | --- |
+| Prise de compte (20 fraudes) | 0,60 | 0,80 | **0,85** |
+| Carte absente (17) | **0,65** | 0,59 | 0,53 |
+| Identité synthétique (13) | **0,85** | 0,54 | 0,54 |
+| Fraude amicale (6) | 0,00 | 0,33 | 0,33 |
+
+**Lecture honnête** : à PR AUC comparable, les deux familles ne voient pas la même fraude. La
+forêt d'isolation répartit son attention (sa première variable ne pèse que 5,9 % de l'importance
+par permutation) et excelle sur l'identité synthétique ; les auto-encodeurs concentrent la leur
+sur l'historique de contestations, l'appareil neuf et les échecs récents (44 à 45 % à eux trois) et
+dominent sur la prise de compte. C'est aussi ce qui leur fait capturer 2 fraudes amicales sur 6 :
+un effectif trop petit pour conclure, mais qui montre que la fraude amicale — légitime en
+apparence, trahie seulement par l'historique de contestations — reste un plafond structurel du
+détecteur transactionnel, pas un zéro absolu. Deux détecteurs aussi complémentaires sont un
+argument pour un score combiné, à mesurer plutôt qu'à supposer.
+
+Le levier décisif d'un auto-encodeur de détection est sa **capacité** : sur la validation, deux
+couches de 64 et 32 neurones plafonnent entre 0,21 et 0,45 de PR AUC (le réseau apprend aussi à
+reconstruire la fraude), une seule couche de 8 ou 16 neurones avec un goulot de 2 ou 3 dimensions
+monte à 0,55–0,68. Les réglages sont choisis sur 3 graines ; quand l'avance du meilleur point est
+inférieure à deux fois sa dispersion, c'est le plus stable qui est retenu. Limite documentée : la
+file d'alertes de l'auto-encodeur TensorFlow change de 6 à 8 alertes sur 36 d'une graine à l'autre
+(recouvrement 0,78–0,83 au notebook 04), sous le seuil de 0,85 visé avant production ; celle de
+PyTorch est à 0,94.
 
 Le registre sklearn de la tâche `anomaly` sert quatre détecteurs (`isolation_forest`,
 `one_class_svm`, `elliptic_envelope`, `local_outlier_factor` en mode `novelty=True`), ce qui permet
@@ -356,6 +379,14 @@ Pièges documentés dans le code (et résolus) que ces stacks partagent :
 - **Un `HistGradientBoostingClassifier` multi-classes construit K arbres par itération** : 300
   itérations x 6 classes = 1 800 arbres, soit 30 s d'entraînement sous Windows et des probabilités
   sur-confiantes. Le projet multi-classes livre 100 itérations x 8 feuilles.
+- **Une étude de stabilité entre graines peut mentir par construction** : écrire
+  `params={"random_state": seed}` ne change rien à un réseau, dont la graine est un attribut du
+  modèle et non un hyperparamètre. Trois entraînements identiques donnent une stabilité parfaite
+  et fausse. Le notebook d'anomalie pose la graine sur le modèle (`candidate.random_state = seed`)
+  et ne l'écrit dans les paramètres que si la stack l'y déclare.
+- **`FitResult.duration_seconds` n'était renseigné que par le `Trainer`** : un appel direct à
+  `model.fit` (notebooks, études) rendait 0 s, et les colonnes de coût des notebooks affichaient
+  0,0 pour tous les modèles. `BaseModel.fit` chronomètre désormais lui-même (horloge monotone).
 
 ---
 
@@ -402,9 +433,9 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **25/25 projets conformes** (ruff check, ruff format, mypy strict,
-4 235 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les tests
-de leur couche tâche —, 150 notebooks exécutés, `python -m src.main mode=all` de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
+État au dernier passage : **27/27 projets conformes** (ruff check, ruff format, mypy strict,
+4 565 tests au total — 165 par projet, 187 pour les projets multi-classes qui ajoutent les tests
+de leur couche tâche —, 162 notebooks exécutés, `python -m src.main mode=all` de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
 six notebooks et pipeline complet — avant d'être considéré comme livré.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
@@ -434,12 +465,12 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras}/` sont écrites et vérifiées : les
 **sept familles tabulaires** sont livrées. Ce qui reste, par ordre de valeur pédagogique :
 
-1. **Stacks tabulaires déclarées, pas encore livrées** — `clustering` et `anomaly_detection` en
-   PyTorch et TensorFlow (auto-encodeurs), `recommendation` en PyTorch (modèle à deux tours),
-   `binary_classification` avec MLflow. Leurs couches `task/` et `family/` existent ; il reste un
-   manifeste par stack et, comme pour la prévision, des notebooks paramétrés par stack
-   (`extras.notebook_<famille>`) : les commentaires chiffrés d'un notebook doivent parler de la
-   stack réellement mesurée.
+1. **Stacks tabulaires déclarées, pas encore livrées** — `clustering` en PyTorch et TensorFlow
+   (auto-encodeur + k-means dans l'espace latent), `recommendation` en PyTorch (modèle à deux
+   tours), `binary_classification` avec MLflow. Leurs couches `task/` et `family/` existent ; il
+   reste un manifeste par stack et, comme pour la prévision et la détection d'anomalies, des
+   notebooks paramétrés par stack (`extras.notebook_<famille>`) : les commentaires chiffrés d'un
+   notebook doivent parler de la stack réellement mesurée.
 2. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
    GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
    `ai-eng/` (LangChain, Deepagents, Strands, CrewAI, RAG, Transformers, serving FastAPI), `computer-vision/` et `nlp/`

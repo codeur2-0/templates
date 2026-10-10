@@ -1,0 +1,1236 @@
+"""Synthetic data generator — Transactions de paiement et fraude observée.
+
+Business scenario
+        La détection repose aujourd'hui sur ~240 règles métier écrites au fil des incidents («
+    montant > 2 000 EUR ET pays différent du pays de facturation », etc.). Elles capturent 38 %
+    de la fraude confirmée, génèrent 11 000 alertes par jour dont 96 % sont levées sans suite
+    par les analystes, et sont aveugles aux schémas inédits : une règle n'existe que lorsque la
+    fraude a déjà été vue. La fraude évolue plus vite que le catalogue de règles (card testing
+    automatisé, prise de compte, identités synthétiques).
+
+How the data is built
+    The generator does **not** draw columns independently, and it does not label rows at random:
+    it first builds a realistic legitimate payment flow, then bends a small share of the rows
+    towards one of four **fraud modus operandi**, each of which distorts a *different* subset of
+    variables:
+
+    * ``card_not_present`` — card testing: explosive 24 h velocity, many distinct merchants,
+      declined attempts, tiny amounts, no 3-D Secure, brand-new device fingerprint, night hours;
+    * ``account_takeover`` — an old account on a new device: high tenure, unusual amount relative
+      to the usual basket, several countries in 7 days, far-away shipping address;
+    * ``synthetic_identity`` — brand-new card *and* account, declined attempts, expensive goods
+      categories, mismatching geographies;
+    * ``friendly_fraud`` — an almost legitimate transaction: only the chargeback history and a
+      slightly unusual amount betray it. This is the hardest scheme and caps the recall.
+
+    On top of that, three traps make the exercise honest:
+
+    * **legitimate outliers** (~2.5 % of rows) — luxury purchases, business travellers paying at
+      night from abroad, end-of-month corporate payments. They look like fraud on most variables
+      and are *not* fraud, which caps the achievable precision;
+    * **informative missingness** — ``device_age_days``, ``session_duration_sec`` and
+      ``billing_shipping_distance_km`` contain NaN, with a MNAR bias (blocked fingerprints are
+      twice as frequent among frauds). Silent imputation destroys this signal;
+    * **irreducible noise** — the least severe frauds are pulled back into the legitimate
+      distribution: they carry no observable signature at all, which caps the achievable recall.
+
+    ``is_fraud`` and ``fraud_scheme`` are **metadata**: they are excluded from the feature matrix
+    by ``drop_columns`` and used only by the evaluator. The detector is trained without them.
+
+Determinism
+    ``generate()`` is a pure function of ``(n_samples, seed, options)``: two runs produce the same
+    bytes, which is what makes stack-to-stack comparisons meaningful.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any, ClassVar
+
+import numpy as np
+import numpy.typing as npt
+import pandas as pd
+
+from src.data.schemas import RawDataSchema
+from src.utils.io import write_json, write_table_multiple
+from src.utils.logging import get_logger
+from src.utils.paths import ProjectPaths
+
+logger = get_logger(__name__)
+
+#: Default dataset name (overridable through the constructor / Hydra config).
+DEFAULT_DATASET_NAME = "payment_transactions"
+
+#: Merchant categories: (name, flow share, median amount EUR, log dispersion, in-store share).
+MERCHANT_PROFILE: tuple[tuple[str, float, float, float, float], ...] = (
+    ("grocery", 0.31, 32.0, 0.55, 0.34),
+    ("restaurant", 0.17, 28.0, 0.60, 0.41),
+    ("fashion", 0.14, 65.0, 0.72, 0.22),
+    ("utilities", 0.12, 58.0, 0.45, 0.05),
+    ("electronics", 0.10, 240.0, 0.78, 0.24),
+    ("travel", 0.07, 420.0, 0.85, 0.11),
+    ("gaming", 0.06, 25.0, 0.90, 0.01),
+    ("jewelry", 0.03, 850.0, 0.95, 0.30),
+)
+
+#: Countries: (code, share of shopping sessions, share of billing addresses).
+COUNTRY_PROFILE: tuple[tuple[str, float, float], ...] = (
+    ("FR", 0.78, 0.86),
+    ("BE", 0.05, 0.04),
+    ("DE", 0.05, 0.035),
+    ("ES", 0.04, 0.025),
+    ("IT", 0.03, 0.02),
+    ("LU", 0.02, 0.012),
+    ("PT", 0.01, 0.008),
+    ("other", 0.02, 0.01),
+)
+
+#: 3-D Secure success rate per channel (legitimate flow).
+THREE_DS_BY_CHANNEL: dict[str, float] = {
+    "in_store": 0.95,
+    "mobile_app": 0.72,
+    "web": 0.63,
+    "phone": 0.34,
+}
+
+#: Fraud modus operandi: (name, share of fraud, night share, 3-DS rate).
+FRAUD_SCHEMES: tuple[tuple[str, float, float, float], ...] = (
+    ("card_not_present", 0.41, 0.58, 0.09),
+    ("account_takeover", 0.27, 0.47, 0.46),
+    ("synthetic_identity", 0.19, 0.38, 0.24),
+    ("friendly_fraud", 0.13, 0.21, 0.85),
+)
+
+#: Hours considered as night-time (cardholder local time).
+NIGHT_HOURS: tuple[int, ...] = (0, 1, 2, 3, 4)
+
+#: Hourly profile of a retail payment flow (night trough, lunch and evening peaks).
+HOUR_WEIGHTS: tuple[float, ...] = (
+    0.6,
+    0.4,
+    0.3,
+    0.3,
+    0.4,
+    0.8,
+    1.6,
+    2.6,
+    3.4,
+    3.8,
+    4.0,
+    4.3,
+    4.8,
+    4.4,
+    3.9,
+    3.7,
+    3.8,
+    4.2,
+    5.0,
+    5.4,
+    5.0,
+    3.6,
+    2.2,
+    1.2,
+)
+
+#: Categories favoured by the high-value fraud schemes.
+HIGH_VALUE_CATEGORIES: tuple[str, ...] = ("electronics", "travel", "gaming", "fashion")
+
+#: Diagnostic columns: metadata only, never features (dropped by ``drop_columns``).
+DIAGNOSTIC_COLUMNS: tuple[str, ...] = ("is_fraud", "fraud_scheme")
+
+
+class SyntheticDataGenerator:
+    """Deterministic generator of the payment transactions dataset.
+
+    Example:
+        >>> generator = SyntheticDataGenerator(n_samples=2000, seed=42)
+        >>> frame = generator.generate()
+        >>> frame.shape[0]
+        2000
+        >>> {"is_fraud", "fraud_scheme"} <= set(frame.columns)
+        True
+    """
+
+    #: Options accepted from ``conf/data/default.yaml`` (extra keys of the data node).
+    SUPPORTED_OPTIONS: ClassVar[tuple[str, ...]] = (
+        "fraud_rate",
+        "window_days",
+        "legit_outlier_rate",
+        "missing_device_rate",
+        "missing_session_rate",
+        "missing_distance_rate",
+    )
+
+    #: Columns produced, in the order they appear in the frame (``RawDataSchema`` is strict).
+    COLUMNS: ClassVar[tuple[str, ...]] = (
+        "transaction_id",
+        "occurred_at",
+        "amount_eur",
+        "merchant_category",
+        "channel",
+        "shopper_country",
+        "billing_country",
+        "card_age_months",
+        "account_tenure_months",
+        "transactions_24h",
+        "distinct_merchants_24h",
+        "distinct_countries_7d",
+        "failed_attempts_1h",
+        "device_age_days",
+        "session_duration_sec",
+        "billing_shipping_distance_km",
+        "amount_to_customer_avg_ratio",
+        "is_night",
+        "three_ds_authenticated",
+        "previous_chargebacks_12m",
+        "is_fraud",
+        "fraud_scheme",
+    )
+
+    def __init__(
+        self,
+        *,
+        n_samples: int = 12000,
+        seed: int = 42,
+        dataset_name: str | None = None,
+        output_dir: Path | str | None = None,
+        formats: Sequence[str] = ("parquet", "csv"),
+        fraud_rate: float = 0.018,
+        window_days: int = 90,
+        start: str = "2025-01-06",
+        legit_outlier_rate: float = 0.025,
+        missing_device_rate: float = 0.04,
+        missing_session_rate: float = 0.06,
+        missing_distance_rate: float = 0.05,
+    ) -> None:
+        """Store the generation parameters.
+
+        Args:
+            n_samples: Number of transactions to generate.
+            seed: Random seed (fully determines the output).
+            dataset_name: Base file name (defaults to :data:`DEFAULT_DATASET_NAME`).
+            output_dir: Directory receiving the files (defaults to ``data/raw``).
+            formats: Formats to write (``parquet`` and/or ``csv``).
+            fraud_rate: Share of transactions confirmed as fraud by a chargeback. A realistic PSP
+                sits between 0.5 % and 3 %; the strong imbalance is the whole point of the exercise.
+            window_days: Length of the observation window (the flow is chronological).
+            start: First timestamp of the observation window (tz-naive, like the schema contract).
+            legit_outlier_rate: Share of *legitimate* transactions given an extreme but real
+                profile (luxury, business travel, corporate payment). These rows are the main
+                source of false alarms and cap the achievable precision.
+            missing_device_rate: Share of rows without a usable device fingerprint.
+            missing_session_rate: Share of rows without a session duration (one-click payments).
+            missing_distance_rate: Share of rows without a shipping address (store pickup).
+
+        Raises:
+            ValueError: When a parameter is out of its valid range.
+        """
+        if n_samples < 200:
+            msg = f"n_samples must be >= 200 to contain enough frauds, got {n_samples}"
+            raise ValueError(msg)
+        if not 0.001 <= fraud_rate <= 0.20:
+            msg = f"fraud_rate must be in [0.001, 0.20], got {fraud_rate}"
+            raise ValueError(msg)
+        if window_days < 7:
+            msg = f"window_days must be >= 7, got {window_days}"
+            raise ValueError(msg)
+        if not 0.0 <= legit_outlier_rate <= 0.20:
+            msg = f"legit_outlier_rate must be in [0, 0.20], got {legit_outlier_rate}"
+            raise ValueError(msg)
+        for name, rate in (
+            ("missing_device_rate", missing_device_rate),
+            ("missing_session_rate", missing_session_rate),
+            ("missing_distance_rate", missing_distance_rate),
+        ):
+            if not 0.0 <= rate <= 0.5:
+                msg = f"{name} must be in [0, 0.5], got {rate}"
+                raise ValueError(msg)
+
+        self.n_samples = int(n_samples)
+        self.seed = int(seed)
+        self.dataset_name = dataset_name or DEFAULT_DATASET_NAME
+        self.output_dir = (
+            Path(output_dir) if output_dir is not None else ProjectPaths.from_root().raw_dir
+        )
+        self.formats = tuple(formats)
+        self.fraud_rate = float(fraud_rate)
+        self.window_days = int(window_days)
+        self.start = pd.Timestamp(start)
+        self.legit_outlier_rate = float(legit_outlier_rate)
+        self.missing_device_rate = float(missing_device_rate)
+        self.missing_session_rate = float(missing_session_rate)
+        self.missing_distance_rate = float(missing_distance_rate)
+        #: Generator state, re-seeded on every :meth:`generate` call for strict determinism.
+        self.rng: np.random.Generator = np.random.default_rng(self.seed)
+
+    # ------------------------------------------------------------------ generation ------
+    def generate(self) -> pd.DataFrame:
+        """Generate the transaction flow.
+
+        Returns:
+            A validated ``DataFrame`` with the columns declared in ``RawDataSchema``, sorted by
+            timestamp, with ``is_fraud`` / ``fraud_scheme`` as diagnostic metadata.
+        """
+        rng = np.random.default_rng(self.seed)
+        self.rng = rng
+        n = self.n_samples
+        logger.info(
+            "Generating {} transactions | seed={} fraud_rate={} window_days={}",
+            n,
+            self.seed,
+            self.fraud_rate,
+            self.window_days,
+        )
+
+        category, category_median = self._merchant_category(n)
+        channel = self._channel(category)
+        stamps = self._timestamps(n)
+        shopper_country, billing_country = self._countries(n)
+        card_age = self._card_age(n)
+        account_tenure = self._account_tenure(n)
+        customer_avg = self._customer_avg(n)
+        amount = self._amount(category_median, customer_avg)
+        transactions_24h, distinct_merchants = self._velocity(n)
+        distinct_countries = self._distinct_countries(n)
+        failed_attempts = self._failed_attempts(n)
+        device_age = self._device_age(n)
+        session_duration = self._session_duration(channel)
+        distance = self._distance(channel)
+        three_ds = self._three_ds(channel)
+        chargebacks = self._chargebacks(n)
+
+        # --- fraud: a share of the rows is bent towards one modus operandi ------------------
+        fraud_mask = rng.random(n) < self.fraud_rate
+        scheme = np.full(n, "", dtype=object)
+        severity = rng.uniform(0.35, 1.0, size=n)
+        fraud_rows = np.flatnonzero(fraud_mask)
+        if fraud_rows.size:
+            drawn = rng.choice(
+                np.array([row[0] for row in FRAUD_SCHEMES]),
+                size=fraud_rows.size,
+                p=_normalise([row[1] for row in FRAUD_SCHEMES]),
+            )
+            scheme[fraud_rows] = drawn
+            for name in FRAUD_SCHEMES:
+                rows = fraud_rows[drawn == name[0]]
+                if rows.size == 0:
+                    continue
+                self._apply_scheme(
+                    name[0],
+                    rows,
+                    severity,
+                    state=_State(
+                        amount=amount,
+                        category=category,
+                        channel=channel,
+                        stamps=stamps,
+                        shopper_country=shopper_country,
+                        billing_country=billing_country,
+                        card_age=card_age,
+                        account_tenure=account_tenure,
+                        transactions_24h=transactions_24h,
+                        distinct_merchants=distinct_merchants,
+                        distinct_countries=distinct_countries,
+                        failed_attempts=failed_attempts,
+                        device_age=device_age,
+                        session_duration=session_duration,
+                        distance=distance,
+                        three_ds=three_ds,
+                        chargebacks=chargebacks,
+                        customer_avg=customer_avg,
+                    ),
+                )
+
+        # --- legitimate outliers: extreme but real (the main source of false alarms) --------
+        self._inject_legit_outliers(
+            fraud_mask,
+            amount=amount,
+            category=category,
+            stamps=stamps,
+            shopper_country=shopper_country,
+            billing_country=billing_country,
+            device_age=device_age,
+            session_duration=session_duration,
+            customer_avg=customer_avg,
+        )
+
+        # --- irreducible noise: the least severe frauds carry no observable signature -------
+        self._hide_subtle_frauds(
+            fraud_rows,
+            severity,
+            amount=amount,
+            transactions_24h=transactions_24h,
+            failed_attempts=failed_attempts,
+            device_age=device_age,
+            session_duration=session_duration,
+            three_ds=three_ds,
+            customer_avg=customer_avg,
+        )
+
+        # --- informative missingness (MNAR): blocked fingerprints, one-click, store pickup --
+        self._inject_missing(fraud_mask, device_age, session_duration, distance)
+
+        # --- derived columns, computed AFTER the distortions so they stay consistent --------
+        ratio = np.clip(amount / np.maximum(customer_avg, 1.0), 0.02, 60.0)
+        day_starts = stamps.astype("datetime64[D]").astype("datetime64[h]")
+        hours = stamps.astype("datetime64[h]") - day_starts
+        is_night = np.isin(hours.astype(int), np.array(NIGHT_HOURS, dtype=int)).astype(int)
+        amount = np.clip(amount, 0.5, 12000.0).round(2)
+
+        frame = pd.DataFrame(
+            {
+                "transaction_id": [f"TXN-{index:07d}" for index in range(1, n + 1)],
+                "occurred_at": pd.Series(stamps).astype("datetime64[ns]"),
+                "amount_eur": amount.astype("float64"),
+                "merchant_category": category,
+                "channel": channel,
+                "shopper_country": shopper_country,
+                "billing_country": billing_country,
+                "card_age_months": card_age.astype(int),
+                "account_tenure_months": account_tenure.astype(int),
+                "transactions_24h": transactions_24h.astype(int),
+                "distinct_merchants_24h": distinct_merchants.astype(int),
+                "distinct_countries_7d": distinct_countries.astype(int),
+                "failed_attempts_1h": failed_attempts.astype(int),
+                "device_age_days": device_age.astype("float64"),
+                "session_duration_sec": session_duration.astype("float64"),
+                "billing_shipping_distance_km": distance.astype("float64"),
+                "amount_to_customer_avg_ratio": ratio.astype("float64").round(3),
+                "is_night": is_night.astype(int),
+                "three_ds_authenticated": three_ds.astype(int),
+                "previous_chargebacks_12m": chargebacks.astype(int),
+                "is_fraud": fraud_mask.astype(int),
+                "fraud_scheme": pd.Series(np.where(scheme == "", pd.NA, scheme), dtype="object"),
+            }
+        )
+        frame = frame[list(self.COLUMNS)]
+        frame = frame.sort_values("occurred_at", kind="mergesort").reset_index(drop=True)
+        # Identifiants régénérés après le tri chronologique pour rester séquentiels et uniques.
+        frame["transaction_id"] = [f"TXN-{index:07d}" for index in range(1, len(frame) + 1)]
+        validated = RawDataSchema.validate(frame)
+        logger.info(
+            "Generated {} transactions | fraud={:.2%} | schemes={} | NaN={}",
+            len(validated),
+            float(validated["is_fraud"].mean()),
+            int(validated["fraud_scheme"].nunique(dropna=True)),
+            int(validated.isna().to_numpy().sum()),
+        )
+        return validated
+
+    # ------------------------------------------------------------- population légitime ---
+    def _merchant_category(self, n: int) -> tuple[np.ndarray, np.ndarray]:
+        """Draw the merchant category and the matching median amounts.
+
+        Args:
+            n: Number of rows.
+
+        Returns:
+            A tuple ``(category, median_amount)`` of arrays.
+        """
+        names = np.array([row[0] for row in MERCHANT_PROFILE], dtype=object)
+        picked = self.rng.choice(names, size=n, p=_normalise([row[1] for row in MERCHANT_PROFILE]))
+        lookup = {row[0]: row[2] for row in MERCHANT_PROFILE}
+        medians = np.array([lookup[value] for value in picked], dtype="float64")
+        return picked.astype(object), medians
+
+    def _channel(self, category: np.ndarray) -> np.ndarray:
+        """Draw the payment channel, conditional on the merchant category.
+
+        Args:
+            category: Merchant category per row.
+
+        Returns:
+            An object array of channels (``web``, ``mobile_app``, ``in_store``, ``phone``).
+        """
+        rng = self.rng
+        lookup = {row[0]: row[4] for row in MERCHANT_PROFILE}
+        in_store_share = np.array([lookup[value] for value in category], dtype="float64")
+        draw = rng.random(category.size)
+        phone = draw < 0.04
+        in_store = (~phone) & (draw < 0.04 + 0.96 * in_store_share)
+        mobile = (~phone) & (~in_store) & (rng.random(category.size) < 0.62)
+        return np.where(
+            phone, "phone", np.where(in_store, "in_store", np.where(mobile, "mobile_app", "web"))
+        ).astype(object)
+
+    def _timestamps(self, n: int) -> np.ndarray:
+        """Draw tz-naive timestamps following a realistic daily payment rhythm.
+
+        Args:
+            n: Number of rows.
+
+        Returns:
+            An array of ``datetime64[ns]`` inside the observation window.
+        """
+        rng = self.rng
+        weights = _normalise(HOUR_WEIGHTS)
+        day = rng.integers(0, self.window_days, size=n)
+        hour = rng.choice(np.arange(24), size=n, p=weights)
+        minute = rng.integers(0, 60, size=n)
+        second = rng.integers(0, 60, size=n)
+        start = np.datetime64(self.start, "ns")
+        return (
+            start
+            + day.astype("timedelta64[D]").astype("timedelta64[ns]")
+            + hour.astype("timedelta64[h]")
+            + minute.astype("timedelta64[m]")
+            + second.astype("timedelta64[s]")
+        )
+
+    def _countries(self, n: int) -> tuple[np.ndarray, np.ndarray]:
+        """Draw the session and billing countries (86 % of legitimate rows agree).
+
+        Args:
+            n: Number of rows.
+
+        Returns:
+            A tuple ``(shopper_country, billing_country)`` of object arrays.
+        """
+        rng = self.rng
+        codes = np.array([row[0] for row in COUNTRY_PROFILE], dtype=object)
+        shopper = rng.choice(codes, size=n, p=_normalise([row[1] for row in COUNTRY_PROFILE]))
+        billing = np.where(
+            rng.random(n) < 0.86,
+            shopper,
+            rng.choice(codes, size=n, p=_normalise([row[2] for row in COUNTRY_PROFILE])),
+        )
+        return shopper.astype(object), billing.astype(object)
+
+    def _card_age(self, n: int) -> np.ndarray:
+        """Draw the card age in months (gamma, median ~26 months)."""
+        draw = self.rng.gamma(shape=2.2, scale=12.0, size=n)
+        return np.clip(np.round(draw), 0, 120)
+
+    def _account_tenure(self, n: int) -> np.ndarray:
+        """Draw the PSP account tenure in months (gamma, median ~19 months)."""
+        draw = self.rng.gamma(shape=2.0, scale=9.5, size=n)
+        return np.clip(np.round(draw), 0, 108)
+
+    def _customer_avg(self, n: int) -> np.ndarray:
+        """Draw each cardholder's historical average basket in EUR."""
+        return np.clip(self.rng.lognormal(mean=np.log(55.0), sigma=0.75, size=n), 5.0, 4000.0)
+
+    def _amount(self, category_median: np.ndarray, customer_avg: np.ndarray) -> np.ndarray:
+        """Draw the amount from a per-category log-normal, anchored on the customer basket.
+
+        Args:
+            category_median: Median amount of the drawn merchant category.
+            customer_avg: Historical average basket of the cardholder.
+
+        Returns:
+            An array of amounts in EUR.
+        """
+        rng = self.rng
+        sigma = rng.uniform(0.45, 0.80, size=category_median.size)
+        base = rng.lognormal(mean=np.log(np.maximum(category_median, 1.0)), sigma=sigma)
+        # Un tiers des montants est recentré sur le panier habituel du porteur (achat répété) :
+        # cela crée la corrélation montant / ratio sans rendre le ratio redondant.
+        anchor = customer_avg * rng.lognormal(mean=0.0, sigma=0.35, size=category_median.size)
+        blended = np.where(rng.random(base.size) < 0.35, anchor, base)
+        return np.clip(blended, 0.5, 12000.0)
+
+    def _velocity(self, n: int) -> tuple[np.ndarray, np.ndarray]:
+        """Draw the 24 h velocity: attempt count and distinct merchants (correlated).
+
+        Args:
+            n: Number of rows.
+
+        Returns:
+            A tuple ``(transactions_24h, distinct_merchants_24h)``.
+        """
+        rng = self.rng
+        attempts = np.clip(rng.poisson(lam=1.8, size=n) + 1, 1, 60)
+        merchants = np.minimum(attempts, np.clip(rng.poisson(lam=1.05, size=n) + 1, 1, 40))
+        return attempts, merchants
+
+    def _distinct_countries(self, n: int) -> np.ndarray:
+        """Draw the number of distinct countries seen on the card over 7 days."""
+        return self.rng.choice(np.array([1, 2, 3]), size=n, p=np.array([0.90, 0.09, 0.01]))
+
+    def _failed_attempts(self, n: int) -> np.ndarray:
+        """Draw the number of declined attempts in the previous hour (0 in 88 % of cases)."""
+        rng = self.rng
+        has_failure = rng.random(n) < 0.12
+        return np.where(has_failure, rng.poisson(lam=1.25, size=n) + 1, 0).clip(0, 25)
+
+    def _device_age(self, n: int) -> np.ndarray:
+        """Draw the device fingerprint age in days (log-normal, median ~200 days)."""
+        draw = self.rng.lognormal(mean=np.log(200.0), sigma=1.15, size=n)
+        return np.clip(np.round(draw), 0, 1080).astype("float64")
+
+    def _session_duration(self, channel: np.ndarray) -> np.ndarray:
+        """Draw the session duration in seconds, shorter on ``phone`` and ``in_store``.
+
+        Args:
+            channel: Payment channel per row.
+
+        Returns:
+            An array of durations in seconds.
+        """
+        rng = self.rng
+        median = np.where(np.isin(channel, ("phone", "in_store")), 38.0, 108.0)
+        draw = rng.lognormal(mean=np.log(median), sigma=0.85)
+        return np.clip(draw, 2.0, 3600.0)
+
+    def _distance(self, channel: np.ndarray) -> np.ndarray:
+        """Draw the billing-to-shipping distance in km (0 km in 71 % of legitimate rows).
+
+        Args:
+            channel: Payment channel per row.
+
+        Returns:
+            An array of distances in km.
+        """
+        rng = self.rng
+        zero_share = np.where(channel == "in_store", 0.94, 0.68)
+        same_address = rng.random(channel.size) < zero_share
+        draw = rng.lognormal(mean=np.log(45.0), sigma=1.25, size=channel.size)
+        return np.where(same_address, 0.0, np.clip(draw, 1.0, 14000.0))
+
+    def _three_ds(self, channel: np.ndarray) -> np.ndarray:
+        """Draw the 3-D Secure outcome, conditional on the channel.
+
+        Args:
+            channel: Payment channel per row.
+
+        Returns:
+            A 0/1 integer array.
+        """
+        probabilities = np.array([THREE_DS_BY_CHANNEL[str(value)] for value in channel])
+        return (self.rng.random(channel.size) < probabilities).astype(int)
+
+    def _chargebacks(self, n: int) -> np.ndarray:
+        """Draw the number of confirmed chargebacks over the last 12 months."""
+        rng = self.rng
+        has_history = rng.random(n) < 0.03
+        return np.where(has_history, rng.poisson(lam=0.7, size=n) + 1, 0).clip(0, 6)
+
+    # --------------------------------------------------------------- modes opératoires ---
+    def _apply_scheme(
+        self, name: str, rows: np.ndarray, severity: np.ndarray, *, state: _State
+    ) -> None:
+        """Dispatch a fraud scheme to its distortion routine.
+
+        Args:
+            name: Scheme identifier (``card_not_present``, ``account_takeover``,
+                ``synthetic_identity``, ``friendly_fraud``).
+            rows: Row positions to distort.
+            severity: Per-row latent severity in [0.35, 1.0] scaling every distortion.
+            state: Mutable column arrays of the dataset.
+
+        Raises:
+            ValueError: When the scheme name is unknown.
+        """
+        if name == "card_not_present":
+            self._card_not_present(rows, severity, state)
+        elif name == "account_takeover":
+            self._account_takeover(rows, severity, state)
+        elif name == "synthetic_identity":
+            self._synthetic_identity(rows, severity, state)
+        elif name == "friendly_fraud":
+            self._friendly_fraud(rows, severity, state)
+        else:
+            msg = f"Unknown fraud scheme '{name}'"
+            raise ValueError(msg)
+
+    def _card_not_present(self, rows: np.ndarray, severity: np.ndarray, state: _State) -> None:
+        """Distort rows towards card testing: explosive velocity, no strong authentication.
+
+        Args:
+            rows: Row positions to distort (arrays are modified in place).
+            severity: Per-row latent severity.
+            state: Mutable column arrays.
+        """
+        rng = self.rng
+        weight = severity[rows]
+        size = rows.size
+        state.amount[rows] = np.clip(
+            rng.uniform(18.0, 460.0, size=size) * (0.6 + 0.8 * weight), 0.5, 12000.0
+        )
+        state.channel[rows] = np.where(rng.random(size) < 0.72, "web", "phone")
+        state.card_age[rows] = rng.integers(0, 15, size=size)
+        state.transactions_24h[rows] = np.clip(
+            rng.integers(6, 42, size=size) * weight, 4, 60
+        ).round()
+        state.distinct_merchants[rows] = np.minimum(
+            state.transactions_24h[rows],
+            np.clip(rng.integers(3, 20, size=size) * weight, 2, 40).round(),
+        )
+        state.failed_attempts[rows] = np.clip(
+            rng.integers(1, 14, size=size) * weight, 1, 25
+        ).round()
+        state.device_age[rows] = rng.uniform(0.0, 4.0, size=size).round()
+        state.session_duration[rows] = rng.uniform(4.0, 45.0, size=size)
+        state.three_ds[rows] = (rng.random(size) < 0.09 + 0.10 * weight).astype(int)
+        mismatch = rng.random(size) < 0.62 * weight
+        abroad = rng.choice(["BE", "DE", "ES", "other"], size=size)
+        state.shopper_country[rows] = np.where(mismatch, abroad, state.shopper_country[rows])
+        state.billing_country[rows] = np.where(
+            rng.random(size) < 0.25, "FR", state.billing_country[rows]
+        )
+        state.stamps[rows] = self._to_night(state.stamps[rows], 0.58 * weight)
+
+    def _account_takeover(self, rows: np.ndarray, severity: np.ndarray, state: _State) -> None:
+        """Distort rows towards account takeover: old account, new device, odd geography.
+
+        Args:
+            rows: Row positions to distort (arrays are modified in place).
+            severity: Per-row latent severity.
+            state: Mutable column arrays.
+        """
+        rng = self.rng
+        weight = severity[rows]
+        size = rows.size
+        state.account_tenure[rows] = rng.integers(20, 109, size=size)
+        state.card_age[rows] = rng.integers(14, 121, size=size)
+        state.amount[rows] = np.clip(
+            state.customer_avg[rows] * rng.uniform(3.0, 14.0, size=size) * (0.7 + 0.6 * weight),
+            120.0,
+            9000.0,
+        )
+        state.channel[rows] = np.where(rng.random(size) < 0.55, "web", "mobile_app")
+        state.distinct_countries[rows] = rng.integers(2, 7, size=size)
+        state.distance[rows] = rng.uniform(180.0, 9000.0, size=size)
+        state.device_age[rows] = rng.uniform(0.0, 3.0, size=size).round()
+        state.session_duration[rows] = rng.uniform(9.0, 95.0, size=size)
+        state.three_ds[rows] = (rng.random(size) < 0.46).astype(int)
+        state.stamps[rows] = self._to_night(state.stamps[rows], 0.47 * weight)
+
+    def _synthetic_identity(self, rows: np.ndarray, severity: np.ndarray, state: _State) -> None:
+        """Distort rows towards a synthetic identity: brand-new card, account and device.
+
+        Args:
+            rows: Row positions to distort (arrays are modified in place).
+            severity: Per-row latent severity.
+            state: Mutable column arrays.
+        """
+        rng = self.rng
+        weight = severity[rows]
+        size = rows.size
+        state.card_age[rows] = rng.integers(0, 4, size=size)
+        state.account_tenure[rows] = rng.integers(0, 3, size=size)
+        state.amount[rows] = np.clip(
+            rng.uniform(80.0, 950.0, size=size) * (0.7 + 0.7 * weight), 0.5, 12000.0
+        )
+        state.channel[rows] = np.where(rng.random(size) < 0.68, "web", "mobile_app")
+        state.failed_attempts[rows] = np.clip(rng.integers(1, 9, size=size) * weight, 1, 25).round()
+        state.chargebacks[rows] = rng.integers(0, 3, size=size)
+        state.device_age[rows] = rng.uniform(0.0, 6.0, size=size).round()
+        state.three_ds[rows] = (rng.random(size) < 0.24).astype(int)
+        state.category[rows] = rng.choice(np.array(HIGH_VALUE_CATEGORIES, dtype=object), size=size)
+        state.shopper_country[rows] = rng.choice(["BE", "DE", "other", "LU"], size=size)
+        state.billing_country[rows] = np.where(
+            rng.random(size) < 0.55,
+            rng.choice(["other", "DE", "BE"], size=size),
+            state.billing_country[rows],
+        )
+
+    def _friendly_fraud(self, rows: np.ndarray, severity: np.ndarray, state: _State) -> None:
+        """Distort rows towards friendly fraud: a near-legitimate signature.
+
+        Only the chargeback history and a mildly unusual amount betray these rows, which is why
+        this scheme is the hardest to detect and caps the achievable recall.
+
+        Args:
+            rows: Row positions to distort (arrays are modified in place).
+            severity: Per-row latent severity.
+            state: Mutable column arrays.
+        """
+        rng = self.rng
+        weight = severity[rows]
+        size = rows.size
+        state.amount[rows] = np.clip(
+            state.customer_avg[rows] * rng.uniform(1.2, 4.0, size=size), 25.0, 3000.0
+        )
+        # Le contestataire récidiviste a souvent un historique de chargebacks : c'est la **seule**
+        # trace observable de ce schéma, la transaction étant légitime dans sa forme (3-DS aboutie,
+        # même pays, appareil connu, vélocité normale). Un détecteur transactionnel pur ne le voit
+        # pas : c'est le plafond structurel que ce projet documente, pas un défaut de réglage.
+        state.chargebacks[rows] = np.clip(
+            np.round(rng.integers(1, 5, size=size) * (0.4 + weight)), 1, 6
+        )
+        state.category[rows] = rng.choice(np.array(HIGH_VALUE_CATEGORIES, dtype=object), size=size)
+        state.three_ds[rows] = (rng.random(size) < 0.85).astype(int)
+
+    def _to_night(self, stamps: np.ndarray, share: np.ndarray | float) -> np.ndarray:
+        """Move a share of the timestamps into the 1 h - 5 h window.
+
+        Args:
+            stamps: ``datetime64[ns]`` array to shift.
+            share: Target share of night transactions (scalar or per-row array).
+
+        Returns:
+            A new ``datetime64[ns]`` array.
+        """
+        if stamps.size == 0:
+            return stamps
+        rng = self.rng
+        # `np.isscalar` ne rétrécit pas le type pour mypy : on passe par `.item()`, qui rend un
+        # scalaire Python quel que soit le conteneur d'entrée (float nu, np.float64, tableau 0-d).
+        shares = (
+            np.full(stamps.size, float(np.asarray(share).item()))
+            if np.isscalar(share)
+            else np.asarray(share, dtype="float64")
+        )
+        move = rng.random(stamps.size) < np.clip(shares, 0.0, 0.95)
+        midnight = stamps.astype("datetime64[D]").astype("datetime64[ns]")
+        hours = rng.integers(1, 5, size=stamps.size)
+        seconds = rng.integers(0, 3600, size=stamps.size)
+        shifted = midnight + hours.astype("timedelta64[h]") + seconds.astype("timedelta64[s]")
+        return np.where(move, shifted, stamps)
+
+    # ------------------------------------------------------------- pièges et bruit -------
+    def _inject_legit_outliers(
+        self,
+        fraud_mask: np.ndarray,
+        *,
+        amount: np.ndarray,
+        category: np.ndarray,
+        stamps: np.ndarray,
+        shopper_country: np.ndarray,
+        billing_country: np.ndarray,
+        device_age: np.ndarray,
+        session_duration: np.ndarray,
+        customer_avg: np.ndarray,
+    ) -> None:
+        """Give a share of legitimate rows an extreme but real profile.
+
+        Luxury purchases, business travellers paying at night from abroad and end-of-month
+        corporate payments look like fraud on most variables while being perfectly legitimate.
+        They cap the achievable precision and punish detectors that only flag large amounts.
+
+        Args:
+            fraud_mask: Fraud indicator (those rows are excluded from the injection).
+            amount: Amount array (modified in place).
+            category: Merchant category array (modified in place).
+            stamps: Timestamp array (modified in place).
+            shopper_country: Session country array (modified in place).
+            billing_country: Billing country array (modified in place).
+            device_age: Device fingerprint age (modified in place).
+            session_duration: Session duration (modified in place).
+            customer_avg: Historical average basket (read only).
+        """
+        rng = self.rng
+        eligible = np.flatnonzero(~fraud_mask)
+        size = round(self.legit_outlier_rate * eligible.size)
+        if size <= 0 or eligible.size == 0:
+            return
+        rows = rng.choice(eligible, size=size, replace=False)
+        outlier_kinds = np.array(["luxury", "travel", "corporate"], dtype=object)
+        kind = rng.choice(outlier_kinds, size=size, p=[0.45, 0.30, 0.25])
+
+        luxury = rows[kind == "luxury"]
+        if luxury.size:
+            category[luxury] = rng.choice(
+                np.array(["jewelry", "electronics", "travel"], dtype=object), size=luxury.size
+            )
+            amount[luxury] = rng.uniform(1500.0, 11000.0, size=luxury.size)
+            device_age[luxury] = rng.uniform(400.0, 1080.0, size=luxury.size).round()
+            session_duration[luxury] = rng.uniform(240.0, 1800.0, size=luxury.size)
+
+        travel = rows[kind == "travel"]
+        if travel.size:
+            category[travel] = "travel"
+            amount[travel] = rng.uniform(700.0, 6500.0, size=travel.size)
+            shopper_country[travel] = rng.choice(["DE", "ES", "IT", "other"], size=travel.size)
+            stamps[travel] = self._to_night(stamps[travel], 0.70)
+
+        corporate = rows[kind == "corporate"]
+        if corporate.size:
+            category[corporate] = rng.choice(
+                np.array(["utilities", "electronics", "travel"], dtype=object), size=corporate.size
+            )
+            corporate_amount = customer_avg[corporate] * rng.uniform(6.0, 30.0, size=corporate.size)
+            amount[corporate] = np.clip(corporate_amount, 400.0, 11000.0)
+            billing_country[corporate] = np.where(
+                rng.random(corporate.size) < 0.5, "FR", billing_country[corporate]
+            )
+        logger.debug("Legitimate outliers injected: {} rows", size)
+
+    def _hide_subtle_frauds(
+        self,
+        fraud_rows: np.ndarray,
+        severity: np.ndarray,
+        *,
+        amount: np.ndarray,
+        transactions_24h: np.ndarray,
+        failed_attempts: np.ndarray,
+        device_age: np.ndarray,
+        session_duration: np.ndarray,
+        three_ds: np.ndarray,
+        customer_avg: np.ndarray,
+    ) -> None:
+        """Erase the observable signature of the least severe frauds.
+
+        Roughly a fifth of the fraud rows are pulled back into the legitimate distribution: they
+        carry **no** detectable signal, which sets a hard ceiling on the achievable recall.
+        Without this, a detector reaching recall 1.0 would be a leak, not a success.
+
+        Args:
+            fraud_rows: Positions of every fraud row.
+            severity: Per-row latent severity.
+            amount: Amount array (modified in place).
+            transactions_24h: 24 h attempt count (modified in place).
+            failed_attempts: Declined attempts (modified in place).
+            device_age: Device fingerprint age (modified in place).
+            session_duration: Session duration (modified in place).
+            three_ds: 3-D Secure flag (modified in place).
+            customer_avg: Historical average basket (read only).
+        """
+        if fraud_rows.size == 0:
+            return
+        rng = self.rng
+        hidden = fraud_rows[severity[fraud_rows] < 0.55]
+        if hidden.size == 0:
+            return
+        amount[hidden] = np.clip(
+            customer_avg[hidden] * rng.uniform(0.8, 2.6, size=hidden.size), 15.0, 2200.0
+        )
+        transactions_24h[hidden] = np.clip(rng.poisson(lam=2.4, size=hidden.size) + 1, 1, 60)
+        failed_attempts[hidden] = np.where(
+            rng.random(hidden.size) < 0.82, 0, rng.integers(1, 3, size=hidden.size)
+        )
+        device_age[hidden] = rng.uniform(60.0, 900.0, size=hidden.size).round()
+        session_duration[hidden] = rng.uniform(45.0, 900.0, size=hidden.size)
+        three_ds[hidden] = (rng.random(hidden.size) < 0.70).astype(int)
+        logger.debug("Irreducible noise: signature hidden on {} fraud rows", hidden.size)
+
+    def _inject_missing(
+        self,
+        fraud_mask: np.ndarray,
+        device_age: np.ndarray,
+        session_duration: np.ndarray,
+        distance: np.ndarray,
+    ) -> None:
+        """Inject informative (MNAR) missing values, in place.
+
+        Args:
+            fraud_mask: Fraud indicator, used to bias the missingness.
+            device_age: Device fingerprint age (NaNs written in place).
+            session_duration: Session duration (NaNs written in place).
+            distance: Billing-to-shipping distance (NaNs written in place).
+        """
+        rng = self.rng
+        n = device_age.size
+        # Empreinte bloquée : deux fois plus fréquente en fraude (bloqueurs de fingerprint).
+        device_rate = np.where(fraud_mask, self.missing_device_rate * 2.2, self.missing_device_rate)
+        device_age[rng.random(n) < device_rate] = np.nan
+        # Paiement one-click : aucune durée de session mesurable.
+        fraud_session_rate = self.missing_session_rate * 0.8
+        session_rate = np.where(fraud_mask, fraud_session_rate, self.missing_session_rate)
+        session_duration[rng.random(n) < session_rate] = np.nan
+        # Retrait en magasin : pas d'adresse de livraison.
+        distance[rng.random(n) < self.missing_distance_rate] = np.nan
+
+    # ------------------------------------------------------------------ export ----------
+    def export(self, frame: pd.DataFrame | None = None) -> dict[str, Path]:
+        """Write the dataset in every configured format.
+
+        Args:
+            frame: Data to write; generated when ``None``.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        data = frame if frame is not None else self.generate()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        base = self.output_dir / self.dataset_name
+        written = write_table_multiple(data, base, formats=self.formats)
+        logger.info("Dataset exported: {}", {fmt: str(path) for fmt, path in written.items()})
+        return written
+
+    def run(self) -> dict[str, Path]:
+        """Generate, export and persist the generation metadata.
+
+        Returns:
+            Mapping of format to written path.
+        """
+        frame = self.generate()
+        written = self.export(frame)
+        payload = self.metadata(frame)
+        payload["files"] = {fmt: str(path) for fmt, path in written.items()}
+        write_json(self.output_dir / "generation_metadata.json", payload)
+        return written
+
+    def sample(self, n_samples: int, *, with_target: bool = False) -> pd.DataFrame:
+        """Draw a small sample, typically used to demo inference.
+
+        Args:
+            n_samples: Number of rows.
+            with_target: Keep the diagnostic metadata (``is_fraud``, ``fraud_scheme``) or drop it,
+                as a real scoring request would.
+
+        Returns:
+            The sampled frame.
+        """
+        frame = self.generate()
+        sample_frame = frame.head(max(int(n_samples), 1)).copy()
+        if not with_target:
+            hidden = [name for name in DIAGNOSTIC_COLUMNS if name in frame.columns]
+            sample_frame = sample_frame.drop(columns=hidden)
+        return sample_frame
+
+    # ------------------------------------------------------------------ metadata --------
+    def metadata(self, frame: pd.DataFrame) -> dict[str, Any]:
+        """Build the traceability payload of a generation run.
+
+        Args:
+            frame: Generated data.
+
+        Returns:
+            JSON-serialisable metadata (seed, shape, dtypes, fraud rate, per-scheme shares and
+            statistics, missing rates, option values).
+        """
+        missing = frame.isna().sum()
+        payload: dict[str, Any] = {
+            "dataset_name": self.dataset_name,
+            "generator": type(self).__name__,
+            "seed": self.seed,
+            "window_start": str(self.start.date()),
+            "window_days": self.window_days,
+            "n_samples": len(frame),
+            "n_columns": int(frame.shape[1]),
+            "dtypes": {str(column): str(dtype) for column, dtype in frame.dtypes.items()},
+            "missing_cells": int(missing.sum()),
+            "missing_rate": float(missing.sum()) / float(max(frame.size, 1)),
+            "missing_by_column": {
+                str(column): int(value) for column, value in missing.items() if value > 0
+            },
+            "options": {
+                "fraud_rate": self.fraud_rate,
+                "legit_outlier_rate": self.legit_outlier_rate,
+                "missing_device_rate": self.missing_device_rate,
+                "missing_session_rate": self.missing_session_rate,
+                "missing_distance_rate": self.missing_distance_rate,
+            },
+        }
+        if "is_fraud" in frame.columns:
+            fraud = frame["is_fraud"].astype(int)
+            payload["fraud"] = {
+                "n_frauds": int(fraud.sum()),
+                "prevalence": round(float(fraud.mean()), 5),
+                "mean_amount_fraud": round(float(frame.loc[fraud == 1, "amount_eur"].mean()), 2),
+                "mean_amount_legit": round(float(frame.loc[fraud == 0, "amount_eur"].mean()), 2),
+                "night_share_fraud": round(float(frame.loc[fraud == 1, "is_night"].mean()), 4),
+                "night_share_legit": round(float(frame.loc[fraud == 0, "is_night"].mean()), 4),
+                "three_ds_share_fraud": round(
+                    float(frame.loc[fraud == 1, "three_ds_authenticated"].mean()), 4
+                ),
+            }
+        if "fraud_scheme" in frame.columns:
+            shares = frame["fraud_scheme"].value_counts(normalize=True, dropna=True)
+            payload["fraud_scheme_shares"] = {
+                str(key): round(float(value), 4) for key, value in shares.items()
+            }
+        amount = frame["amount_eur"] if "amount_eur" in frame.columns else None
+        if amount is not None:
+            payload["amount"] = {
+                "median": round(float(amount.median()), 2),
+                "mean": round(float(amount.mean()), 2),
+                "p95": round(float(amount.quantile(0.95)), 2),
+                "max": round(float(amount.max()), 2),
+            }
+        return payload
+
+    # --------------------------------------------------------------- pédagogique -------
+    def describe_target(self, frame: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Describe the fraud structure of the dataset (one row per modus operandi).
+
+        Args:
+            frame: Frame to describe; ``None`` generates one.
+
+        Returns:
+            A table with counts, shares, mean amount, mean velocity, night share and 3-DS share.
+        """
+        data = frame if frame is not None else self.generate()
+        grouping = data["fraud_scheme"].fillna("legitimate").astype(str)
+        table = (
+            data.groupby(grouping, observed=True)
+            .agg(
+                transactions=("transaction_id", "size"),
+                mean_amount=("amount_eur", "mean"),
+                median_amount=("amount_eur", "median"),
+                mean_velocity=("transactions_24h", "mean"),
+                mean_failed_attempts=("failed_attempts_1h", "mean"),
+                night_share=("is_night", "mean"),
+                three_ds_share=("three_ds_authenticated", "mean"),
+                mean_chargebacks=("previous_chargebacks_12m", "mean"),
+            )
+            .round(3)
+        )
+        table["share"] = (table["transactions"] / float(len(data))).round(4)
+        return table.reset_index().rename(columns={"fraud_scheme": "segment"})
+
+    def summary(self) -> pd.DataFrame:
+        """Return a one-row-per-column statistical summary of the generated frame."""
+        frame = self.generate()
+        rows: list[dict[str, Any]] = []
+        for column in frame.columns:
+            series = frame[column]
+            entry: dict[str, Any] = {
+                "column": column,
+                "dtype": str(series.dtype),
+                "nulls": int(series.isna().sum()),
+                "null_share": round(float(series.isna().mean()), 4),
+                "nunique": int(series.nunique(dropna=True)),
+            }
+            numeric = pd.to_numeric(series, errors="coerce")
+            if numeric.notna().any() and not pd.api.types.is_object_dtype(series):
+                values = numeric.to_numpy(dtype="float64")
+                entry |= {
+                    "min": round(float(np.nanmin(values)), 3),
+                    "p50": round(float(np.nanmedian(values)), 3),
+                    "mean": round(float(np.nanmean(values)), 3),
+                    "p95": round(float(np.nanpercentile(values, 95)), 3),
+                    "max": round(float(np.nanmax(values)), 3),
+                }
+            else:
+                top = series.dropna().astype(str).value_counts().head(3)
+                entry["top_values"] = ", ".join(f"{key}({value})" for key, value in top.items())
+            rows.append(entry)
+        return pd.DataFrame(rows)
+
+    # ------------------------------------------------------------------ factories -------
+    @classmethod
+    def from_config(
+        cls, config: Mapping[str, Any], paths: ProjectPaths | None = None
+    ) -> SyntheticDataGenerator:
+        """Build a generator from the ``data`` configuration node.
+
+        Args:
+            config: Root configuration mapping (or the ``data`` node alone).
+            paths: Project layout (defaults to :meth:`ProjectPaths.from_root`).
+
+        Returns:
+            The configured generator.
+        """
+        # Même forme que les autres familles : `dict(...)` borne l'inférence mypy.
+        node = dict(config.get("data", config) or {})
+        layout = paths or ProjectPaths.from_root()
+        options = {
+            key: node[key] for key in cls.SUPPORTED_OPTIONS if key in node and node[key] is not None
+        }
+        return cls(
+            n_samples=int(node.get("n_samples", 12000)),
+            seed=int(config.get("seed", node.get("seed", 42))),
+            dataset_name=str(node.get("dataset_name", DEFAULT_DATASET_NAME)),
+            output_dir=layout.raw_dir,
+            formats=tuple(node.get("formats", ("parquet", "csv"))),
+            start=str(node.get("start", "2025-01-06")),
+            **options,
+        )
+
+
+class _State:
+    """Mutable column arrays shared by the fraud distortion routines.
+
+    Passing a single container keeps the distortion methods readable: each scheme modifies only
+    the columns it characterises, in place, and the caller assembles the frame once at the end.
+
+    Attributes:
+        amount: Transaction amount in EUR.
+        category: Merchant category.
+        channel: Payment channel.
+        stamps: Transaction timestamps (``datetime64[ns]``).
+        shopper_country: Session country.
+        billing_country: Billing country.
+        card_age: Card age in months.
+        account_tenure: Account tenure in months.
+        transactions_24h: Attempt count over 24 h.
+        distinct_merchants: Distinct merchants over 24 h.
+        distinct_countries: Distinct countries over 7 days.
+        failed_attempts: Declined attempts over 1 h.
+        device_age: Device fingerprint age in days.
+        session_duration: Session duration in seconds.
+        distance: Billing-to-shipping distance in km.
+        three_ds: 3-D Secure outcome.
+        chargebacks: Prior chargebacks over 12 months.
+        customer_avg: Historical average basket of the cardholder.
+    """
+
+    # Les slots sont déclarés **et annotés** : l'annotation seule ne crée aucun attribut de classe
+    # (donc ``__slots__`` reste efficace), mais elle donne à mypy le type de chaque colonne. Le
+    # ``dtype`` exact est laissé ouvert (``Any``) parce que les routines de distortion mélangent
+    # entiers et flottants selon le schéma ; c'est le schéma pandera ``RawDataSchema``, appliqué à
+    # l'export, qui garantit le dtype final de chaque colonne livrée.
+    amount: npt.NDArray[Any]
+    category: npt.NDArray[Any]
+    channel: npt.NDArray[Any]
+    stamps: npt.NDArray[Any]
+    shopper_country: npt.NDArray[Any]
+    billing_country: npt.NDArray[Any]
+    card_age: npt.NDArray[Any]
+    account_tenure: npt.NDArray[Any]
+    transactions_24h: npt.NDArray[Any]
+    distinct_merchants: npt.NDArray[Any]
+    distinct_countries: npt.NDArray[Any]
+    failed_attempts: npt.NDArray[Any]
+    device_age: npt.NDArray[Any]
+    session_duration: npt.NDArray[Any]
+    distance: npt.NDArray[Any]
+    three_ds: npt.NDArray[Any]
+    chargebacks: npt.NDArray[Any]
+    customer_avg: npt.NDArray[Any]
+
+    __slots__ = (
+        "account_tenure",
+        "amount",
+        "billing_country",
+        "card_age",
+        "category",
+        "channel",
+        "chargebacks",
+        "customer_avg",
+        "device_age",
+        "distance",
+        "distinct_countries",
+        "distinct_merchants",
+        "failed_attempts",
+        "session_duration",
+        "shopper_country",
+        "stamps",
+        "three_ds",
+        "transactions_24h",
+    )
+
+    def __init__(self, **arrays: np.ndarray) -> None:
+        """Store every column array.
+
+        Args:
+            **arrays: Column arrays, keyed by the attribute names listed in ``__slots__``.
+        """
+        for name in self.__slots__:
+            setattr(self, name, arrays[name])
+
+
+def _normalise(weights: Sequence[float]) -> np.ndarray:
+    """Return a probability vector summing to one.
+
+    Args:
+        weights: Non-negative weights.
+
+    Returns:
+        The normalised weights.
+
+    Raises:
+        ValueError: When the weights sum to zero.
+    """
+    values = np.asarray(weights, dtype="float64")
+    total = float(values.sum())
+    if total <= 0.0:
+        msg = "weights must sum to a positive value"
+        raise ValueError(msg)
+    return values / total
+
+
+def build_dataset(**kwargs: Any) -> pd.DataFrame:
+    """Module-level helper used by ad-hoc scripts and notebooks.
+
+    Args:
+        **kwargs: Constructor options of :class:`SyntheticDataGenerator`.
+
+    Returns:
+        The generated frame.
+    """
+    return SyntheticDataGenerator(**kwargs).generate()

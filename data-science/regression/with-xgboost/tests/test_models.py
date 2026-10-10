@@ -94,7 +94,9 @@ class TestFitting:
         assert isinstance(result, FitResult)
         assert result.n_samples > 0
         assert result.n_features == len(fitted_model.feature_names)
-        assert result.duration_seconds >= 0.0
+        # Strictement positive : un appel direct à `fit` (hors Trainer, comme dans les notebooks)
+        # doit mesurer sa durée lui-même, sinon les tableaux de coût affichent 0 s.
+        assert result.duration_seconds > 0.0
         assert result.finished_at
 
     def test_fit_result_is_json_serialisable(self, fitted_model: BaseModel, tmp_path: Path) -> None:
