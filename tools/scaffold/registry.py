@@ -29,6 +29,10 @@ class StackSpec(BaseModel):
     display_name: str
     category: str
     template_dir: str
+    #: Couche de stack héritée (dossier `templates/stack/<extends>`), empilée juste sous celle-ci :
+    #: une stack d'outillage (MLflow) réutilise ainsi le modèle d'une stack d'algorithmes sans le
+    #: dupliquer, et ne surcharge que les fichiers qu'elle change.
+    extends: str | None = None
     class_name: str | None = None
     epochs_based: bool = False
     supports_proba: bool = True

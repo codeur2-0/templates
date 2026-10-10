@@ -381,6 +381,41 @@ make all         # données → train → éval → prédiction
 make smoke       # exécution rapide (petit dataset)
 make verify      # lint + mypy + pytest + smoke
 ```
+{% if stack.key == 'mlflow' %}
+
+### Suivi des expériences avec MLflow
+
+Chaque `make train` ouvre **un run MLflow** ; `make evaluate` y ajoute les métriques de test
+(préfixe `test_`). Tout est local : base SQLite `artifacts/mlruns/mlflow.db`, ignorée par git,
+sans serveur ni donnée hors du poste.
+
+| Enregistré dans le run | D'où ça vient | Pourquoi |
+| --- | --- | --- |
+| Paramètres `model.params.*`, `train.*`, `seed`… | configuration Hydra résolue, aplatie | rejouer ou comparer deux runs sans relire de YAML |
+| Métriques `train_*`, `val_*` puis `test_*` | `Trainer`, puis `Evaluator` sur le split de test | lire l'écart train / validation / test d'un coup d'œil |
+| Artefacts `pipeline/` et `evaluation/` | fichiers écrits par les pipelines | le run contient ce qui a été livré, pas une copie |
+| Modèle `model` (`mlflow.sklearn`) | estimateur ajusté, signature d'entrée, dépendances épinglées | recharger le modèle ailleurs par `mlflow.pyfunc.load_model` |
+
+```bash
+make mlflow-ui   # http://127.0.0.1:5000 : comparer les runs, trier par test_roc_auc
+python -m src.main mode=train model.params.max_depth=8   # un second run, comparable au premier
+```
+
+```python
+import mlflow
+
+mlflow.set_tracking_uri("sqlite:///artifacts/mlruns/mlflow.db")
+run_id = "..."  # artifacts/metrics/mlflow_run.json
+model = mlflow.pyfunc.load_model(f"runs:/{run_id}/model")
+```
+
+Le modèle journalisé consomme la matrice **pré-traitée** : le pré-traitement ajusté est journalisé à
+côté (`pipeline/preprocessing.joblib`) et c'est `src/inference/predictor.py` qui enchaîne les deux
+en production. Le modèle est sérialisé au format **skops**, qui refuse de recharger un type inconnu
+(contrairement à pickle, qui exécute ce que contient le fichier) ; seuls les types internes de
+scikit-learn sont déclarés de confiance. Pointer un serveur partagé est un changement de
+configuration (`tracking.tracking_uri`), pas de code.
+{% endif %}
 
 ---
 

@@ -1,0 +1,83 @@
+# ==============================================================================================
+# data-science / classification / with-mlflow
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/binary_classification.yaml` (churn télécom). Le modèle est
+# EXACTEMENT celui du projet scikit-learn (même algorithme, mêmes réglages) : ce projet isole ce
+# qu'apporte le suivi d'expériences MLflow, sans rien changer à la performance.
+# ==============================================================================================
+
+key: ds-classification-mlflow
+title: "Prédiction d'attrition client (churn télécom) avec scikit-learn et suivi MLflow"
+summary: >-
+  Pipeline tabulaire de bout en bout (données synthétiques -> contrats Pandera -> feature
+  engineering -> forêt aléatoire -> évaluation et analyse d'erreurs) pour un cas de churn
+  télécom, dont chaque entraînement est enregistré comme un run MLflow local : configuration
+  aplatie, métriques d'entraînement, de validation et de test, artefacts du pipeline et modèle
+  journalisé avec sa signature, rechargeable par `mlflow.pyfunc`.
+
+family: binary_classification
+domain: data-science
+problem: classification
+stack: mlflow
+project_slug: telecom-churn-mlflow
+package_name: churn_mlflow
+
+model:
+  display_name: "Forêt aléatoire scikit-learn, suivie par MLflow"
+  algorithm: random_forest
+  rationale: >-
+    Le modèle est celui du projet scikit-learn, à l'identique : ce projet ne cherche pas un meilleur
+    ROC AUC, il rend chaque entraînement **traçable et comparable**. Chaque `make train` ouvre un run
+    MLflow qui enregistre la configuration Hydra aplatie (graine et surcharges comprises), les
+    métriques du `Trainer`, les artefacts du pipeline et la forêt aléatoire au format
+    `mlflow.sklearn` avec sa signature d'entrée ; `make evaluate` ajoute au même run les métriques
+    de test. Deux expériences se comparent alors dans `mlflow ui` au lieu de se comparer de
+    mémoire. Le suivi est local (base SQLite dans `artifacts/mlruns/`) : aucune infrastructure,
+    aucune donnée hors du poste.
+  alternatives:
+    - "journal JSON seul (projets sans suivi) : les artefacts restent la source de vérité, mais comparer dix runs revient à ouvrir dix fichiers"
+    - "autolog MLflow (`mlflow.sklearn.autolog`) : zéro ligne à écrire, mais il journalise ce que MLflow devine, pas ce que le pipeline décide (seuil, métriques métier, split chronologique)"
+    - "serveur MLflow partagé ou registre de modèles : l'étape suivante en équipe ; ici, un changement de `tracking.tracking_uri`, pas de code"
+    - "Weights & Biases, Neptune : services hébergés, donc données hors du poste — exclus par les contraintes du cas d'usage"
+  params:
+    n_estimators: 300
+    max_depth: 14
+    min_samples_leaf: 8
+    max_features: sqrt
+    class_weight: balanced_subsample
+    criterion: gini
+
+extras:
+  # Grille d'hyperparamètres explorée par le notebook 04 (petite : l'exécution reste < 1 min).
+  notebook_param_grid:
+    n_estimators: [120, 300]
+    max_depth: [6, 14]
+    min_samples_leaf: [4, 16]
+  # Taille des fixtures pytest (petit dataset = suite rapide).
+  test_n_samples: 300
+  model_conf:
+    cross_validation:
+      enabled: true
+      folds: 5
+      strategy: stratified
+  root_conf:
+    decision:
+      threshold: 0.5
+      retention_cost_eur: 25.0
+      customer_lifetime_value_eur: 1450.0
+    tracking:
+      # Vide = base SQLite locale `artifacts/mlruns/mlflow.db`. Un serveur partagé se déclare ici
+      # (`http://mlflow.interne:5000`), sans toucher au code.
+      tracking_uri: null
+      # Vide = nom du projet (`project.name`).
+      experiment_name: null
+      # Journaliser la forêt au format `mlflow.sklearn` (signature + exemple d'entrée).
+      log_model: true
+
+learning_objectives:
+  - "Composer un pipeline scikit-learn propre : ColumnTransformer, transformers custom, fit sur le train uniquement."
+  - "Rendre chaque entraînement traçable : un run MLflow par `make train`, avec la configuration aplatie, la graine et les métriques."
+  - "Rattacher l'évaluation hors échantillon au run d'entraînement, pour lire train, validation et test côte à côte."
+  - "Journaliser un modèle avec sa signature d'entrée et vérifier qu'il se recharge à l'identique par `mlflow.pyfunc`."
+  - "Comprendre pourquoi un journal explicite vaut mieux qu'un autolog : on enregistre ce que le pipeline décide, pas ce que l'outil devine."
+  - "Isoler l'outillage de la modélisation : le suivi passe par une seule interface (`src/tracking`), aucun pipeline ne connaît MLflow."

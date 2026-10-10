@@ -42,7 +42,9 @@ artifacts/reports/*
 artifacts/figures/*
 artifacts/metrics/*
 !artifacts/**/.gitkeep
-*.joblib
+{% if stack.key == 'mlflow' %}# Base MLflow locale (runs, modèles journalisés) : régénérée par `make train`.
+artifacts/mlruns/
+{% endif %}*.joblib
 *.pkl
 *.pt
 *.pth

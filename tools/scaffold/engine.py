@@ -54,7 +54,8 @@ def layers_for(
 
     Five layers are composed (Jinja precedence: the first existing match wins):
 
-    1. ``stack/<stack>``      framework specific model and trainer
+    1. ``stack/<stack>``      framework specific model and trainer (then ``stack/<extends>``
+       when the stack inherits another one, e.g. MLflow over scikit-learn)
     2. ``family/<family>``    synthetic data generator, business flavour
     3. ``task/<task>``        evaluator, reports, predictor, figures
     4. ``modality/<modality>``loaders, preprocessing, features, pipelines, tests
@@ -72,6 +73,7 @@ def layers_for(
     root = template_root or TEMPLATE_ROOT
     candidates = [
         root / "stack" / stack.template_dir,
+        *([root / "stack" / stack.extends] if stack.extends else []),
         root / "family" / family.template_dir,
         root / "task" / _task_dir(family),
         root / "modality" / spec.modality,
