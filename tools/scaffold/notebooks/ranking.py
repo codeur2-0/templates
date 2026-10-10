@@ -680,9 +680,9 @@ print(ALGORITHMS)
 lignes = []
 avertissements: dict[str, dict[str, int]] = {}
 # Comparaison **loyale** : `params={}` construit chaque algorithme avec ses réglages par défaut.
-# Les `model.params` configurés sont propres au boosting par histogrammes (`max_leaf_nodes`,
-# `max_features`, `learning_rate`) : les injecter dans une régression logistique lèverait une
-# erreur, et les régler à la main pour chaque concurrent fausserait le classement. Le modèle
+# Les `model.params` configurés sont propres à l'algorithme configuré (`max_leaf_nodes` d'un
+# boosting, `hidden_layers` d'un réseau) : les injecter dans un concurrent lèverait une erreur ou
+# n'aurait aucun sens, et les régler à la main pour chacun fausserait le classement. Le modèle
 # configuré ET réglé est, lui, mesuré en section 1.
 for algorithm in ALGORITHMS:
     try:
@@ -763,11 +763,16 @@ _SEEDS_CELL = '''
 # c'est un tirage. Trois graines suffisent à estimer cette dispersion sur un volume de notebook.
 lignes = []
 for graine in (CONFIG.seed, CONFIG.seed + 1, CONFIG.seed + 2):
+    # La graine est écrite dans les paramètres **si** la stack y déclare `random_state`, et
+    # toujours sur le modèle lui-même : un réseau ne lit pas `random_state` dans ses paramètres,
+    # et trois modèles identiques afficheraient une dispersion nulle — donc fausse.
+    graine_params = {"random_state": graine} if "random_state" in CONFIGURED_PARAMS else {}
     candidate = build_model(
         CONFIG,
         feature_names=PREPARED["feature_names"],
-        params={**CONFIGURED_PARAMS, "random_state": graine},
+        params={**CONFIGURED_PARAMS, **graine_params},
     )
+    candidate.random_state = graine
     candidate.fit(
         PREPARED["X_train"],
         PREPARED["y_train"],
@@ -1288,8 +1293,8 @@ display(pd.DataFrame(recommandations).set_index("n°"))
 
 print()
 print("Ce que ce notebook NE recommande PAS, volontairement :")
-print("  - augmenter la profondeur ou le nombre d'arbres : la grille du notebook 04 montre")
-print("    que le gain reste sous la dispersion entre graines ;")
+print("  - augmenter la capacité du modèle (arbres, profondeur, neurones) : la grille du")
+print("    notebook 04 montre que le gain reste sous la dispersion entre graines ;")
 print("  - évaluer en AUC ou en précision globale : ces métriques mélangent des utilisateurs")
 print("    de volumes différents et ne décrivent pas le service rendu ;")
 print("  - choisir le K sur le NDCG seul : le K est un arbitrage qualité/diversité/coût.")
@@ -1457,7 +1462,7 @@ elle montre le compromis structurel (la précision chute, le rappel monte) et so
             """## 6. Comparaison des algorithmes à protocole identique
 
 `params={{}}` construit chaque algorithme avec ses réglages par défaut : les `model.params`
-configurés sont propres au boosting par histogrammes et les injecter ailleurs lèverait une erreur.
+configurés sont propres à l'algorithme configuré et les injecter ailleurs lèverait une erreur.
 Le modèle configuré **et réglé** est mesuré en section 2 ; ici on compare les familles."""
         ),
         _code(_ALGORITHMS_CELL, context),

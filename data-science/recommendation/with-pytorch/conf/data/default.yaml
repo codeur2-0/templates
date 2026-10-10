@@ -1,0 +1,59 @@
+# =================================================================================================
+# Données : Journal de candidats scorés d'un catalogue e-commerce
+# -------------------------------------------------------------------------------------------------
+# Jeu d'apprentissage **par couple (utilisateur, article candidat)** : chaque ligne décrit un
+# candidat proposé à un utilisateur lors d'une session, avec les features disponibles à cet
+# instant et la pertinence observée ensuite. 1 200 utilisateurs x 30 candidats = 36 000 lignes. La
+# pertinence est construite à partir d'une affinité latente utilisateur-article (goût par
+# catégorie, sensibilité au prix, appétence à la nouveauté) bruitée, de sorte qu'aucun modèle ne
+# puisse atteindre 1,0 : la part irréductible est mesurée et annoncée. Les utilisateurs froids
+# (peu d'historique) et la longue traîne du catalogue sont volontairement surreprésentés par
+# rapport à un journal réel, parce que c'est là que se joue la qualité d'un moteur de
+# recommandation.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: ecommerce_candidate_impressions
+n_samples: 36000
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: relevance
+id_column: sample_id
+time_column: session_date
+group_column: user_id
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['sample_id', 'item_id', 'session_date']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+catalog_size: 900
+candidates_per_user: 30
+positive_rate: 0.14
+window_days: 420
+cold_user_share: 0.29
+out_of_stock_rate: 0.07
+never_viewed_share: 0.62
+noise_scale: 0.95
+popularity_weight: 0.25
+appeal_weight: 1.3
