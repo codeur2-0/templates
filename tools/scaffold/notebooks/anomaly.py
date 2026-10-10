@@ -22,7 +22,7 @@ grammaire.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tools.scaffold.notebooks.tabular import (
     LOAD_RAW,
@@ -316,6 +316,42 @@ baseline_table = pd.DataFrame(rows)
 display(baseline_table)
 """
 
+#: Réglages des notebooks d'anomalie qui dépendent de la stack, surchargeables dans
+#: `extras.notebook_anomaly` du manifeste. Les valeurs par défaut sont celles de scikit-learn
+#: (forêt d'isolation), si bien que ce projet n'a rien à déclarer. `prose` porte les commentaires
+#: chiffrés : un insight qui commente une mesure doit parler de la stack réellement mesurée.
+_STACK_DEFAULTS: dict[str, Any] = {"contamination_param": "contamination"}
+
+
+def _stack_setting(context: NotebookContext, key: str) -> Any:
+    """Return a stack-dependent notebook setting (manifest override, else scikit-learn default).
+
+    Args:
+        context: Notebook context.
+        key: Setting name (see :data:`_STACK_DEFAULTS`).
+
+    Returns:
+        The setting value.
+    """
+    node = dict(context.spec.extras.get("notebook_anomaly") or {})
+    return node.get(key, _STACK_DEFAULTS[key])
+
+
+def _prose(context: NotebookContext, key: str, default: list[str]) -> list[str]:
+    """Return the insight lines of a section (manifest override, else the scikit-learn reading).
+
+    Args:
+        context: Notebook context.
+        key: Prose key (``algorithms``, ``contamination``, ``stability``, ``grid``).
+        default: Lines written for the scikit-learn project.
+
+    Returns:
+        The lines to render.
+    """
+    node = dict(dict(context.spec.extras.get("notebook_anomaly") or {}).get("prose") or {})
+    return [str(line) for line in node.get(key, default)]
+
+
 _ALGORITHMS_CELL = """
 import warnings
 
@@ -328,10 +364,10 @@ print(ALGORITHMS)
 rows = []
 warnings_par_algorithme: dict[str, dict[str, int]] = {}
 # Comparaison **loyale** : `params={}` construit chaque algorithme avec ses réglages par défaut.
-# Les `model.params` configurés sont propres à la forêt d'isolation (`n_estimators`,
-# `max_samples`, `max_features`) : les injecter dans un one-class SVM lèverait une erreur, et les
-# régler « à la main » pour chaque concurrent fausserait le classement. Le détecteur configuré et
-# réglé est, lui, évalué en section 1.
+# Les `model.params` configurés sont propres à l'algorithme configuré (`n_estimators` d'une forêt
+# d'isolation, `code_dim` d'un auto-encodeur) : les injecter dans un concurrent lèverait une erreur
+# ou n'aurait aucun sens, et les régler « à la main » pour chaque concurrent fausserait le
+# classement. Le détecteur configuré et réglé est, lui, évalué en section 1.
 for algorithm in ALGORITHMS:
     try:
         # Les avertissements des bibliothèques sont **capturés puis restitués** en fin de cellule :
@@ -462,11 +498,17 @@ reference_top = set(np.argsort(-reference_scores, kind="stable")[:VAL_BUDGET].to
 
 rows = []
 for seed in STABILITY_SEEDS:
+    # La graine est écrite dans les paramètres **si** la stack y déclare `random_state` (forêt
+    # d'isolation), et toujours sur le modèle lui-même (réseaux) : sans cela, une stack qui ne lit
+    # pas `random_state` dans ses paramètres produirait trois fois le même modèle, donc une
+    # stabilité parfaite et fausse.
+    seeded = {"random_state": seed} if "random_state" in CONFIGURED_PARAMS else {}
     candidate = build_model(
         CONFIG,
         feature_names=PREPARED["feature_names"],
-        params={**CONFIGURED_PARAMS, "random_state": seed},
+        params={**CONFIGURED_PARAMS, **seeded},
     )
+    candidate.random_state = seed
     candidate.fit(PREPARED["X_train"], None, X_val=PREPARED["X_val"], y_val=None, callbacks=[])
     scores = np.asarray(candidate.predict(PREPARED["X_val"]), dtype="float64").ravel()
     top = set(np.argsort(-scores, kind="stable")[:VAL_BUDGET].tolist())
@@ -589,42 +631,68 @@ dans toutes les sections suivantes (comparaison aux règles métier, stabilité,
         _md("## 2. Comparaison des algorithmes de la stack"),
         _code(_ALGORITHMS_CELL, context),
         _insight(
-            [
-                "Les quatre détecteurs ne testent pas la même hypothèse : la forêt d'isolation cherche des points **faciles à isoler** par coupes aléatoires, le one-class SVM une **frontière de densité** à noyau RBF, l'enveloppe elliptique un **écart de Mahalanobis** à un centre robuste, et le LOF une rareté **relative au voisinage**.",
-                "Chacun est évalué avec ses réglages par défaut (`params={}`) : c'est la comparaison loyale. Le détecteur configuré et réglé, lui, est mesuré en section 1 — un algorithme battu « par défaut » peut très bien gagner une fois réglé.",
-                "Le LOF score bien sur un échantillon de quelques milliers de transactions, mais il doit **conserver le jeu d'entraînement** pour scorer une nouvelle ligne : coût mémoire et latence incompatibles avec un flux de millions de paiements. Le one-class SVM a le même défaut (coût quadratique).",
-                "L'enveloppe elliptique déclenche un avertissement de covariance non plein rang : sur 51 colonnes dont une quarantaine de modalités one-hot quasi constantes, la covariance robuste est dégénérée. C'est une leçon générale — les détecteurs gaussiens supportent mal le one-hot, les arbres s'en accommodent.",
-                "Un écart de PR AUC inférieur à 2x la dispersion entre graines (section 4) n'est pas un signal : ne pas choisir un algorithme sur un écart de cet ordre.",
-            ]
+            _prose(
+                context,
+                "algorithms",
+                [
+                    "Les quatre détecteurs ne testent pas la même hypothèse : la forêt d'isolation cherche des points **faciles à isoler** par coupes aléatoires, le one-class SVM une **frontière de densité** à noyau RBF, l'enveloppe elliptique un **écart de Mahalanobis** à un centre robuste, et le LOF une rareté **relative au voisinage**.",
+                    "Chacun est évalué avec ses réglages par défaut (`params={}`) : c'est la comparaison loyale. Le détecteur configuré et réglé, lui, est mesuré en section 1 — un algorithme battu « par défaut » peut très bien gagner une fois réglé.",
+                    "Le LOF score bien sur un échantillon de quelques milliers de transactions, mais il doit **conserver le jeu d'entraînement** pour scorer une nouvelle ligne : coût mémoire et latence incompatibles avec un flux de millions de paiements. Le one-class SVM a le même défaut (coût quadratique).",
+                    "L'enveloppe elliptique déclenche un avertissement de covariance non plein rang : sur 51 colonnes dont une quarantaine de modalités one-hot quasi constantes, la covariance robuste est dégénérée. C'est une leçon générale — les détecteurs gaussiens supportent mal le one-hot, les arbres s'en accommodent.",
+                    "Un écart de PR AUC inférieur à 2x la dispersion entre graines (section 4) n'est pas un signal : ne pas choisir un algorithme sur un écart de cet ordre.",
+                ],
+            )
         ),
         _md("## 3. Sensibilité à la contamination déclarée"),
-        _code(_CONTAMINATION_CELL, context),
-        _insight(
-            [
-                "La PR AUC et le rappel **au budget** sont quasi constants : la contamination ne change pas le classement, seulement le seuil interne. C'est la justification du pilotage au budget.",
-                "Le nombre d'alertes au seuil interne, lui, suit mécaniquement la contamination : déclarer 20 % d'anomalies dans un flux qui en contient 1,8 % sature l'équipe d'analyse.",
-                "En production, la contamination se règle sur la **capacité d'investigation** (ici 2 % du flux), pas sur une estimation de la prévalence réelle — qui est inconnue par définition.",
+        *(
+            [_code(_CONTAMINATION_CELL, context)]
+            if _stack_setting(context, "contamination_param")
+            else [
+                _md(
+                    "Le détecteur configuré ne déclare **aucune contamination** : il ne produit "
+                    "qu'un score, et le seuil d'alerte est directement fixé par le budget "
+                    "d'investigation (`fraud_detection.budget_rate`). La section est sans objet."
+                )
             ]
+        ),
+        _insight(
+            _prose(
+                context,
+                "contamination",
+                [
+                    "La PR AUC et le rappel **au budget** sont quasi constants : la contamination ne change pas le classement, seulement le seuil interne. C'est la justification du pilotage au budget.",
+                    "Le nombre d'alertes au seuil interne, lui, suit mécaniquement la contamination : déclarer 20 % d'anomalies dans un flux qui en contient 1,8 % sature l'équipe d'analyse.",
+                    "En production, la contamination se règle sur la **capacité d'investigation** (ici 2 % du flux), pas sur une estimation de la prévalence réelle — qui est inconnue par définition.",
+                ],
+            )
         ),
         _md("## 4. Stabilité : le classement survit-il à un changement de graine ?"),
         _code(_STABILITY_CELL, context),
         _insight(
-            [
-                "Le **recouvrement du top-budget** mesure ce que le métier redoute : une transaction alertée hier qui ne l'est plus aujourd'hui, à comportement inchangé, décrédibilise l'outil auprès des analystes.",
-                "La corrélation de rang de Spearman est plus exigeante que le recouvrement du top-K : elle vérifie tout le classement, pas seulement la tête de file.",
-                "Une forêt d'isolation est stabilisée en augmentant `n_estimators` ; un auto-encodeur en fixant toutes les graines (initialisation, découpage des lots) et en réduisant le taux d'apprentissage.",
-            ]
+            _prose(
+                context,
+                "stability",
+                [
+                    "Le **recouvrement du top-budget** mesure ce que le métier redoute : une transaction alertée hier qui ne l'est plus aujourd'hui, à comportement inchangé, décrédibilise l'outil auprès des analystes.",
+                    "La corrélation de rang de Spearman est plus exigeante que le recouvrement du top-K : elle vérifie tout le classement, pas seulement la tête de file.",
+                    "Une forêt d'isolation est stabilisée en augmentant `n_estimators` ; un auto-encodeur en fixant toutes les graines (initialisation, découpage des lots) et en réduisant le taux d'apprentissage.",
+                ],
+            )
         ),
         _md("## 5. Sensibilité aux hyperparamètres"),
         _code(_GRID_CELL, context),
         _insight(
-            [
-                "Le tri respecte le **sens** de la métrique (`direction: maximize` pour une PR AUC) : un tri ascendant par défaut classerait les pires détecteurs en premier.",
-                "Une grille se lit aussi par sa **dispersion** : si toutes les combinaisons se tiennent en 0,01 de PR AUC, le détecteur est robuste et le réglage fin n'est pas le levier principal — les features le sont.",
-                "Gare au sur-ajustement sur le split de validation : avec quelques dizaines de fraudes seulement, l'écart-type d'une PR AUC est de l'ordre de 0,01 à 0,03. Choisir le meilleur point d'une grille sur un seul split est un biais classique.",
-                "Cas concret dans cette grille : `max_samples=0.5` s'affiche en tête, avec ~0,001 de PR AUC d'avance sur `max_samples=0.8` **à une seule graine**. Rejoué sur 5 graines, l'écart de moyenne reste de 0,001 alors que la dispersion entre graines est de 0,011 (0.5) et 0,003 (0.8) : le gagnant affiché est du bruit. Le réglage retenu est 0.8, qui divise la dispersion par 3,5 — donc qui rend la file d'alertes reproductible d'un ré-entraînement à l'autre.",
-                "Règle pratique : ne retenir un point de grille que si son avance dépasse 2x la dispersion entre graines (section 4). En dessous, on tranche sur un critère non statistique — ici la stabilité, ailleurs le coût d'inférence ou la simplicité de maintenance.",
-            ]
+            _prose(
+                context,
+                "grid",
+                [
+                    "Le tri respecte le **sens** de la métrique (`direction: maximize` pour une PR AUC) : un tri ascendant par défaut classerait les pires détecteurs en premier.",
+                    "Une grille se lit aussi par sa **dispersion** : si toutes les combinaisons se tiennent en 0,01 de PR AUC, le détecteur est robuste et le réglage fin n'est pas le levier principal — les features le sont.",
+                    "Gare au sur-ajustement sur le split de validation : avec quelques dizaines de fraudes seulement, l'écart-type d'une PR AUC est de l'ordre de 0,01 à 0,03. Choisir le meilleur point d'une grille sur un seul split est un biais classique.",
+                    "Cas concret dans cette grille : `max_samples=0.5` s'affiche en tête, avec ~0,001 de PR AUC d'avance sur `max_samples=0.8` **à une seule graine**. Rejoué sur 5 graines, l'écart de moyenne reste de 0,001 alors que la dispersion entre graines est de 0,011 (0.5) et 0,003 (0.8) : le gagnant affiché est du bruit. Le réglage retenu est 0.8, qui divise la dispersion par 3,5 — donc qui rend la file d'alertes reproductible d'un ré-entraînement à l'autre.",
+                    "Règle pratique : ne retenir un point de grille que si son avance dépasse 2x la dispersion entre graines (section 4). En dessous, on tranche sur un critère non statistique — ici la stabilité, ailleurs le coût d'inférence ou la simplicité de maintenance.",
+                ],
+            )
         ),
         _md(
             """## 6. Choix argumenté
