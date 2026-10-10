@@ -1,0 +1,45 @@
+# =================================================================================================
+# Modèle : Auto-encodeur PyTorch (erreur de reconstruction)
+# -------------------------------------------------------------------------------------------------
+# L'auto-encodeur apprend à **reconstruire** les transactions à travers un goulot étroit : ce
+# qu'il reconstruit mal est ce qui ne ressemble pas au flux habituel, et l'erreur de
+# reconstruction devient un score d'anomalie continu et ordonnable, donc pilotable au budget. Il
+# n'utilise aucune étiquette, comme la forêt d'isolation du projet scikit-learn, mais modélise des
+# **interactions non linéaires** (vélocité x empreinte d'appareil, montant x catégorie) au lieu de
+# coupes axe par axe. Le levier décisif est la **capacité** : un réseau trop large apprend aussi à
+# reconstruire la fraude et perd tout pouvoir de détection (PR AUC de validation 0,29 à 0,41 avec
+# deux couches de 64 et 32 neurones, contre 0,64 avec une seule couche de 16 et un goulot de 2).
+# Ce projet documente aussi ses limites : score moins stable entre graines qu'une forêt
+# d'isolation, et aveugle, comme elle, à la **fraude amicale**.
+#
+# Alternatives considérées : isolation_forest (voir `data-science/anomaly-detection/with-sklearn`) : référence plus stable entre graines et plus simple à expliquer, sans hypothèse de distribution, mlp : réseau dense de reconstruction sans goulot explicite — même principe, mais la capacité n'est pas contrainte, donc il reconstruit aussi les anomalies, auto-encodeur variationnel : score probabiliste plus riche, mais entraînement plus instable et interprétation plus délicate pour une équipe fraude.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.hidden_layers=...
+# =================================================================================================
+
+name: "Auto-encodeur PyTorch (erreur de reconstruction)"
+algorithm: autoencoder
+class: PyTorchModel
+task: anomaly
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `PyTorchModel(params=...)` (voir src/models/model.py).
+params:
+  hidden_layers:
+  - 16
+  code_dim: 2
+  dropout: 0.0
+  activation: relu
+  optimizer: adamw
+  scheduler: cosine
+
+# --- options spécifiques à la stack `pytorch` ---------------------------------------
+device: cpu
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold

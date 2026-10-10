@@ -1,0 +1,45 @@
+# =================================================================================================
+# Modèle : Auto-encodeur TensorFlow (erreur de reconstruction)
+# -------------------------------------------------------------------------------------------------
+# L'auto-encodeur apprend à **reconstruire** les transactions à travers un goulot étroit : ce
+# qu'il reconstruit mal est ce qui ne ressemble pas au flux habituel, et l'erreur de
+# reconstruction devient un score d'anomalie continu et ordonnable, donc pilotable au budget. Il
+# n'utilise aucune étiquette, comme la forêt d'isolation du projet scikit-learn, mais modélise des
+# **interactions non linéaires** (vélocité x empreinte d'appareil, montant x catégorie) au lieu de
+# coupes axe par axe. Le levier décisif est la **capacité** : un réseau trop large apprend aussi à
+# reconstruire la fraude et perd tout pouvoir de détection (PR AUC 0,21 à 0,45 avec deux couches
+# de 64 et 32 neurones, contre 0,59 avec une couche de 8). Ce projet documente aussi ses limites :
+# score moins stable entre graines qu'une forêt d'isolation, et aveugle, comme elle, à la **fraude
+# amicale**.
+#
+# Alternatives considérées : isolation_forest (voir `data-science/anomaly-detection/with-sklearn`) : référence plus stable entre graines et plus simple à expliquer, sans hypothèse de distribution, mlp : réseau dense de reconstruction sans goulot explicite — même principe, mais la capacité n'est pas contrainte, donc il reconstruit aussi les anomalies, auto-encodeur PyTorch (voir `data-science/anomaly-detection/with-pytorch`) : même méthode, autre framework — la capacité optimale n'y est pas la même, car l'initialisation et le découpage des lots diffèrent.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.hidden_layers=...
+# =================================================================================================
+
+name: "Auto-encodeur TensorFlow (erreur de reconstruction)"
+algorithm: autoencoder
+class: TensorFlowModel
+task: anomaly
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `TensorFlowModel(params=...)` (voir src/models/model.py).
+params:
+  hidden_layers:
+  - 8
+  code_dim: 3
+  dropout: 0.0
+  activation: relu
+  optimizer: adamw
+  scheduler: cosine
+
+# --- options spécifiques à la stack `tensorflow` ---------------------------------------
+deterministic: true
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: kfold
