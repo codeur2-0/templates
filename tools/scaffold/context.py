@@ -175,6 +175,38 @@ def py_string_tuple(
     return "\n".join(lines)
 
 
+def py_lambda_list(
+    items: list[str], *, indent: int = 8, content_indent: int = 12, width: int = 100
+) -> str:
+    """Render ``default_factory=lambda: [...]`` compactly when it fits, exploded otherwise.
+
+    Un raccourci de liste n'est pas seulement esthétique : une liste répartie sur plusieurs lignes
+    dont le dernier élément porte une virgule contient une *magic trailing comma*, que ``ruff
+    format`` refuse de replier. Les listes courtes (trois à cinq noms de métriques) se
+    retrouvaient donc étalées sur sept lignes dans chaque projet, et le moindre rebuild les
+    faisait diverger des projets livrés. La forme compacte n'est émise **sans** virgule finale que
+    lorsque la ligne tient dans ``width`` : au-delà, l'appel retombe sur
+    :func:`py_string_tuple`, et ``ruff format`` replie ou déploie selon la largeur réelle.
+
+    Args:
+        items: Strings to render as a Python list literal.
+        indent: Indentation of the emitted line (the one holding ``default_factory``).
+        content_indent: Indentation of the items when the list is exploded.
+        width: Maximum line width for the compact rendering.
+
+    Returns:
+        The rendered ``default_factory=lambda: [...]`` assignment.
+    """
+    padding = " " * indent
+    texts = [str(item).replace('"', "'").strip() for item in items]
+    literal = "[" + ", ".join(f'"{text}"' for text in texts) + "]"
+    compact = f"{padding}default_factory=lambda: {literal}"
+    if len(compact) <= width:
+        return compact
+    body = py_string_tuple(items, indent=content_indent, suffix=",")
+    return f"{padding}default_factory=lambda: [\n{body}\n{padding}]"
+
+
 def bullet_list(items: list[str], indent: int = 0, marker: str = "-") -> str:
     """Render a Markdown bullet list.
 
@@ -360,6 +392,7 @@ def build_context(spec: ProjectSpec, family: FamilySpec, stack: StackSpec) -> di
         "const": const,
         "wrap": wrap,
         "py_string_tuple": py_string_tuple,
+        "py_lambda_list": py_lambda_list,
         "bullet_list": bullet_list,
         "numbered_list": numbered_list,
         "column_dict": column_dict,

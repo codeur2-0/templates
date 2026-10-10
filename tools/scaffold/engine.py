@@ -73,15 +73,30 @@ def layers_for(
     candidates = [
         root / "stack" / stack.template_dir,
         root / "family" / family.template_dir,
-        root / "task" / _task_dir(family),
+        root / "task" / _task_dir(family, spec.modality, root),
         root / "modality" / spec.modality,
         root / "base",
     ]
     return [path for path in candidates if path.is_dir()]
 
 
-def _task_dir(family: FamilySpec) -> str:
-    """Map a family task onto its template directory name."""
+def _task_dir(family: FamilySpec, modality: str | None = None, root: Path | None = None) -> str:
+    """Map a family task onto its template directory name.
+
+    Une **famille peut posséder sa propre couche** : si ``task/<family.template_dir>`` existe, elle
+    l'emporte. Sinon, une modalité peut fournir une couche de tâche plus spécifique que la couche
+    générique (``task/text_multiclass`` pour un projet texte multi-classes, ``task/multiclass`` pour
+    un projet tabulaire), et la couche générique sert de dernier recours.
+
+    Args:
+        family: Family definition of the project.
+        modality: Project modality (``tabular``, ``text``, ...).
+        root: Template root directory (defaults to :data:`TEMPLATE_ROOT`).
+
+    Returns:
+        The directory name under ``task/`` (it may not exist: the layer is then skipped).
+    """
+    template_root = root or TEMPLATE_ROOT
     aliases = {
         "binary": "classification",
         # Le multi-classes a sa propre couche : sa décision (argmax, coût minimal, revue experte)
@@ -96,7 +111,15 @@ def _task_dir(family: FamilySpec) -> str:
         "generation": "generation",
         "pipeline": "pipeline",
     }
-    return aliases.get(family.task, family.task)
+    generic = aliases.get(family.task, family.task)
+    candidates = [family.template_dir]
+    if modality:
+        candidates.append(f"{modality}_{generic}")
+    candidates.append(generic)
+    for name in candidates:
+        if (template_root / "task" / name).is_dir():
+            return name
+    return generic
 
 
 def collect_templates(layers: Iterable[Path]) -> dict[str, Path]:

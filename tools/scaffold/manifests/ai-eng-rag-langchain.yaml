@@ -1,0 +1,87 @@
+# ==============================================================================================
+# ai-eng / rag / with-langchain
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/retrieval_augmented_generation.yaml` (assistant
+# documentaire interne). Ce manifeste ne décrit QUE ce qui change avec la stack : identité du
+# projet, stratégie de retrieval servie par la chaîne, prompt de synthèse et point de
+# fonctionnement. Le corpus, les questions annotées et les métriques sont ceux de la famille —
+# c'est ce qui rend la comparaison avec la variante `with-tfidf` honnête.
+# ==============================================================================================
+
+key: ai-eng-rag-langchain
+title: "Assistant documentaire RAG orchestré avec LangChain (LCEL) — chaîne prompt + retriever + citations"
+summary: >-
+  Le même assistant documentaire que la baseline lexicale, mais assemblé avec LangChain : un
+  retriever (`BaseRetriever`) sur les passages du corpus, un prompt de synthèse lu dans la
+  configuration (`PromptTemplate`), un adaptateur LLM interchangeable (sélection extractive hors
+  ligne par défaut, client OpenAI-compatible optionnel) et un graphe LCEL qui rattache la réponse
+  aux passages cités. Le corpus synthétique de 128 documents est découpé en passages, indexé par
+  BM25, par embeddings hachés (SVD tronquée apprise sur le train) ou par fusion des deux
+  classements (RRF) : notebook 04 chiffre ce que chaque stratégie apporte sur le split de
+  validation, et l'évaluation mesure le rappel, la précision des citations et l'abstention sur les
+  questions hors corpus. Aucun appel réseau, aucune clé API : tout est hors ligne et à graine fixée.
+  La comparaison avec `ai-eng/rag/with-tfidf` isole ce qu'apporte l'orchestration, à retrieval égal.
+
+family: retrieval_augmented_generation
+domain: ai-eng
+problem: rag
+stack: langchain
+project_slug: internal-knowledge-assistant-langchain
+package_name: knowledge_assistant_langchain
+
+model:
+  display_name: "Chaîne LCEL + retriever lexical BM25 (réponse fondée sur les passages cités)"
+  algorithm: langchain_lexical
+  rationale: >-
+    Le retrieval reste BM25 — la référence de la famille, et le concurrent à battre — mais la
+    réponse n'est plus produite par le seul retriever : un graphe LCEL assemble le contexte, le
+    prompt et l'appel au générateur, puis rattache la réponse aux passages qui la fondent. L'intérêt
+    de cette variante n'est pas le score de recherche (identique à celui de `with-tfidf`) mais ce
+    qu'elle rend explicite et testable : le prompt est un objet de configuration, l'adaptateur LLM
+    est une couture (extractive hors ligne par défaut, client distant optionnel), les citations
+    traversent toute la chaîne et la précision des citations devient une métrique qu'on peut suivre.
+    Les deux autres stratégies de la stack — embeddings hachés et fusion RRF des classements —
+    existent pour mesurer, sur le split de validation, ce que le sémantique et l'hybride apportent
+    réellement avant de payer leur coût.
+  params:
+    abstention_threshold: 0.0
+    calibrate_abstention: true
+    calibration_min_gain: 0.05
+    lexical:
+      k1: 1.5
+      b: 0.75
+      ngram_range: [1, 1]
+      min_df: 1
+    embedding:
+      n_features: 4096
+      n_components: 192
+    rrf_constant: 60
+  alternatives:
+    - "`langchain_dense` : embeddings n-grammes hachés compressés par une SVD tronquée apprise sur le train — seul bras qui rapproche deux formulations sans mot commun."
+    - "`langchain_hybrid` : fusion par rangs réciproques du lexical et du dense, la pratique industrielle quand aucune des deux familles ne suffit seule."
+    - "Variante `with-tfidf` : le même index BM25 sans orchestration — sert de témoin pour chiffrer l'apport de la chaîne."
+    - "Adaptateur distant : remplacer `llm.provider: extractive` par un client OpenAI-compatible pour envoyer le même prompt à un vrai modèle, sans changer une ligne de la chaîne."
+
+extras:
+  model_conf:
+    llm:
+      provider: extractive
+      max_sentences: 2
+      min_overlap: 1
+    prompt:
+      max_context_chars: 2400
+      template: |-
+        Tu réponds uniquement à partir du contexte fourni, en français.
+        Si le contexte ne contient pas la réponse, réponds exactement 'ABSTENTION'.
+        Termine ta réponse par 'SOURCES: ' suivi des identifiants des passages utilisés.
+
+        Contexte:
+        {context}
+
+        Question: {question}
+        Réponse:
+  root_conf:
+    retrieval:
+      answer_k: 5
+      abstention_threshold: 0.0
+      rerank: false

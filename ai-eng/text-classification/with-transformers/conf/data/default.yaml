@@ -1,0 +1,64 @@
+# =================================================================================================
+# Données : Tickets de support multiclasse, écrits trois fois (canonique, paraphrase, bruité)
+# -------------------------------------------------------------------------------------------------
+# Un corpus synthétique de 1 200 tickets répartis sur six catégories de support — facturation,
+# livraison, produit défectueux, remboursement, compte client et « autre » — et trois styles
+# rédactionnels : cinquante pour cent des tickets réutilisent le vocabulaire de leur catégorie,
+# trente pour cent reformulent la même demande sans ce vocabulaire, vingt pour cent ajoutent une
+# formule de politesse et une signature partagées par toutes les classes. Chaque catégorie a son
+# vocabulaire propre, sauf « autre » : cette classe n'a aucun mot commun par construction, elle
+# est minoritaire (12 %) et c'est pour elle que la métrique principale est une F1 macro. La
+# priorité déclarée par le client est tirée indépendamment du libellé, et le canal d'arrivée n'est
+# pas non plus un signal : ce sont deux distracteurs déclarés, mesurés par un test de raccourci.
+# Enfin, chaque pool de formulations est coupé en deux : quelques tournures par couple (classe,
+# style) sont **réservées aux splits d'évaluation** et n'apparaissent jamais à l'entraînement,
+# sans quoi le score publié mesurerait une recopie de gabarits plutôt qu'une généralisation.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: support_tickets
+n_samples: 1200
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: label
+id_column: doc_id
+time_column: published_at
+group_column: null
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['doc_id', 'style', 'priority', 'published_at', 'n_tokens']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+corpus:
+  reference_date: '2025-03-03'
+  style_shares:
+    canonique: 0.5
+    paraphrase: 0.3
+    bruite: 0.2
+  split_shares:
+    train: 0.6
+    val: 0.2
+    calibration: 0.05
+    test: 0.15
+  phrasing_holdout: 2

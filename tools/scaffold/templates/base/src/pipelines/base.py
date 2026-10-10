@@ -102,7 +102,7 @@ class BasePipeline(ABC):
         with timer(self.name) as elapsed:
             try:
                 result = self._execute()
-            except Exception as exc:  # noqa: BLE001 - the pipeline is the error boundary
+            except Exception as exc:
                 logger.exception("Pipeline '{}' failed", self.name)
                 return PipelineResult(
                     name=self.name,

@@ -114,6 +114,15 @@ no_implicit_optional = true
 ignore_missing_imports = true
 exclude = ["outputs/", "multirun/", "artifacts/", "\\.venv/"]
 
+# pandas >= 3 publie ses propres annotations : la valeur rendue par `itertuples()` y est typée
+# comme l'union de tous les scalaires possibles, donc `int(row.start)` — du code correct — devient
+# une erreur de typage. Le contrat de qualité de ce projet porte sur **son** code, pas sur les
+# annotations d'une dépendance : les modules de pandas ne sont pas suivis (`ignore_missing_imports`
+# ci-dessus), donc leurs types ne décident pas de ce qui est légal ici.
+[[tool.mypy.overrides]]
+module = ["pandas", "pandas.*"]
+follow_imports = "skip"
+
 # ---------------------------------------------------------------------------------------------
 # pytest
 # ---------------------------------------------------------------------------------------------

@@ -38,6 +38,12 @@ class StackSpec(BaseModel):
     docs: list[DocLink] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     commands: dict[str, str] = Field(default_factory=dict)
+    #: Algorithmes comparables de la stack, décrits en une ligne (nourrit le notebook de
+    #: comparaison). Laissé vide quand toutes les stacks de la famille partagent les mêmes
+    #: algorithmes : le notebook retombe alors sur un texte générique.
+    candidate_algorithms: str = ""
+    #: Une phrase disant ce que la comparaison des algorithmes fait lire (spécifique à la stack).
+    candidate_note: str = ""
 
 
 class FamilySpec(BaseModel):

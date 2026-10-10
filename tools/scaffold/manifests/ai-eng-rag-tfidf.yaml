@@ -1,0 +1,57 @@
+# ==============================================================================================
+# ai-eng / rag / with-tfidf
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/retrieval_augmented_generation.yaml` (assistant
+# documentaire interne). Ce manifeste ne décrit QUE ce qui change avec la stack : identité du
+# projet, modèle, point de fonctionnement et paramètres de l'index lexical.
+# ==============================================================================================
+
+key: ai-eng-rag-tfidf
+title: "Assistant documentaire RAG avec scikit-learn (BM25) — baseline lexicale de référence"
+summary: >-
+  Recherche documentaire sourcée de bout en bout (corpus synthétique de 360 documents d'entreprise
+  -> contrats Pandera -> découpage en passages avec chevauchement -> index BM25 appris sur le train
+  -> classement par question -> réponse extractive citant ses sources ou abstention explicite) pour
+  une équipe support, entièrement piloté par Hydra et structuré en objets testables. L'évaluation
+  est menée **par question** : recall@k, MRR, nDCG@k et précision des citations, confrontés au
+  tirage aléatoire et à l'ordre du corpus, puis ventilés par difficulté (facile, paraphrase,
+  multi-document) et par comportement d'abstention sur les questions hors corpus.
+
+family: retrieval_augmented_generation
+domain: ai-eng
+problem: rag
+stack: tfidf
+project_slug: internal-knowledge-assistant-tfidf
+package_name: knowledge_assistant_tfidf
+
+model:
+  display_name: "Index lexical BM25 + réponse extractive sourcée"
+  algorithm: bm25
+  rationale: >-
+    BM25 est le score de référence de la recherche documentaire : rareté du terme, saturation de
+    sa fréquence dans le passage et normalisation par la longueur. Sur un corpus d'entreprise
+    structuré — un vocabulaire métier stable, des formulations répétées d'une édition à l'autre —
+    il est très difficile à battre, et il offre trois propriétés qu'un modèle dense n'offre pas
+    gratuitement : il est instantané, il s'explique terme par terme, et il n'a besoin d'aucun
+    entraînement ni d'aucun téléchargement. Ses limites sont mesurées plutôt que cachées : le
+    segment « paraphrase » de l'évaluation chiffre exactement ce qu'il ne sait pas faire, et c'est
+    cette mesure qui justifie (ou non) de payer un embedding dense dans la variante LangChain.
+  params:
+    abstention_threshold: 0.0
+  alternatives:
+    - "tfidf_cosine : même index, scoring cosinus normalisé — plus simple à expliquer, plus sensible à la longueur des passages."
+    - "Variante `with-langchain` : orchestration LCEL, prompt de synthèse et adaptateur LLM branché sur le même index — la comparaison des deux stacks chiffre l'apport de l'orchestration, pas celui du scoring."
+    - "Embeddings hachés + SVD : la représentation dense déterministe de cette famille, seule à traiter les paraphrases."
+    - "Recherche hybride : la pratique industrielle, à n'envisager qu'après avoir mesuré où le lexical échoue."
+
+extras:
+  model_conf:
+    llm:
+      provider: extractive
+      max_sentences: 2
+      min_overlap: 1
+  root_conf:
+    retrieval:
+      answer_k: 5
+      abstention_threshold: 0.0
+      rerank: false

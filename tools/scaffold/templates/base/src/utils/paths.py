@@ -10,9 +10,10 @@ is launched with ``python -m src.main``, ``python src/main.py``, ``pytest`` or a
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 #: Absolute path of the project root (the directory containing ``src/`` and ``conf/``).
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]

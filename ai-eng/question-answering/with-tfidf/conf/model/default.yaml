@@ -1,0 +1,38 @@
+# =================================================================================================
+# Modèle : Index lexical BM25 + réponse copiée mot pour mot de la fiche
+# -------------------------------------------------------------------------------------------------
+# La question du support nomme le produit et l'article — « le délai de retour de la trottinette
+# Roam » : les termes de la question sont ceux de la phrase canonique de la fiche. BM25 exploite
+# cette signature sans entraînement, rend une fiche unique, s'explique terme par terme et laisse
+# le générateur extractif copier la phrase exacte, ce que le contrat de cette famille exige. Ses
+# limites sont mesurées plutôt que cachées : le segment « paraphrase » chiffre ce qu'il ne sait
+# pas faire quand la question s'éloigne du vocabulaire de la fiche, et le segment « multi-document
+# » plafonne tout système qui ne renvoie qu'un passage.
+#
+# Alternatives considérées : tfidf_cosine : même index, scoring cosinus normalisé — plus simple à expliquer, plus sensible à la longueur des passages., Variante `with-langchain` : la même recherche servie par une chaîne LCEL (prompt de configuration, adaptateur LLM interchangeable, citations conservées) — la comparaison des deux stacks chiffre l'apport de l'orchestration, pas celui du scoring., Embeddings hachés + SVD : la représentation dense déterministe du dépôt, seule à rapprocher deux formulations sans mot commun., Recherche hybride : la pratique industrielle, à n'envisager qu'après avoir mesuré où le lexical échoue..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.abstention_threshold=...
+# =================================================================================================
+
+name: "Index lexical BM25 + réponse copiée mot pour mot de la fiche"
+algorithm: bm25
+class: TfidfModel
+task: retrieval
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `TfidfModel(params=...)` (voir src/models/model.py).
+params:
+  abstention_threshold: 0.0
+  calibrate_abstention: true
+  calibration_min_gain: 0.05
+
+# --- options spécifiques à la stack `tfidf` ---------------------------------------
+llm:
+  provider: extractive
+  max_sentences: 2
+  min_overlap: 2
+  support_ratio: 0.8
