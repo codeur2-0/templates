@@ -14,14 +14,14 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**35 projets** — 25 sur sept familles tabulaires (sections 1.1 à 1.7) et 10 sur les six familles
+**39 projets** — 29 sur sept familles tabulaires (sections 1.1 à 1.7) et 10 sur les six familles
 texte `ai-eng/rag` (section 1.8), `ai-eng/question-answering` (section 1.9), `ai-eng/embeddings`
 (section 1.10), `ai-eng/text-classification` (section 1.11), `ai-eng/named-entity-recognition`
 (section 1.12) et `nlp/summarization` (section 1.13) — tous verts dans
 `tools/verify.py` (lint, formatage, typage, tests, six notebooks exécutés, pipeline complet
 `data → train → evaluate → predict`).
 
-### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks
+### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks + MLflow
 
 | Projet | Stack | Modèle | ROC AUC (test) | PR AUC | Accuracy | F1 | Log loss |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -31,6 +31,7 @@ texte `ai-eng/rag` (section 1.8), `ai-eng/question-answering` (section 1.9), `ai
 | [`with-pytorch`](data-science/classification/with-pytorch) | PyTorch | `mlp` (4 161 paramètres) | **0,8727** | **0,7365** | 0,7937 | 0,6570 | 0,4388 |
 | [`with-keras`](data-science/classification/with-keras) | Keras (API fonctionnelle) | `mlp` (4 161 paramètres) | 0,8655 | 0,7282 | 0,8137 | **0,6711** | 0,4251 |
 | [`with-tensorflow`](data-science/classification/with-tensorflow) | TensorFlow (`GradientTape`) | `mlp` (4 161 paramètres) | 0,8709 | 0,7341 | 0,7863 | 0,6517 | 0,4515 |
+| [`with-mlflow`](data-science/classification/with-mlflow) | scikit-learn + **suivi MLflow** | `random_forest` (identique à `with-sklearn`) | 0,8654 | 0,7240 | 0,8175 | 0,6636 | 0,4190 |
 
 Chiffres mesurés sur le même jeu synthétique (4 000 clients, 15 colonnes, 25,5 % de churn),
 mêmes graines, mêmes 31 features après pré-traitement, mêmes définitions de métriques, split
@@ -44,6 +45,14 @@ bruit au regard de la variance d'un split. Le choix d'une stack se justifie donc
 l'**écosystème** (serving, GPU, compétences de l'équipe) et par l'**apprentissage**, pas par la
 performance brute. C'est exactement la conclusion que le dépôt veut rendre vérifiable plutôt que
 de l'asséner.
+
+`with-mlflow` reprend **le même modèle** que `with-sklearn` et obtient exactement les mêmes métriques :
+le projet isole ce qu'apporte le suivi d'expériences. Chaque `make train` ouvre un run MLflow local
+(base SQLite, aucun serveur) avec la configuration Hydra aplatie, les métriques du `Trainer`, les
+artefacts du pipeline et la forêt journalisée (`mlflow.sklearn`, signature d'entrée, dépendances
+épinglées) ; `make evaluate` ajoute les métriques de test au **même** run, et `make mlflow-ui` les
+compare. Aucun pipeline ne connaît MLflow : ils appellent `src/tracking`, un traceur neutre dans les
+autres projets.
 
 ### 1.2 `data-science/regression` — estimation de prix immobilier (AVM), six stacks
 
@@ -175,16 +184,17 @@ locale est précisément ce qui redresse la couverture. La variante normalisée 
 à 86,7 % mais tombe à 0 % sur les vagues de froid : elle est documentée comme limite connue
 plutôt que livrée.
 
-### 1.6 `data-science/recommendation` — classement de catalogue e-commerce, scikit-learn
+### 1.6 `data-science/recommendation` — classement de catalogue e-commerce, deux stacks
 
 | Projet | Stack | Modèle | NDCG@10 | Precision@10 | Recall@10 | MAP@10 | Hit-rate@10 | Couverture catalogue |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| [`with-sklearn`](data-science/recommendation/with-sklearn) | scikit-learn | `hist_gradient_boosting` (15 feuilles) | **0,602** | 0,299 | 0,733 | 0,582 | 0,951 | **65,3 %** |
+| [`with-sklearn`](data-science/recommendation/with-sklearn) | scikit-learn | `hist_gradient_boosting` (15 feuilles) | 0,602 | **0,299** | **0,733** | 0,582 | **0,951** | **65,3 %** |
+| [`with-pytorch`](data-science/recommendation/with-pytorch) | PyTorch | `mlp` 32 pointwise, sigmoid (1 953 paramètres) | **0,614** | 0,297 | 0,725 | **0,606** | 0,942 | **65,4 %** |
 
 36 000 couples (1 200 utilisateurs x 30 candidats, catalogue de 900 références, ~14 % de
 pertinence), split chronologique par session, évaluation **par utilisateur** (226 utilisateurs de
 test avec au moins une intention observable) et jamais ligne à ligne. Verdict **conforme, 8/8
-objectifs**.
+objectifs** pour les deux stacks.
 
 | Référence (même test) | NDCG@10 | Couverture catalogue |
 | --- | --- | --- |
@@ -198,6 +208,14 @@ exposant quatre fois plus de catalogue. Les utilisateurs froids (une commande ou
 sont servis presque aussi bien que les autres (rapport de rappel 0,96), et le NDCG varie de 0,033
 seulement entre plis chronologiques. Le tri par popularité échoue précisément au critère de
 couverture : c'est le mécanisme par lequel la longue traîne meurt, que le NDCG seul ne voit pas.
+
+Le MLP PyTorch fait jeu égal avec le boosting : +0,012 de NDCG@10, du même ordre que l'amplitude
+entre plis chronologiques (0,029 pour le réseau), pour une couverture identique et un rapport de
+rappel des utilisateurs froids de 0,99. Il score les mêmes features, sans identifiant appris : ce
+n'est **pas** un modèle à deux tours, qui exigerait des embeddings d'identifiants et abandonnerait
+les utilisateurs froids que ce jeu met au contrat. Sa capacité (une couche de 32, dropout 0,3) est
+choisie sur 3 graines : un réseau 128-64 fait 0,001 de mieux en validation, soit moins de deux fois
+sa dispersion, pour huit fois plus de paramètres. L'arrêt anticipé tombe entre les époques 3 et 6.
 
 ### 1.7 `data-science/multiclass-classification` — diagnostic du mode de défaillance machine, cinq stacks
 
@@ -685,7 +703,7 @@ Règles non négociables, appliquées partout :
 
 ---
 
-## 4. Les six stacks, ce que chacune montre
+## 4. Les six stacks (et MLflow), ce que chacune montre
 
 Même contrat `BaseModel`, mêmes callbacks de projet, mêmes noms de métriques — seule
 l'implémentation change. C'est ce qui rend la comparaison possible.
@@ -698,6 +716,7 @@ l'implémentation change. C'est ce qui rend la comparaison possible.
 | **PyTorch** | Boucle d'époques écrite à la main : `DataLoader` semé, `forward`/`backward`/`step`, instantané et restauration du meilleur `state_dict` | checkpoint `model.pt` (poids + méta, rechargé en `weights_only=True`) |
 | **Keras** | API fonctionnelle : graphe déclaré puis `compile`/`fit`, callbacks natifs (`EarlyStopping(restore_best_weights)`, `ReduceLROnPlateau`, `TerminateOnNaN`) pontés vers les callbacks du projet, `class_weight` pour le déséquilibre | archive native `model.keras` + sidecar `model.config.json` |
 | **TensorFlow** | Niveau le plus bas : modèle **subclassé**, couches maison (`DenseBlock`, `ResidualBlock`), pipeline `tf.data`, `GradientTape` + `tf.function`, pertes sur logits, écrêtage du gradient, pondération d'échantillons | poids `model.weights.h5` + sidecar `model.config.json` |
+| **MLflow** | Stack d'**outillage** qui hérite de scikit-learn (`extends: sklearn` dans `stacks.yaml`) : elle ne surcharge que `src/tracking/tracker.py`. Run par entraînement, test rattaché au même run, modèle rechargeable par `mlflow.pyfunc` | `model.joblib` + modèle MLflow (skops) dans `artifacts/mlruns/` |
 
 Cinq stacks texte complètent la liste, documentées avec leurs projets : **scikit-learn
 (TF-IDF / BM25)**, **LangChain (LCEL)**, l'**index vectoriel dense** (hachage de n-grammes puis SVD
@@ -751,6 +770,15 @@ Pièges documentés dans le code (et résolus) que ces stacks partagent :
 - **`FitResult.duration_seconds` n'était renseigné que par le `Trainer`** : un appel direct à
   `model.fit` (notebooks, études) rendait 0 s, et les colonnes de coût des notebooks affichaient
   0,0 pour tous les modèles. `BaseModel.fit` chronomètre désormais lui-même (horloge monotone).
+- **Le classement pointwise de la stack PyTorch était appris en régression** : `ranking` était
+  déclaré tête binaire à sigmoïde, mais la perte retombait sur la MSE et la sortie sur le logit
+  brut, sans `predict_proba` (tests et notebooks 05/06 en échec). `ranking` partage désormais la
+  tête binaire (`BCEWithLogitsLoss`, sigmoïde, probabilités).
+- **MLflow 3 sérialise les modèles scikit-learn avec skops, qui refuse les types inconnus** : une
+  forêt aléatoire échoue à la journalisation sur `sklearn.tree._tree.Tree`. Passer tous les types
+  signalés reviendrait à désactiver la protection ; le traceur ne déclare de confiance que les
+  types du paquet `sklearn`. MLflow déduit aussi les dépendances du modèle des modules chargés
+  (il y ajoutait `torch`, présent dans le venv) : la liste est épinglée explicitement.
 
 ---
 
@@ -801,28 +829,21 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **35 projets**, dont **29 rejoués de bout en bout dans l'environnement de
-cette branche** (ruff check, ruff format, mypy strict, pytest, six notebooks exécutés,
-`python -m src.main mode=all`) — la barrière de qualité a d'ailleurs tenu sur les 35 : `ruff check`,
-`ruff format` et `mypy` sont verts partout, y compris pour les six projets que l'environnement ne
-peut pas exécuter faute de TensorFlow.
+État au dernier passage : **39/39 projets conformes**, dans un même environnement (Python 3.12,
+PyTorch 2.14, TensorFlow 2.21, spaCy 3.8, transformers 5.19, MLflow 3.16) — **5 992 tests** au total :
+165 par projet tabulaire, 187 pour les projets multi-classes, 183 pour le projet MLflow, de 76 à 127
+pour les projets texte.
 
-Les **dix projets texte** sont conformes : `rag/with-tfidf` (118,4 s, 107 tests),
-`rag/with-langchain` (203,4 s, 112 tests), `question-answering/with-tfidf` (69,2 s, 107 tests),
-`question-answering/with-langchain` (105,0 s, 112 tests), `embeddings/with-embedding` (61,3 s,
-109 tests), `embeddings/with-tfidf` (59,2 s, 107 tests), `text-classification/with-tfidf_classifier`
-(48,5 s, 121 tests), `text-classification/with-transformers` (893,0 s, 127 tests — l'encodeur
-s'entraîne dans les notebooks, d'où la durée), `named-entity-recognition/with-spacy` (201,6 s,
-101 tests) et `summarization/with-seq2seq` (50 tests, six notebooks en 108 s, `mode=all` à ROUGE-1
-0,6958 — le vocabulaire et les poids s'apprennent sur le corpus, d'où la durée) — mêmes six
-notebooks et même pipeline complet. Les **19 projets tabulaires**
-scikit-learn, XGBoost, LightGBM et PyTorch rejoués dans le même environnement sont conformes eux
-aussi (la référence multi-stacks complète, 4 235 tests, reste celle du dernier passage intégral) ;
-les quatre projets **Keras** et les deux **TensorFlow** n'ont pas été rejoués ici — TensorFlow n'est
-pas installé — mais leurs sources sont inchangées (seuls le README et `pyproject.toml` ont été
-régénérés, et la barrière de qualité y passe). Chaque projet est rejoué intégralement — lint,
-typage, tests, exécution des six notebooks et pipeline complet — avant d'être considéré comme
-livré.
+- Les **10 projets texte** et les **2 projets apportés par l'intégration** (`recommendation/with-pytorch`,
+  `classification/with-mlflow`) ont été rejoués intégralement : ruff check, ruff format, mypy strict,
+  pytest, six notebooks exécutés, `python -m src.main mode=all`.
+- Les **27 autres projets tabulaires**, dont le code généré n'a changé que par un commentaire de
+  `pyproject.toml` et le traceur neutre `src/tracking`, ont été rejoués en lint, typage et tests ;
+  leur dernier passage intégral reste la référence pour les notebooks et le pipeline.
+- **Instabilités observées puis rejouées avec succès** : trois noyaux Jupyter qui n'ont pas démarré
+  sous charge (`nbclient` : `assert self.km is not None`, sans lien avec le code des notebooks), et
+  le test `rag/with-langchain::test_evaluate_reuses_the_threshold_learned_by_train`, en échec une
+  fois sur trois exécutions — un test instable à surveiller.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
 reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capture d'écran.
@@ -858,7 +879,7 @@ d'un coup. Le contrôle des 35 projets porte donc, aujourd'hui, sur tout sauf `s
 **22 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
 `task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval,text_multiclass,named_entity_recognition,summarization}/`,
 `family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering,embedding_pipeline,text_classification,named_entity_recognition,summarization}/`
-et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,tfidf,tfidf_classifier,langchain,embedding,transformers,spacy,seq2seq}/`
+et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,mlflow,tfidf,tfidf_classifier,langchain,embedding,transformers,spacy,seq2seq}/`
 sont écrites et vérifiées : les **sept familles tabulaires**, la **famille RAG** (section 1.8), la
 **famille questions-réponses** (section 1.9), la **famille d'index d'embeddings** (section 1.10), la
 **famille de classification de texte** (section 1.11), la **famille d'extraction d'entités nommées**
@@ -866,12 +887,12 @@ sont écrites et vérifiées : les **sept familles tabulaires**, la **famille RA
 projet `nlp`, tous mesurés sur un corpus synthétique et un split de test dédié. Ce qui reste, par
 ordre de valeur pédagogique :
 
-1. **Stacks tabulaires déclarées, pas encore livrées** — `clustering` et `anomaly_detection` en
-   PyTorch et TensorFlow (auto-encodeurs), `recommendation` en PyTorch (modèle à deux tours),
-   `binary_classification` avec MLflow. Leurs couches `task/` et `family/` existent ; il reste un
-   manifeste par stack et, comme pour la prévision, des notebooks paramétrés par stack
-   (`extras.notebook_<famille>`) : les commentaires chiffrés d'un notebook doivent parler de la
-   stack réellement mesurée.
+1. **Stacks tabulaires déclarées, pas encore livrées** — `recommendation` en TensorFlow et à deux
+   tours. `clustering` en PyTorch / TensorFlow est **écarté après mesure** : sur les 36 features
+   standardisées du jeu clients, un k-means dans l'espace latent d'un auto-encodeur ne bat le
+   k-means direct sur aucune métrique (silhouette 0,12–0,20 contre 0,206, ARI latent 0,22–0,39
+   contre 0,418) et sa stabilité entre graines (ARI 0,54–0,83, 250 époques comprises) reste sous le
+   critère de 0,90 — le k-means direct est à 0,999. Livrer ce projet obligerait à baisser un seuil.
 2. **Suite du périmètre ai-eng et nlp** — la modalité texte, les tâches `retrieval`,
    `text_multiclass`, `named_entity_recognition` et `summarization` et les familles
    `retrieval_augmented_generation`, `question_answering`, `embedding_pipeline`,
@@ -884,7 +905,7 @@ ordre de valeur pédagogique :
    GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
    `computer-vision/`. Chacune demande une nouvelle couche `modality/` (loaders, pré-traitement,
    pipelines, tests) en plus des couches `family/` et `task/`.
-4. **Stacks déjà déclarées, non implémentées** — `duckdb`, `pandas`, `prefect`, `mlflow`,
+4. **Stacks déjà déclarées, non implémentées** — `duckdb`, `pandas`, `prefect`,
    `fastapi`, `jinja2`, `scipy`, `github-actions`, `pandera` : l'entrée de registre existe, le dossier
    `templates/stack/<clé>/` reste à écrire ; elles serviront `data-eng/`, `mlops/` et le serving
    (`spacy` est livrée avec la section 1.12).

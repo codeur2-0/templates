@@ -25,6 +25,7 @@ from src.evaluation.reports import ReportBuilder
 from src.models import load_model
 from src.pipelines.base import BasePipeline, PipelineResult
 from src.preprocessing.pipelines import PreprocessingPipeline
+from src.tracking import build_tracker
 from src.utils.io import read_table, write_json
 from src.utils.logging import get_logger
 
@@ -108,6 +109,9 @@ class EvaluationPipeline(BasePipeline):
             + ", ".join(f"{key}={value:.5f}" for key, value in list(evaluation.metrics.items())[:6])
         )
         result.messages.append(f"Report: {report_files.get('report', 'n/a')}")
+        build_tracker(self.config.model_dump(), self.paths).log_evaluation(
+            metrics=result.metrics, artifacts=result.artifacts
+        )
         return result
 
     def _transform_test(

@@ -1,0 +1,41 @@
+# =================================================================================================
+# Modèle : Forêt aléatoire scikit-learn, suivie par MLflow
+# -------------------------------------------------------------------------------------------------
+# Le modèle est celui du projet scikit-learn, à l'identique : ce projet ne cherche pas un meilleur
+# ROC AUC, il rend chaque entraînement **traçable et comparable**. Chaque `make train` ouvre un
+# run MLflow qui enregistre la configuration Hydra aplatie (graine et surcharges comprises), les
+# métriques du `Trainer`, les artefacts du pipeline et la forêt aléatoire au format
+# `mlflow.sklearn` avec sa signature d'entrée ; `make evaluate` ajoute au même run les métriques
+# de test. Deux expériences se comparent alors dans `mlflow ui` au lieu de se comparer de mémoire.
+# Le suivi est local (base SQLite dans `artifacts/mlruns/`) : aucune infrastructure, aucune donnée
+# hors du poste.
+#
+# Alternatives considérées : journal JSON seul (projets sans suivi) : les artefacts restent la source de vérité, mais comparer dix runs revient à ouvrir dix fichiers, autolog MLflow (`mlflow.sklearn.autolog`) : zéro ligne à écrire, mais il journalise ce que MLflow devine, pas ce que le pipeline décide (seuil, métriques métier, split chronologique), serveur MLflow partagé ou registre de modèles : l'étape suivante en équipe ; ici, un changement de `tracking.tracking_uri`, pas de code, Weights & Biases, Neptune : services hébergés, donc données hors du poste — exclus par les contraintes du cas d'usage.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.n_estimators=...
+# =================================================================================================
+
+name: "Forêt aléatoire scikit-learn, suivie par MLflow"
+algorithm: random_forest
+class: SklearnModel
+task: binary
+supports_proba: true
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `SklearnModel(params=...)` (voir src/models/model.py).
+params:
+  n_estimators: 300
+  max_depth: 14
+  min_samples_leaf: 8
+  max_features: sqrt
+  class_weight: balanced_subsample
+  criterion: gini
+
+# --- options spécifiques à la stack `mlflow` ---------------------------------------
+cross_validation:
+  enabled: true
+  folds: 5
+  strategy: stratified

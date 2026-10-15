@@ -1,0 +1,45 @@
+# =================================================================================================
+# Modèle : Réseau de neurones PyTorch (MLP de classement pointwise)
+# -------------------------------------------------------------------------------------------------
+# Le MLP score chaque couple (utilisateur, candidat) à partir des mêmes features que le boosting
+# du projet scikit-learn — affinité de catégorie, intention récente, signal collaboratif, fiche
+# article — et apprend leurs **interactions** sans features croisées fabriquées à la main. Il
+# n'utilise aucun identifiant, donc il sert un article ou un utilisateur neuf par ses seuls
+# attributs (rappel des utilisateurs froids à 99 % du rappel global). Comme le boosting, il
+# apprend un score **ponctuel** et non une préférence relative : il n'optimise pas directement le
+# NDCG. Sur ce volume (23 400 couples), il fait jeu égal avec le boosting (NDCG@10 0,614 contre
+# 0,602, un écart de l'ordre de la dispersion entre périodes) : le choix de la stack se justifie
+# ici par l'écosystème et par la voie qu'il ouvre vers des embeddings appris, pas par un gain de
+# pertinence.
+#
+# Alternatives considérées : hist_gradient_boosting (voir `data-science/recommendation/with-sklearn`) : même qualité sur ce volume, natif valeurs manquantes et catégories, plus simple à expliquer, réseau à deux tours : embeddings utilisateur et article séparés, indexables pour une recherche de plus proches voisins sur un catalogue de millions de références — il exige des identifiants appris, donc beaucoup plus de données, et perd le service des utilisateurs froids que ce jeu met au contrat, perte de classement (listwise, LambdaRank) : alignée sur le NDCG, mais non servie par le registre de la stack ; le gain attendu est à mesurer contre ce MLP pointwise, trieur par popularité : le seul adversaire qui compte — gratuit, explicable, robuste ; le MLP le bat de 104,5 % en NDCG@10.
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.hidden_layers=...
+# =================================================================================================
+
+name: "Réseau de neurones PyTorch (MLP de classement pointwise)"
+algorithm: mlp
+class: PyTorchModel
+task: ranking
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `PyTorchModel(params=...)` (voir src/models/model.py).
+params:
+  hidden_layers:
+  - 32
+  dropout: 0.3
+  activation: relu
+  batch_norm: false
+  optimizer: adamw
+  scheduler: cosine
+
+# --- options spécifiques à la stack `pytorch` ---------------------------------------
+device: cpu
+cross_validation:
+  enabled: false
+  folds: 3
+  strategy: group_kfold

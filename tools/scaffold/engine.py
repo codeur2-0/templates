@@ -54,7 +54,8 @@ def layers_for(
 
     Five layers are composed (Jinja precedence: the first existing match wins):
 
-    1. ``stack/<stack>``      framework specific model and trainer
+    1. ``stack/<stack>``      framework specific model and trainer (then ``stack/<extends>``
+       when the stack inherits another one, e.g. MLflow over scikit-learn)
     2. ``family/<family>``    synthetic data generator, business flavour
     3. ``task/<task>``        evaluator, reports, predictor, figures
     4. ``modality/<modality>``loaders, preprocessing, features, pipelines, tests
@@ -70,8 +71,15 @@ def layers_for(
         The ordered list of existing layer directories (Jinja precedence: first wins).
     """
     root = template_root or TEMPLATE_ROOT
+    if stack.extends and not (root / "stack" / stack.extends).is_dir():
+        msg = (
+            f"Stack '{stack.key}' extends '{stack.extends}', but templates/stack/{stack.extends} "
+            "does not exist"
+        )
+        raise ValueError(msg)
     candidates = [
         root / "stack" / stack.template_dir,
+        *([root / "stack" / stack.extends] if stack.extends else []),
         root / "family" / family.template_dir,
         root / "task" / _task_dir(family, spec.modality, root),
         root / "modality" / spec.modality,
