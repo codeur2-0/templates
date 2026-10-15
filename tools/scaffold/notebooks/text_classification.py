@@ -132,6 +132,12 @@ def _measured_results_source(context: NotebookContext) -> str:
     return f"[\n{body}]"
 
 
+#: Bloc de paramètres qui porte `class_weight`, par stack. Une stack absente de cette table n'expose
+#: aucune pondération de classes : la section de rééquilibrage du notebook 04 y est déclarée sans
+#: objet plutôt que d'entraîner deux fois le même modèle et de publier un écart nul.
+CLASS_WEIGHT_BLOCK: dict[str, str] = {"tfidf_classifier": "estimator", "transformers": "training"}
+
+
 def _tokens(context: NotebookContext) -> dict[str, str]:
     """Build the substitution table of the classification notebooks.
 
@@ -161,6 +167,7 @@ def _tokens(context: NotebookContext) -> dict[str, str]:
         "__MEASURED_RESULTS__": _measured_results_source(context),
         "__TARGET_AUTOMATION__": str(TARGET_AUTOMATION_ACCURACY),
         "__COMPARISON_EPOCHS__": str(COMPARISON_EPOCHS),
+        "__CLASS_WEIGHT_BLOCK__": CLASS_WEIGHT_BLOCK.get(context.stack.key, "estimator"),
         # Le budget d'époques n'a de sens que pour une stack entraînée par époques : une stack à
         # passage unique (TF-IDF, centroïde) reçoit un dictionnaire vide, sinon elle se verrait
         # passer un paramètre qu'elle ne comprend pas.
@@ -611,8 +618,9 @@ for text in TRAIN.loc[TRAIN["style"] == "canonique", "text"].head(5):
                 "peut pas venir d'un gabarit mémorisé.",
                 "La réserve est un paramètre du corpus (`data.corpus.phrasing_holdout`), pas une "
                 "constante cachée dans le générateur.",
-                "C'est cette propriété qui rend la comparaison avec la variante `transformers` "
-                "honnête : les deux modèles sont jugés sur les mêmes tournures inédites.",
+                "C'est cette propriété qui rend honnête la comparaison des variantes de la famille "
+                "(`tfidf_classifier`, `spacy_textcat`, `transformers`) : tous les modèles sont jugés "
+                "sur les mêmes tournures inédites.",
             ]
         ),
     ]
@@ -1162,57 +1170,81 @@ if published:
                 "ticket : à ces échelles, le choix se fait sur la qualité, pas sur la vitesse.",
             ]
         ),
-        _md(
-            "## 4. Rééquilibrage : ce que la classe minoritaire coûte\n\n"
-            "Le manifeste utilise `class_weight='balanced'`. On mesure ce que ce choix apporte — et "
-            "ce qu'il coûte — en comparant les deux réglages sur le même split, à algorithme "
-            "égal."
-        ),
-        _text(
-            """
-from src.models import build_model
-from src.training.metrics import classification_metrics, per_class_frame
-
-weighting_rows = {}
-for label, class_weight in (("balanced", "balanced"), ("sans rééquilibrage", None)):
-    candidate = build_model(
-        CONFIG, algorithm=reference, params={"estimator": {"class_weight": class_weight}}
-    )
-    candidate.fit(TRAIN, target=TARGET_COLUMN)
-    probabilities = candidate.predict_proba(VALIDATION[TEXT_COLUMN].astype(str).tolist())
-    predicted = np.asarray(candidate.labels)[probabilities.argmax(axis=1)]
-    scores = classification_metrics(
-        validation_truth, predicted, confidences=probabilities.max(axis=1),
-        labels=list(candidate.labels),
-    )
-    per_class = per_class_frame(
-        validation_truth, pd.Series(predicted), labels=list(candidate.labels)
-    ).set_index("class")
-    weighting_rows[label] = {
-        "F1 macro": round(scores["macro_f1"], 4),
-        "exactitude": round(scores["accuracy"], 4),
-        f"rappel {MINORITY_LABEL}": round(float(per_class.loc[MINORITY_LABEL, "recall"]), 4),
-        f"rappel {MAJORITY_LABEL}": round(float(per_class.loc[MAJORITY_LABEL, "recall"]), 4),
-    }
-weighting = pd.DataFrame(weighting_rows).T
-display(weighting)
-delta = (
-    weighting.loc["balanced", f"rappel {MINORITY_LABEL}"]
-    - weighting.loc["sans rééquilibrage", f"rappel {MINORITY_LABEL}"]
-)
-print(f"écart de rappel sur la classe {MINORITY_LABEL} : {delta:+.4f}")
-""",
-            context,
-        ),
-        _insight(
+        *(
             [
-                "Le rééquilibrage déplace du rappel de la classe majoritaire vers la classe rare : "
-                "c'est exactement ce que demande une métrique macro.",
-                "Sur ce corpus, l'écart est mesuré et **publié** ; sur un corpus où la classe rare "
-                "serait plus fréquente, le réglage deviendrait moins utile — la question se "
-                "repose à chaque réentraînement.",
-                "Le même réglage se lit sur les probabilités : un modèle rééquilibré annonce des "
-                "confiances plus basses, ce qui change le seuil d'automatisation de la section 6.",
+                _md(
+                    "## 4. Rééquilibrage : ce que la classe minoritaire coûte\n\n"
+                    "Le manifeste utilise `class_weight='balanced'`. On mesure ce que ce choix apporte — et "
+                    "ce qu'il coûte — en comparant les deux réglages sur le même split, à algorithme "
+                    "égal et au budget de la comparaison de la section 3 : l'écart se lit entre les "
+                    "deux lignes, pas contre les valeurs publiées au budget du manifeste."
+                ),
+                _text(
+                    """
+    from src.models import build_model
+    from src.training.metrics import classification_metrics, per_class_frame
+
+    weighting_rows = {}
+    for label, class_weight in (("balanced", "balanced"), ("sans rééquilibrage", None)):
+        candidate = build_model(
+            CONFIG,
+            algorithm=reference,
+            # Budget de la comparaison de la section 3 (une stack entraînée par époques n'en reçoit
+            # que __COMPARISON_EPOCHS__) : deux entraînements au budget complet du manifeste
+            # dépasseraient la limite de temps d'une cellule sur une machine chargée.
+            params={
+                **__COMPARISON_PARAMS__,
+                "__CLASS_WEIGHT_BLOCK__": {"class_weight": class_weight},
+            },
+        )
+        candidate.fit(TRAIN, target=TARGET_COLUMN)
+        probabilities = candidate.predict_proba(VALIDATION[TEXT_COLUMN].astype(str).tolist())
+        predicted = np.asarray(candidate.labels)[probabilities.argmax(axis=1)]
+        scores = classification_metrics(
+            validation_truth, predicted, confidences=probabilities.max(axis=1),
+            labels=list(candidate.labels),
+        )
+        per_class = per_class_frame(
+            validation_truth, pd.Series(predicted), labels=list(candidate.labels)
+        ).set_index("class")
+        weighting_rows[label] = {
+            "F1 macro": round(scores["macro_f1"], 4),
+            "exactitude": round(scores["accuracy"], 4),
+            f"rappel {MINORITY_LABEL}": round(float(per_class.loc[MINORITY_LABEL, "recall"]), 4),
+            f"rappel {MAJORITY_LABEL}": round(float(per_class.loc[MAJORITY_LABEL, "recall"]), 4),
+        }
+    weighting = pd.DataFrame(weighting_rows).T
+    display(weighting)
+    delta = (
+        weighting.loc["balanced", f"rappel {MINORITY_LABEL}"]
+        - weighting.loc["sans rééquilibrage", f"rappel {MINORITY_LABEL}"]
+    )
+    print(f"écart de rappel sur la classe {MINORITY_LABEL} : {delta:+.4f}")
+    """,
+                    context,
+                ),
+                _insight(
+                    [
+                        "Le rééquilibrage déplace du rappel de la classe majoritaire vers la classe rare : "
+                        "c'est exactement ce que demande une métrique macro.",
+                        "Sur ce corpus, l'écart est mesuré et **publié** ; sur un corpus où la classe rare "
+                        "serait plus fréquente, le réglage deviendrait moins utile — la question se "
+                        "repose à chaque réentraînement.",
+                        "Le même réglage se lit sur les probabilités : un modèle rééquilibré annonce des "
+                        "confiances plus basses, ce qui change le seuil d'automatisation de la section 6.",
+                    ]
+                ),
+            ]
+            if context.stack.key in CLASS_WEIGHT_BLOCK
+            else [
+                _md(
+                    "## 4. Rééquilibrage : sans objet pour cette stack\n\n"
+                    "Le composant `textcat` de spaCy n'expose pas de pondération des classes : sa "
+                    "perte traite chaque ticket à poids égal. Entraîner deux fois le même modèle "
+                    "publierait un écart nul et le présenterait comme une mesure. Le coût de la "
+                    "classe minoritaire se lit donc directement dans la ventilation par classe du "
+                    "notebook 06 (rappel de la classe « autre »)."
+                )
             ]
         ),
         _md(
@@ -1855,8 +1887,9 @@ recommendations = [
     "première classe qui souffre quand la distribution des tickets glisse.",
     "Rejouer la ventilation par style après chaque changement de corpus : un écart "
     "canonique / paraphrase qui se réduit est le signe d'un corpus qui s'appauvrit.",
-    "Reporter l'écart entre cette variante et `with-transformers` à chaque réentraînement : il "
-    "mesure si le corpus a grossi au point de justifier un encodeur, au lieu de le supposer.",
+    "Reporter l'écart entre les variantes de la famille (lexicale, spaCy, encodeur) à chaque "
+    "réentraînement : il mesure si le corpus a grossi au point de justifier un encodeur, au lieu "
+    "de le supposer.",
     "Relire les erreurs les plus confiantes avant toute mise en production : c'est là que se "
     "cachent les tournures ambiguës, pas dans les erreurs de faible confiance.",
 ]
@@ -1871,9 +1904,9 @@ for position, line in enumerate(recommendations, start=1):
                 "erreurs, recommandations — avec des chiffres, jamais des adjectifs.",
                 "La conclusion honnête de ce projet est un couple : « excellent sur les tickets qui "
                 "emploient le vocabulaire de leur classe, mesuré sur les paraphrases ».",
-                "Toute la suite du dépôt (variante `transformers`, fusion des deux stacks) se juge "
-                "sur le même protocole : corpus identique, splits identiques, test lu une seule "
-                "fois.",
+                "Les trois variantes de la famille (`tfidf_classifier`, `spacy_textcat`, "
+                "`transformers`) et toute fusion future se jugent sur le même protocole : corpus "
+                "identique, splits identiques, test lu une seule fois.",
             ]
         ),
     ]
