@@ -96,7 +96,7 @@ text_classification:
   description: >-
     Classer des documents courts (tickets support, avis clients). Représentations :
     TF-IDF, embeddings, transformers. Métriques : macro-F1, accuracy, matrice de confusion.
-  allowed_stacks: [tfidf_classifier, transformers]
+  allowed_stacks: [tfidf_classifier, transformers, spacy_textcat]
 
 named_entity_recognition:
   display_name: "Reconnaissance d'entités nommées (NER)"

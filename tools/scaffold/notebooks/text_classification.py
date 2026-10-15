@@ -611,8 +611,9 @@ for text in TRAIN.loc[TRAIN["style"] == "canonique", "text"].head(5):
                 "peut pas venir d'un gabarit mémorisé.",
                 "La réserve est un paramètre du corpus (`data.corpus.phrasing_holdout`), pas une "
                 "constante cachée dans le générateur.",
-                "C'est cette propriété qui rend la comparaison avec la variante `transformers` "
-                "honnête : les deux modèles sont jugés sur les mêmes tournures inédites.",
+                "C'est cette propriété qui rend honnête la comparaison des variantes de la famille "
+                "(`tfidf_classifier`, `spacy_textcat`, `transformers`) : tous les modèles sont jugés "
+                "sur les mêmes tournures inédites.",
             ]
         ),
     ]
@@ -1855,8 +1856,9 @@ recommendations = [
     "première classe qui souffre quand la distribution des tickets glisse.",
     "Rejouer la ventilation par style après chaque changement de corpus : un écart "
     "canonique / paraphrase qui se réduit est le signe d'un corpus qui s'appauvrit.",
-    "Reporter l'écart entre cette variante et `with-transformers` à chaque réentraînement : il "
-    "mesure si le corpus a grossi au point de justifier un encodeur, au lieu de le supposer.",
+    "Reporter l'écart entre les variantes de la famille (lexicale, spaCy, encodeur) à chaque "
+    "réentraînement : il mesure si le corpus a grossi au point de justifier un encodeur, au lieu "
+    "de le supposer.",
     "Relire les erreurs les plus confiantes avant toute mise en production : c'est là que se "
     "cachent les tournures ambiguës, pas dans les erreurs de faible confiance.",
 ]
@@ -1871,9 +1873,9 @@ for position, line in enumerate(recommendations, start=1):
                 "erreurs, recommandations — avec des chiffres, jamais des adjectifs.",
                 "La conclusion honnête de ce projet est un couple : « excellent sur les tickets qui "
                 "emploient le vocabulaire de leur classe, mesuré sur les paraphrases ».",
-                "Toute la suite du dépôt (variante `transformers`, fusion des deux stacks) se juge "
-                "sur le même protocole : corpus identique, splits identiques, test lu une seule "
-                "fois.",
+                "Les trois variantes de la famille (`tfidf_classifier`, `spacy_textcat`, "
+                "`transformers`) et toute fusion future se jugent sur le même protocole : corpus "
+                "identique, splits identiques, test lu une seule fois.",
             ]
         ),
     ]

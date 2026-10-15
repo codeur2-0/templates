@@ -14,7 +14,7 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**39 projets** — 29 sur sept familles tabulaires (sections 1.1 à 1.7) et 10 sur les six familles
+**40 projets** — 29 sur sept familles tabulaires (sections 1.1 à 1.7) et 11 sur les six familles
 texte `ai-eng/rag` (section 1.8), `ai-eng/question-answering` (section 1.9), `ai-eng/embeddings`
 (section 1.10), `ai-eng/text-classification` (section 1.11), `ai-eng/named-entity-recognition`
 (section 1.12) et `nlp/summarization` (section 1.13) — tous verts dans
@@ -457,7 +457,7 @@ autres écritures d'un fait, et la suite de tests l'affirme pour **toutes** les 
 pré-entraîné, aucun téléchargement, aucun appel réseau : l'index est appris sur le corpus, à graine
 fixée, et le `n_components` publié est celui que la SVD a réellement produit, pas celui demandé.
 
-### 1.11 `ai-eng/text-classification` — routage de tickets de support, deux stacks
+### 1.11 `ai-eng/text-classification` — routage de tickets de support, trois stacks
 
 Quatrième cas d'usage texte, et le plus proche d'un besoin de service : **attribuer** un ticket à son
 catégorie. Le corpus synthétique compte 1 200 tickets, six catégories (facturation, livraison,
@@ -471,11 +471,12 @@ réservées aux splits d'évaluation : une F1 élevée ne peut pas venir d'un ga
 
 | Projet | Stack | Modèle | F1 macro (test) | Exactitude | Kappa | ECE | F1 canonique / paraphrase | Latence p95 | Ajustement |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| [`with-tfidf_classifier`](ai-eng/text-classification/with-tfidf_classifier) | scikit-learn (TF-IDF, classification de texte) | régression logistique multinomiale sur TF-IDF | **0,8408** | **0,8531** | **0,8217** | 0,2363 | 0,9262 / 0,7352 | **0,78 ms** | 0,4 s |
+| [`with-tfidf_classifier`](ai-eng/text-classification/with-tfidf_classifier) | scikit-learn (TF-IDF, classification de texte) | régression logistique multinomiale sur TF-IDF | **0,8408** | **0,8531** | **0,8217** | 0,2363 | 0,9262 / 0,7352 | 0,78 ms | **0,4 s** |
 | [`with-transformers`](ai-eng/text-classification/with-transformers) | Hugging Face Transformers (entraîné sur le corpus) | encodeur BERT minuscule (2 couches, 344 582 paramètres) | 0,7942 | 0,7853 | 0,7426 | **0,2099** | 0,7892 / **0,8285** | 2,22 ms | ≈ 150 s |
+| [`with-spacy_textcat`](ai-eng/text-classification/with-spacy_textcat) | spaCy (pipeline vierge, `textcat`) | sac de n-grammes haché `TextCatBOW` (1 572 870 paramètres) | 0,8246 | 0,8192 | 0,7819 | 0,2582 | 0,841 / 0,823 | **0,54 ms** | 7,9 s |
 
-Les deux projets partagent le corpus, les six classes, le découpage (719 / 243 / 61 / 177 tickets) et
-le seuil contractuel (`macro_f1 >= 0,70`) : l'écart entre les deux colonnes est donc un résultat, pas
+Les trois projets partagent le corpus, les six classes, le découpage (719 / 243 / 61 / 177 tickets) et
+le seuil contractuel (`macro_f1 >= 0,70`) : l'écart entre les trois lignes est donc un résultat, pas
 un artefact de protocole. Le classifieur lexical apprend un poids par terme et par classe, expose ses
 poids — chaque décision se relit terme à terme — et reste la meilleure moyenne du dépôt sur ce
 corpus (0,8408). La variante neuronale apprend son vocabulaire WordPiece et ses poids **sur le
@@ -498,6 +499,20 @@ converger un sac d'embeddings, et les réglages gagnants de la grille sont deven
 stack. Coût assumé : trois secondes d'ajustement pour le sac d'embeddings (~18 000 paramètres)
 contre environ deux minutes et demie pour l'encodeur servi (344 582 paramètres, mesuré entre 136 s et
 150 s selon la charge de la machine).
+
+La troisième variante, **spaCy**, part d'un pipeline vierge (`spacy.blank("fr")` : le tokeniseur
+à règles, aucun modèle ni vecteur téléchargé) et entraîne son composant `textcat` sur les 719
+tickets. Trois architectures natives ont été comparées en validation sur trois graines : le sac de
+n-grammes haché **0,8411 ± 0,000**, l'encodeur de jetons réduit 0,8621 ± 0,017, l'ensemble par
+défaut de spaCy 0,6869 ± 0,048. L'encodeur gagne en moyenne, mais de moins de deux fois sa
+dispersion : c'est le sac de n-grammes, identique d'une graine à l'autre, qui est servi. Deux
+lectures en sortent. La variante spaCy est **la plus régulière des trois sur les styles** — 0,841
+sur le canonique, 0,823 sur les paraphrases — là où le TF-IDF chute de 0,19 et où l'encodeur fait
+l'inverse. Et elle est **sous-confiante** (confiance moyenne 0,561 pour 0,819 d'exactitude), quand
+l'encodeur est sur-confiant (0,975 pour 0,785) : deux écarts de calibration voisins (0,258 et
+0,210), de signes opposés, qui appellent tous deux une recalibration sur le split `calibration`
+avant de router sur la confiance. Le défaut de spaCy, `TextCatEnsemble`, ne converge pas sur un
+corpus de cette taille : le résultat est publié, comme celui de l'encodeur à quatre couches.
 
 ### 1.12 `ai-eng/named-entity-recognition` — extraction d'entités dans les messages clients, spaCy
 
@@ -829,21 +844,21 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **39/39 projets conformes**, dans un même environnement (Python 3.12,
-PyTorch 2.14, TensorFlow 2.21, spaCy 3.8, transformers 5.19, MLflow 3.16) — **5 992 tests** au total :
+État au dernier passage : **40/40 projets conformes**, dans un même environnement (Python 3.12,
+PyTorch 2.14, TensorFlow 2.21, spaCy 3.8, transformers 5.19, MLflow 3.16) — **6 115 tests** au total :
 165 par projet tabulaire, 187 pour les projets multi-classes, 183 pour le projet MLflow, de 76 à 127
 pour les projets texte.
 
-- Les **10 projets texte** et les **2 projets apportés par l'intégration** (`recommendation/with-pytorch`,
-  `classification/with-mlflow`) ont été rejoués intégralement : ruff check, ruff format, mypy strict,
-  pytest, six notebooks exécutés, `python -m src.main mode=all`.
-- Les **27 autres projets tabulaires**, dont le code généré n'a changé que par un commentaire de
-  `pyproject.toml` et le traceur neutre `src/tracking`, ont été rejoués en lint, typage et tests ;
-  leur dernier passage intégral reste la référence pour les notebooks et le pipeline.
-- **Instabilités observées puis rejouées avec succès** : trois noyaux Jupyter qui n'ont pas démarré
-  sous charge (`nbclient` : `assert self.km is not None`, sans lien avec le code des notebooks), et
-  le test `rag/with-langchain::test_evaluate_reuses_the_threshold_learned_by_train`, en échec une
-  fois sur trois exécutions — un test instable à surveiller.
+- Dernier ajout, `text-classification/with-spacy_textcat`, et les deux autres variantes de sa famille
+  (dont la prose des notebooks a changé) : rejoués intégralement — ruff check, ruff format, mypy
+  strict, pytest, six notebooks exécutés, `python -m src.main mode=all`.
+- Les 37 autres projets ont été rejoués au passage précédent (intégration de la reco PyTorch et du
+  projet MLflow) : les 12 projets texte et intégrés intégralement, les 27 autres projets tabulaires
+  en lint, typage et tests ; leur code généré est inchangé depuis.
+- **Instabilités observées puis rejouées avec succès** : des noyaux Jupyter qui n'ont pas démarré ou
+  ont échoué sous charge (`nbclient`), dont un `01_eda` de `with-transformers` passé en 37 s à la
+  relance, et le test `rag/with-langchain::test_evaluate_reuses_the_threshold_learned_by_train`, en
+  échec une fois sur trois exécutions — un test instable à surveiller.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
 reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capture d'écran.
@@ -876,10 +891,10 @@ d'un coup. Le contrôle des 35 projets porte donc, aujourd'hui, sur tout sauf `s
 ## 7. Feuille de route
 
 État du générateur : `registry/families.yaml` déclare **29 familles** et `registry/stacks.yaml`
-**22 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
+**23 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
 `task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval,text_multiclass,named_entity_recognition,summarization}/`,
 `family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering,embedding_pipeline,text_classification,named_entity_recognition,summarization}/`
-et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,mlflow,tfidf,tfidf_classifier,langchain,embedding,transformers,spacy,seq2seq}/`
+et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,mlflow,tfidf,tfidf_classifier,langchain,embedding,transformers,spacy,spacy_textcat,seq2seq}/`
 sont écrites et vérifiées : les **sept familles tabulaires**, la **famille RAG** (section 1.8), la
 **famille questions-réponses** (section 1.9), la **famille d'index d'embeddings** (section 1.10), la
 **famille de classification de texte** (section 1.11), la **famille d'extraction d'entités nommées**

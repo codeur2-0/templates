@@ -1,0 +1,37 @@
+# =================================================================================================
+# Modèle : spaCy TextCatBOW (sac de n-grammes haché, couche linéaire) sur un pipeline vierge
+# -------------------------------------------------------------------------------------------------
+# Le sac de n-grammes de spaCy hache les unigrammes et les bigrammes du ticket dans une table fixe
+# et apprend une couche linéaire par classe : pas de vocabulaire à construire, pas de mot hors
+# vocabulaire, et un entraînement de huit secondes sur 719 tickets. Il a été préféré à l'encodeur
+# de jetons (`textcat_reduce`) au terme d'une comparaison sur trois graines, et non par intuition
+# : l'encodeur fait mieux en moyenne (0,8621 contre 0,8411 en validation), mais son avance est
+# inférieure à deux fois sa dispersion entre graines (0,017), alors que le sac de n-grammes donne
+# exactement le même modèle quelle que soit la graine. La règle du dépôt tranche alors sur la
+# stabilité. La limite est mesurée : le modèle est **sous-confiant** — confiance moyenne 0,561
+# pour une exactitude de 0,819 en test, d'où un écart de calibration de 0,258 — et il ne faut donc
+# pas router automatiquement sur sa confiance brute sans la recalibrer sur le split `calibration`
+# que la famille réserve à cet usage. Chaque décision s'explique par occlusion (le terme est
+# retiré du ticket, la baisse de probabilité est publiée), comme la variante transformers.
+#
+# Alternatives considérées : `textcat_reduce` (encodeur de jetons : plongements hachés sur la forme, le préfixe et le suffixe, convolution, moyenne et maximum) : 0,8621 de F1 macro en validation, la meilleure moyenne de la stack, mais avec une dispersion de 0,017 entre graines ; son avance de 0,021 sur le sac de n-grammes reste sous deux fois cette dispersion. C'est le choix à refaire quand le corpus grossit., `textcat_ensemble` (architecture par défaut de spaCy, sac de n-grammes + encodeur) : 0,6869 de F1 macro en validation au mieux (taux 0,003), dispersion 0,048 — sur 719 tickets, l'ensemble ne converge pas vers la qualité de ses deux composantes prises séparément. Résultat négatif publié, que le notebook 04 reproduit., Variante `with-tfidf_classifier` : même corpus, mêmes splits ; meilleure moyenne de la famille (0,8408 en test), explicable terme à terme, mais très dépendante du vocabulaire (0,926 sur le canonique, 0,735 sur les paraphrases)., Variante `with-transformers` : encodeur appris sur le corpus, meilleur sur les paraphrases (0,8285) mais deux minutes et demie d'entraînement et une sur-confiance marquée (0,975 de confiance moyenne pour 0,785 d'exactitude)., Pipeline spaCy pré-entraîné (`fr_core_news_md`, vecteurs de mots) : hors périmètre, parce que le projet interdit tout téléchargement de modèle à l'exécution..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.language=...
+# =================================================================================================
+
+name: "spaCy TextCatBOW (sac de n-grammes haché, couche linéaire) sur un pipeline vierge"
+algorithm: textcat_bow
+class: SpacyTextClassifier
+task: multiclass
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `SpacyTextClassifier(params=...)` (voir src/models/model.py).
+params:
+  language: fr
+
+# --- options spécifiques à la stack `spacy_textcat` ---------------------------------------
+text_column: text

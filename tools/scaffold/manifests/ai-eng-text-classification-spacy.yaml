@@ -1,0 +1,109 @@
+# ==============================================================================================
+# ai-eng / text-classification / with-spacy_textcat
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/text_classification.yaml` (routage de tickets de support).
+# Même corpus, mêmes splits, mêmes métriques que les variantes `with-tfidf_classifier` et
+# `with-transformers` : c'est ce qui rend l'écart entre les trois variantes lisible. Ce manifeste ne
+# décrit QUE ce qui change — un pipeline spaCy vierge et son composant `textcat`, entraînés sur le
+# corpus, sans aucun modèle ni vecteur téléchargé.
+# ==============================================================================================
+
+key: ai-eng-text-classification-spacy
+title: "Routage de tickets de support par un pipeline spaCy entraîné sur le corpus"
+summary: >-
+  Le même corpus que les variantes `with-tfidf_classifier` et `with-transformers` — 1 200
+  tickets, six catégories, trois styles rédactionnels, une classe « autre » sans vocabulaire
+  propre — confié à un pipeline spaCy **vierge** (`spacy.blank("fr")`, tokeniseur à règles, aucun
+  modèle téléchargé) et à son composant `textcat`. Trois architectures natives ont été comparées sur
+  le split de validation, sur trois graines : le sac de n-grammes haché atteint 0,8411 de F1 macro
+  avec une dispersion nulle, l'encodeur de jetons réduit 0,8621 avec une dispersion de 0,017,
+  l'ensemble par défaut de spaCy seulement 0,6869. L'avance de l'encodeur est inférieure à deux fois
+  sa dispersion : le sac de n-grammes, reproductible à l'identique, est servi. Résultat publié : sur
+  le split de test il obtient 0,8246 de F1 macro, entre la variante lexicale (0,8408) et l'encodeur
+  (0,7942), et il est **la plus régulière des trois** sur les styles — 0,841 sur les tickets
+  canoniques, 0,823 sur les paraphrases, là où le TF-IDF passe de 0,926 à 0,735.
+
+family: text_classification
+domain: ai-eng
+problem: text-classification
+stack: spacy_textcat
+project_slug: tickets-routage-spacy
+package_name: tickets_routage_spacy
+
+business:
+  # Mesures du run de référence (`python -m src.main mode=all`, graine 42, 1 200 tickets, split de
+  # test de 177 tickets) : mêmes lignes et même protocole que les deux autres variantes.
+  measured_results:
+    - label: "F1 macro sur le split de test (six classes, chacune pesant pareil)"
+      value: "0,8246"
+    - label: "F1 macro en validation (le split qui a choisi l'architecture)"
+      value: "0,8411"
+    - label: "Trois architectures, F1 macro en validation (3 graines : moyenne ± écart-type)"
+      value: "sac 0,8411 ± 0,000 / encodeur réduit 0,8621 ± 0,017 / ensemble 0,6869 ± 0,048"
+    - label: "Exactitude / exactitude équilibrée / kappa de Cohen (test)"
+      value: "0,8192 / 0,8194 / 0,7819"
+    - label: "Segments canonique (93 tickets) / paraphrase (52) / bruité (32), F1 macro"
+      value: "0,841 / 0,823 / 0,721"
+    - label: "Écart canonique moins paraphrase, comparé aux deux autres variantes"
+      value: "0,018 (TF-IDF 0,191 ; encodeur -0,039)"
+    - label: "Confiance moyenne contre exactitude (écart de calibration)"
+      value: "0,561 contre 0,819 (ECE 0,258) : modèle sous-confiant"
+    - label: "Latence p50 / p95 d'une prédiction"
+      value: "0,17 ms / 0,54 ms"
+    - label: "Ajustement du modèle servi (719 tickets, 8 époques)"
+      value: "7,9 s"
+
+model:
+  display_name: "spaCy TextCatBOW (sac de n-grammes haché, couche linéaire) sur un pipeline vierge"
+  algorithm: textcat_bow
+  rationale: >-
+    Le sac de n-grammes de spaCy hache les unigrammes et les bigrammes du ticket dans une table
+    fixe et apprend une couche linéaire par classe : pas de vocabulaire à construire, pas de mot
+    hors vocabulaire, et un entraînement de huit secondes sur 719 tickets. Il a été préféré à
+    l'encodeur de jetons (`textcat_reduce`) au terme d'une comparaison sur trois graines, et non par
+    intuition : l'encodeur fait mieux en moyenne (0,8621 contre 0,8411 en validation), mais son
+    avance est inférieure à deux fois sa dispersion entre graines (0,017), alors que le sac de
+    n-grammes donne exactement le même modèle quelle que soit la graine. La règle du dépôt tranche
+    alors sur la stabilité. La limite est mesurée : le modèle est **sous-confiant** — confiance
+    moyenne 0,561 pour une exactitude de 0,819 en test, d'où un écart de calibration de 0,258 — et
+    il ne faut donc pas router automatiquement sur sa confiance brute sans la recalibrer sur le split
+    `calibration` que la famille réserve à cet usage. Chaque décision s'explique par occlusion (le
+    terme est retiré du ticket, la baisse de probabilité est publiée), comme la variante transformers.
+  params:
+    language: fr
+  alternatives:
+    - "`textcat_reduce` (encodeur de jetons : plongements hachés sur la forme, le préfixe et le suffixe, convolution, moyenne et maximum) : 0,8621 de F1 macro en validation, la meilleure moyenne de la stack, mais avec une dispersion de 0,017 entre graines ; son avance de 0,021 sur le sac de n-grammes reste sous deux fois cette dispersion. C'est le choix à refaire quand le corpus grossit."
+    - "`textcat_ensemble` (architecture par défaut de spaCy, sac de n-grammes + encodeur) : 0,6869 de F1 macro en validation au mieux (taux 0,003), dispersion 0,048 — sur 719 tickets, l'ensemble ne converge pas vers la qualité de ses deux composantes prises séparément. Résultat négatif publié, que le notebook 04 reproduit."
+    - "Variante `with-tfidf_classifier` : même corpus, mêmes splits ; meilleure moyenne de la famille (0,8408 en test), explicable terme à terme, mais très dépendante du vocabulaire (0,926 sur le canonique, 0,735 sur les paraphrases)."
+    - "Variante `with-transformers` : encodeur appris sur le corpus, meilleur sur les paraphrases (0,8285) mais deux minutes et demie d'entraînement et une sur-confiance marquée (0,975 de confiance moyenne pour 0,785 d'exactitude)."
+    - "Pipeline spaCy pré-entraîné (`fr_core_news_md`, vecteurs de mots) : hors périmètre, parce que le projet interdit tout téléchargement de modèle à l'exécution."
+
+train:
+  epochs: 8
+  callbacks:
+    progress_bar: false
+  early_stopping:
+    enabled: false
+
+extras:
+  data_conf:
+    corpus:
+      reference_date: "2025-03-03"
+      style_shares:
+        canonique: 0.5
+        paraphrase: 0.3
+        bruite: 0.2
+      split_shares:
+        train: 0.6
+        val: 0.2
+        calibration: 0.05
+        test: 0.15
+      # Formulations réservées aux splits d'évaluation, par couple (classe, style) : identiques à
+      # celles des deux autres variantes, sans quoi elles ne mesureraient pas le même test.
+      phrasing_holdout: 2
+  model_conf:
+    text_column: text
+  root_conf:
+    train:
+      artifacts:
+        model_file: classifier.joblib

@@ -275,6 +275,7 @@ directe (qualité, temps d'entraînement, lisibilité du code) :
 
 - `../../with-tfidf_classifier/` — tfidf_classifier
 - `../../with-transformers/` — transformers
+- `../../with-spacy_textcat/` — spacy_textcat
 
 ---
 
@@ -603,4 +604,4 @@ Pour rejouer une configuration exacte : Hydra sauvegarde la config composée dan
 Code fourni à des fins pédagogiques, licence MIT. Pour proposer une amélioration : conserver la
 structure imposée, ajouter des tests, mettre à jour ce README et vérifier `make verify`.
 
-*Dernière génération : 2026-10-06 · projet `ai-eng-text-classification-transformers`*
+*Dernière génération : 2026-10-15 · projet `ai-eng-text-classification-transformers`*
