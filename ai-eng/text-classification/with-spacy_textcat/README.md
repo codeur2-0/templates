@@ -19,13 +19,14 @@ Le même corpus que les variantes `with-tfidf_classifier` et `with-transformers`
 catégories, trois styles rédactionnels, une classe « autre » sans vocabulaire propre — confié à un
 pipeline spaCy **vierge** (`spacy.blank("fr")`, tokeniseur à règles, aucun modèle téléchargé) et à
 son composant `textcat`. Trois architectures natives ont été comparées sur le split de validation,
-sur trois graines : le sac de n-grammes haché atteint 0,8411 de F1 macro avec une dispersion nulle,
-l'encodeur de jetons réduit 0,8621 avec une dispersion de 0,017, l'ensemble par défaut de spaCy
-seulement 0,6869. L'avance de l'encodeur est inférieure à deux fois sa dispersion : le sac de
-n-grammes, reproductible à l'identique, est servi. Résultat publié : sur le split de test il obtient
-0,8246 de F1 macro, entre la variante lexicale (0,8408) et l'encodeur (0,7942), et il est **la plus
-régulière des trois** sur les styles — 0,841 sur les tickets canoniques, 0,823 sur les paraphrases,
-là où le TF-IDF passe de 0,926 à 0,735.
+au protocole du projet et sur cinq graines : le sac de n-grammes haché plafonne à 0,841 de F1 macro
+dès la septième époque, avec la même valeur sur les cinq graines ; l'encodeur de jetons réduit
+atteint au mieux 0,8177 (écart-type 0,011) et l'ensemble par défaut de spaCy 0,7882 (écart-type
+0,069). L'avance du sac de n-grammes dépasse deux fois la dispersion de l'encodeur : c'est un
+résultat, et c'est lui qui est servi. Sur le split de test, il obtient 0,8246 de F1 macro, derrière
+la variante lexicale (0,8408). Son trait distinctif est l'écart entre styles : 0,841 sur les tickets
+canoniques, 0,823 sur les paraphrases (le TF-IDF passe de 0,926 à 0,735), mais 0,721 sur les tickets
+bruités, son point faible.
 
 Le support reçoit 1 200 tickets par semaine par quatre canaux (formulaire, courriel, chat,
 courrier). Aujourd'hui, chaque ticket est lu par un conseiller qui le réaffecte à la main au bon
@@ -464,13 +465,13 @@ Résultats de l'exécution de référence (`make all`, graine 42) :
 | --- | --- |
 | F1 macro sur le split de test (six classes, chacune pesant pareil) | **0,8246** |
 | F1 macro en validation (le split qui a choisi l'architecture) | **0,8411** |
-| Trois architectures, F1 macro en validation (3 graines : moyenne ± écart-type) | **sac 0,8411 ± 0,000 / encodeur réduit 0,8621 ± 0,017 / ensemble 0,6869 ± 0,048** |
+| Trois architectures, meilleure F1 macro en validation (5 graines, lots de 64) | **sac 0,841 ± 0,000 / encodeur réduit 0,8177 ± 0,011 / ensemble 0,7882 ± 0,069** |
 | Exactitude / exactitude équilibrée / kappa de Cohen (test) | **0,8192 / 0,8194 / 0,7819** |
 | Segments canonique (93 tickets) / paraphrase (52) / bruité (32), F1 macro | **0,841 / 0,823 / 0,721** |
-| Écart canonique moins paraphrase, comparé aux deux autres variantes | **0,018 (TF-IDF 0,191 ; encodeur -0,039)** |
+| Écart canonique moins paraphrase (TF-IDF : 0,191) | **0,018** |
 | Confiance moyenne contre exactitude (écart de calibration) | **0,561 contre 0,819 (ECE 0,258) : modèle sous-confiant** |
-| Latence p50 / p95 d'une prédiction | **0,17 ms / 0,54 ms** |
-| Ajustement du modèle servi (719 tickets, 8 époques) | **7,9 s** |
+| Latence médiane / p95 d'une prédiction (selon la charge) | **0,2 à 0,6 ms / 0,5 à 1,4 ms** |
+| Ajustement du modèle servi (719 tickets, 8 époques, selon la charge) | **8 à 12 s** |
 
 Ces valeurs sont reproductibles à l'identique ; elles proviennent du split de test, jamais
 du split d'entraînement, et le détail complet est dans `artifacts/reports/evaluation_report.md`.

@@ -2,16 +2,17 @@
 
 Le sac de n-grammes de spaCy hache les unigrammes et les bigrammes du ticket dans une table fixe
 et apprend une couche linéaire par classe : pas de vocabulaire à construire, pas de mot hors
-vocabulaire, et un entraînement de huit secondes sur 719 tickets. Il a été préféré à l'encodeur
-de jetons (`textcat_reduce`) au terme d'une comparaison sur trois graines, et non par intuition
-: l'encodeur fait mieux en moyenne (0,8621 contre 0,8411 en validation), mais son avance est
-inférieure à deux fois sa dispersion entre graines (0,017), alors que le sac de n-grammes donne
-exactement le même modèle quelle que soit la graine. La règle du dépôt tranche alors sur la
-stabilité. La limite est mesurée : le modèle est **sous-confiant** — confiance moyenne 0,561
-pour une exactitude de 0,819 en test, d'où un écart de calibration de 0,258 — et il ne faut donc
-pas router automatiquement sur sa confiance brute sans la recalibrer sur le split `calibration`
-que la famille réserve à cet usage. Chaque décision s'explique par occlusion (le terme est
-retiré du ticket, la baisse de probabilité est publiée), comme la variante transformers.
+vocabulaire, et un ajustement d'une dizaine de secondes sur 719 tickets. Il a été choisi au
+terme d'une étude rejouable (`scripts/architecture_study.py`) faite au protocole du projet —
+lots de 64, défauts du registre pour chaque architecture, split de validation, cinq graines : il
+plafonne à 0,841 de F1 macro dès la septième époque, avec la même valeur sur les cinq graines,
+quand l'encodeur de jetons réduit atteint au mieux 0,8177 (écart-type 0,011). L'avance (0,023)
+dépasse deux fois la dispersion de l'encodeur : c'est un écart réel, pas un tirage. Le budget de
+huit époques se place sur ce plateau. La limite est mesurée : le modèle est **sous-confiant** —
+confiance moyenne 0,561 pour une exactitude de 0,819 en test, d'où un écart de calibration de
+0,258 — et il ne faut donc pas router automatiquement sur sa confiance brute sans la recalibrer
+sur le split `calibration` que la famille réserve à cet usage. Chaque décision s'explique par
+occlusion : le jeton est retiré du ticket, et la baisse de probabilité est publiée.
 
 La fabrique est le seul endroit où la configuration devient un objet :
 
@@ -82,7 +83,8 @@ ALGORITHMS: dict[str, AlgorithmSpec] = {
         default_params={
             "architecture": "bow",
             "network": {"ngram_size": 2, "length": 262144},
-            "training": {"dropout": 0.2, "batch_size": 16, "learning_rate": 0.001},
+            # Le sac de n-grammes n'a aucune couche de dropout : le régler ne changerait rien.
+            "training": {"dropout": 0.0, "learning_rate": 0.001},
         },
         rationale=(
             "Le sac de n-grammes de spaCy : unigrammes et bigrammes hachés, une couche linéaire, "
@@ -96,7 +98,7 @@ ALGORITHMS: dict[str, AlgorithmSpec] = {
         default_params={
             "architecture": "reduce",
             "network": {"width": 64, "depth": 2, "embed_rows": 2000, "window_size": 1},
-            "training": {"dropout": 0.2, "batch_size": 16, "learning_rate": 0.001},
+            "training": {"dropout": 0.2, "learning_rate": 0.001},
         },
         rationale=(
             "Un encodeur de jetons appris sur le corpus : plongements hachés sur la forme "
@@ -118,7 +120,7 @@ ALGORITHMS: dict[str, AlgorithmSpec] = {
                 "embed_rows": 2000,
                 "window_size": 1,
             },
-            "training": {"dropout": 0.2, "batch_size": 16, "learning_rate": 0.003},
+            "training": {"dropout": 0.2, "learning_rate": 0.003},
         },
         rationale=(
             "L'architecture par défaut de spaCy : le sac de n-grammes et l'encodeur de jetons, "
@@ -163,17 +165,21 @@ def build_model(
     data = dict(root.get("data") or {})
 
     configured = dict(node.get("params") or {})
-    effective = dict(configured) if params is None else dict(params)
-    # Les blocs `network` et `training` se fusionnent clé par clé (défaut du registre, puis
-    # configuration, puis surcharge) : une grille qui ne change que `dropout` garde le reste.
+    # `params=None` : chemin de production, la configuration complète les défauts du registre.
+    # `params={}` : défauts du registre **seuls** (comparaison loyale du notebook 04) — la
+    # configuration du modèle servi ne doit pas fuir vers les autres architectures.
+    # Un mapping : surcharge appliquée par-dessus les défauts (grille d'hyper-paramètres).
+    overrides = configured if params is None else dict(params)
+    effective: dict[str, Any] = {
+        key: value for key, value in overrides.items() if key not in {"network", "training"}
+    }
     for block in ("network", "training"):
         merged = dict(spec.default_params.get(block) or {})
-        merged.update(dict(configured.get(block) or {}))
-        merged.update(dict(effective.get(block) or {}))
+        merged.update(dict(overrides.get(block) or {}))
         effective[block] = merged
-    effective["architecture"] = str(
-        effective.get("architecture") or spec.default_params.get("architecture", "bow")
-    )
+    # L'architecture appartient à l'algorithme : `textcat_reduce` construit toujours un encodeur,
+    # quoi que dise un `params.architecture` laissé dans la configuration.
+    effective["architecture"] = str(spec.default_params.get("architecture", "bow"))
     effective.setdefault("language", configured.get("language", "fr"))
     effective.setdefault("model_file", MODEL_FILE)
 

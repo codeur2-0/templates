@@ -727,17 +727,18 @@ class TransformerTextClassifier(BaseTextClassifier):
             One list of ``(term, influence)`` pairs per text, sorted by decreasing influence.
         """
         probabilities = self._predict_proba(texts)
-        candidates = [self._candidate_terms(text) for text in texts]
+        candidates = [self._candidate_tokens(str(text)) for text in texts]
         variants: list[str] = []
         spans: list[tuple[int, int]] = []
-        for text, terms in zip(texts, candidates, strict=True):
+        for text, tokens in zip(texts, candidates, strict=True):
             start = len(variants)
-            variants.extend(self._remove_term(str(text), term) for term in terms)
+            variants.extend(self._remove_token(str(text), index) for _, index in tokens)
             spans.append((start, len(variants)))
         variant_probabilities = self._predict_proba(variants) if variants else None
 
         explanations: list[list[tuple[str, float]]] = []
-        for position, terms in enumerate(candidates):
+        for position, tokens in enumerate(candidates):
+            terms = [term for term, _ in tokens]
             predicted = int(np.argmax(probabilities[position])) if probabilities.size else 0
             baseline = float(probabilities[position, predicted]) if probabilities.size else 0.0
             start, stop = spans[position]
@@ -1136,21 +1137,36 @@ class TransformerTextClassifier(BaseTextClassifier):
         torch.set_num_threads(int(self._training_config.get("threads", 1)))
 
     # ------------------------------------------------------------------ occlusion ---------
-    def _candidate_terms(self, text: str) -> list[str]:
-        """Return the distinct terms of a text, in order of appearance, bounded in number."""
+    def _candidate_tokens(self, text: str) -> list[tuple[str, int]]:
+        """Return the distinct terms of a text with the index of their first whitespace token.
+
+        Args:
+            text: Text to explain.
+
+        Returns:
+            ``(term, token index)`` pairs, in order of appearance, bounded in number.
+        """
         seen: list[str] = []
-        for raw in str(text).split():
+        tokens: list[tuple[str, int]] = []
+        for index, raw in enumerate(str(text).split()):
             term = raw.strip(".,;:!?()[]{}«»\"'")
             if len(term) < 2 or term in seen:
                 continue
             seen.append(term)
-            if len(seen) >= MAX_OCCLUSION_TERMS:
+            tokens.append((term, index))
+            if len(tokens) >= MAX_OCCLUSION_TERMS:
                 break
-        return seen
+        return tokens
 
-    def _remove_term(self, text: str, term: str) -> str:
-        """Return the text with the first occurrence of ``term`` removed."""
-        return text.replace(term, " ", 1)
+    def _remove_token(self, text: str, index: int) -> str:
+        """Return the text without its ``index``-th whitespace token, the others intact.
+
+        Retirer une sous-chaîne serait faux : enlever « mon » de « montant » détruirait un autre
+        mot et lui attribuerait son influence.
+        """
+        return " ".join(
+            token for position, token in enumerate(str(text).split()) if position != index
+        )
 
 
 __all__ = [

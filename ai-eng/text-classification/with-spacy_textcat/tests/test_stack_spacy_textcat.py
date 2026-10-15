@@ -149,11 +149,47 @@ def test_every_architecture_trains_and_scores(documents: pd.DataFrame, algorithm
 
 def test_a_grid_override_keeps_the_other_defaults() -> None:
     """Surcharger le seul `dropout` ne fait pas perdre le reste du bloc `training`."""
-    model = _model(training={"dropout": 0.4})
+    model = _model("textcat_reduce", training={"dropout": 0.4})
 
     assert model.params["training"]["dropout"] == 0.4
-    assert model.params["training"]["batch_size"] == 16
-    assert model.params["architecture"] == "bow"
+    assert model.params["training"]["learning_rate"] == 0.001
+    assert model.params["architecture"] == "reduce"
+
+
+def test_registry_defaults_do_not_leak_between_architectures() -> None:
+    """`params={}` donne les défauts du registre, jamais la configuration du modèle servi."""
+    config = {
+        "model": {"algorithm": "textcat_bow", "params": {"training": {"learning_rate": 0.5}}},
+        "train": {"epochs": EPOCHS},
+    }
+    ensemble = cast(
+        SpacyTextClassifier, build_model(config, algorithm="textcat_ensemble", params={})
+    )
+
+    assert ensemble.params["training"]["learning_rate"] == 0.003
+    assert ensemble.params["architecture"] == "ensemble"
+
+
+def test_an_empty_ticket_gets_a_decision(documents: pd.DataFrame) -> None:
+    """Un ticket vide reçoit une distribution valide au lieu de faire planter l'inférence."""
+    model = _model()
+    model.fit(_train_split(documents))
+
+    probabilities = model.predict_proba(["", "facture en double", "   "])
+
+    assert probabilities.shape == (3, len(model.labels))
+    np.testing.assert_allclose(probabilities.sum(axis=1), np.ones(3), atol=1e-9)
+
+
+def test_occlusion_removes_a_token_not_a_substring(documents: pd.DataFrame) -> None:
+    """Retirer « mon » ne doit pas abîmer « montant » : seul le jeton visé disparaît."""
+    model = _model()
+    model.fit(_train_split(documents))
+    text = "Le montant de mon remboursement"
+
+    variant = model._without_token(text, 3)
+
+    assert variant.split() == ["Le", "montant", "de", "remboursement"]
 
 
 def test_an_unknown_algorithm_is_refused() -> None:

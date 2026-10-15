@@ -471,9 +471,15 @@ réservées aux splits d'évaluation : une F1 élevée ne peut pas venir d'un ga
 
 | Projet | Stack | Modèle | F1 macro (test) | Exactitude | Kappa | ECE | F1 canonique / paraphrase | Latence p95 | Ajustement |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| [`with-tfidf_classifier`](ai-eng/text-classification/with-tfidf_classifier) | scikit-learn (TF-IDF, classification de texte) | régression logistique multinomiale sur TF-IDF | **0,8408** | **0,8531** | **0,8217** | 0,2363 | 0,9262 / 0,7352 | 0,78 ms | **0,4 s** |
-| [`with-transformers`](ai-eng/text-classification/with-transformers) | Hugging Face Transformers (entraîné sur le corpus) | encodeur BERT minuscule (2 couches, 344 582 paramètres) | 0,7942 | 0,7853 | 0,7426 | **0,2099** | 0,7892 / **0,8285** | 2,22 ms | ≈ 150 s |
-| [`with-spacy_textcat`](ai-eng/text-classification/with-spacy_textcat) | spaCy (pipeline vierge, `textcat`) | sac de n-grammes haché `TextCatBOW` (1 572 870 paramètres) | 0,8246 | 0,8192 | 0,7819 | 0,2582 | 0,841 / 0,823 | **0,54 ms** | 7,9 s |
+| [`with-tfidf_classifier`](ai-eng/text-classification/with-tfidf_classifier) | scikit-learn (TF-IDF, classification de texte) | régression logistique multinomiale sur TF-IDF | **0,8408** | **0,8531** | **0,8217** | 0,2363 | 0,9262 / 0,7352 | **0,78 ms** | **0,4 s** |
+| [`with-transformers`](ai-eng/text-classification/with-transformers) | Hugging Face Transformers (entraîné sur le corpus) | encodeur BERT minuscule (2 couches, 344 582 paramètres) | 0,7942 ¹ | 0,7853 ¹ | 0,7426 ¹ | **0,2099** ¹ | 0,7892 / **0,8285** ¹ | 2,22 ms | ≈ 150 s |
+| [`with-spacy_textcat`](ai-eng/text-classification/with-spacy_textcat) | spaCy (pipeline vierge, `textcat`) | sac de n-grammes haché `TextCatBOW` (1 572 870 paramètres) | 0,8246 | 0,8192 | 0,7819 | 0,2582 | 0,841 / 0,823 | 0,5 à 1,4 ms | 8 à 12 s |
+
+¹ Mesures publiées par la PR #7. Rejouée dans l'environnement de référence actuel (transformers
+5.19, torch 2.14), la variante est **déterministe** d'une exécution à l'autre mais donne d'autres
+chiffres : F1 macro 0,7109, exactitude 0,7006, kappa 0,6398, ECE 0,3152, canonique / paraphrase
+0,581 / 0,816. Les dépendances de la stack ne sont pas bornées (`transformers>=4.40`) : l'écart
+suit un changement de version majeure et reste à expliquer avant de figer l'une ou l'autre série.
 
 Les trois projets partagent le corpus, les six classes, le découpage (719 / 243 / 61 / 177 tickets) et
 le seuil contractuel (`macro_f1 >= 0,70`) : l'écart entre les trois lignes est donc un résultat, pas
@@ -502,17 +508,19 @@ contre environ deux minutes et demie pour l'encodeur servi (344 582 paramètres,
 
 La troisième variante, **spaCy**, part d'un pipeline vierge (`spacy.blank("fr")` : le tokeniseur
 à règles, aucun modèle ni vecteur téléchargé) et entraîne son composant `textcat` sur les 719
-tickets. Trois architectures natives ont été comparées en validation sur trois graines : le sac de
-n-grammes haché **0,8411 ± 0,000**, l'encodeur de jetons réduit 0,8621 ± 0,017, l'ensemble par
-défaut de spaCy 0,6869 ± 0,048. L'encodeur gagne en moyenne, mais de moins de deux fois sa
-dispersion : c'est le sac de n-grammes, identique d'une graine à l'autre, qui est servi. Deux
-lectures en sortent. La variante spaCy est **la plus régulière des trois sur les styles** — 0,841
-sur le canonique, 0,823 sur les paraphrases — là où le TF-IDF chute de 0,19 et où l'encodeur fait
-l'inverse. Et elle est **sous-confiante** (confiance moyenne 0,561 pour 0,819 d'exactitude), quand
-l'encodeur est sur-confiant (0,975 pour 0,785) : deux écarts de calibration voisins (0,258 et
-0,210), de signes opposés, qui appellent tous deux une recalibration sur le split `calibration`
-avant de router sur la confiance. Le défaut de spaCy, `TextCatEnsemble`, ne converge pas sur un
-corpus de cette taille : le résultat est publié, comme celui de l'encodeur à quatre couches.
+tickets. Le choix de l'architecture est **rejouable** (`scripts/architecture_study.py` : protocole du
+projet, lots de 64, split de validation, cinq graines) : le sac de n-grammes haché plafonne à
+**0,841** dès la septième époque, avec la même valeur sur les cinq graines ; l'encodeur de jetons
+réduit atteint au mieux 0,8177 ± 0,011, l'ensemble par défaut de spaCy 0,7882 ± 0,069. L'avance du
+sac de n-grammes (0,023) dépasse deux fois la dispersion de l'encodeur : c'est un écart réel. Deux
+lectures en sortent. Sur les deux styles les plus fréquents, la variante spaCy a l'écart le plus
+faible de la famille — 0,841 sur le canonique, 0,823 sur les paraphrases, là où le TF-IDF chute de
+0,19 — mais elle est la plus faible des trois sur les tickets **bruités** (0,721). Et elle est
+**sous-confiante** (confiance moyenne 0,561 pour 0,819 d'exactitude) quand l'encodeur est
+sur-confiant : un écart de calibration de 0,258, qui appelle une recalibration sur le split
+`calibration` avant de router sur la confiance. Le défaut de spaCy, `TextCatEnsemble`, ne retrouve
+pas la qualité de sa meilleure composante sur un corpus de cette taille, et sa dispersion entre
+graines est dix fois celle de l'encodeur seul : le résultat est publié.
 
 ### 1.12 `ai-eng/named-entity-recognition` — extraction d'entités dans les messages clients, spaCy
 

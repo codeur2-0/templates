@@ -72,7 +72,8 @@ ALGORITHMS: dict[str, AlgorithmSpec] = {
         default_params={
             "architecture": "bow",
             "network": {"ngram_size": 2, "length": 262144},
-            "training": {"dropout": 0.2, "batch_size": 16, "learning_rate": 0.001},
+            # Le sac de n-grammes n'a aucune couche de dropout : le régler ne changerait rien.
+            "training": {"dropout": 0.0, "learning_rate": 0.001},
         },
         rationale=(
             "Le sac de n-grammes de spaCy : unigrammes et bigrammes hachés, une couche linéaire, "
@@ -86,7 +87,7 @@ ALGORITHMS: dict[str, AlgorithmSpec] = {
         default_params={
             "architecture": "reduce",
             "network": {"width": 64, "depth": 2, "embed_rows": 2000, "window_size": 1},
-            "training": {"dropout": 0.2, "batch_size": 16, "learning_rate": 0.001},
+            "training": {"dropout": 0.2, "learning_rate": 0.001},
         },
         rationale=(
             "Un encodeur de jetons appris sur le corpus : plongements hachés sur la forme "
@@ -108,7 +109,7 @@ ALGORITHMS: dict[str, AlgorithmSpec] = {
                 "embed_rows": 2000,
                 "window_size": 1,
             },
-            "training": {"dropout": 0.2, "batch_size": 16, "learning_rate": 0.003},
+            "training": {"dropout": 0.2, "learning_rate": 0.003},
         },
         rationale=(
             "L'architecture par défaut de spaCy : le sac de n-grammes et l'encodeur de jetons, "
@@ -153,17 +154,21 @@ def build_model(
     data = dict(root.get("data") or {})
 
     configured = dict(node.get("params") or {})
-    effective = dict(configured) if params is None else dict(params)
-    # Les blocs `network` et `training` se fusionnent clé par clé (défaut du registre, puis
-    # configuration, puis surcharge) : une grille qui ne change que `dropout` garde le reste.
+    # `params=None` : chemin de production, la configuration complète les défauts du registre.
+    # `params={}` : défauts du registre **seuls** (comparaison loyale du notebook 04) — la
+    # configuration du modèle servi ne doit pas fuir vers les autres architectures.
+    # Un mapping : surcharge appliquée par-dessus les défauts (grille d'hyper-paramètres).
+    overrides = configured if params is None else dict(params)
+    effective: dict[str, Any] = {
+        key: value for key, value in overrides.items() if key not in {"network", "training"}
+    }
     for block in ("network", "training"):
         merged = dict(spec.default_params.get(block) or {})
-        merged.update(dict(configured.get(block) or {}))
-        merged.update(dict(effective.get(block) or {}))
+        merged.update(dict(overrides.get(block) or {}))
         effective[block] = merged
-    effective["architecture"] = str(
-        effective.get("architecture") or spec.default_params.get("architecture", "bow")
-    )
+    # L'architecture appartient à l'algorithme : `textcat_reduce` construit toujours un encodeur,
+    # quoi que dise un `params.architecture` laissé dans la configuration.
+    effective["architecture"] = str(spec.default_params.get("architecture", "bow"))
     effective.setdefault("language", configured.get("language", "fr"))
     effective.setdefault("model_file", MODEL_FILE)
 

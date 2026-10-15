@@ -159,8 +159,13 @@ class SpacyTextClassifier(BaseTextClassifier):
     # ------------------------------------------------------------------ contrat ----------
     @property
     def n_features(self) -> int:
-        """Number of trainable parameters of the ``textcat`` model (0 before training)."""
-        return int(self._facts.get("parameters", 0))
+        """Size of the representation the classifier reads (0 before training).
+
+        Le contrat parle de **représentation** : la table de n-grammes hachés pour le sac de
+        n-grammes, la largeur des vecteurs réduits pour l'encodeur, les deux pour l'ensemble. Le
+        nombre de paramètres, lui, est publié à part dans la fiche de modèle.
+        """
+        return int(self._facts.get("representation", 0))
 
     @property
     def labels(self) -> list[str]:
@@ -252,7 +257,8 @@ class SpacyTextClassifier(BaseTextClassifier):
 
         self._facts = {
             "parameters": float(self._count_parameters()),
-            "epochs_run": float(epoch + 1) if epochs else 0.0,
+            "representation": float(self._representation_size()),
+            "epochs_run": float(epoch + 1),
         }
         return {
             f"train_{key}": float(value) for key, value in metrics.items() if key in _TRAIN_METRIC_KEYS
@@ -269,9 +275,13 @@ class SpacyTextClassifier(BaseTextClassifier):
         """
         if not texts:
             return np.zeros((0, len(self._classes)), dtype="float64")
+        # Un document sans aucun jeton fait lever `TextCatBOW` (calcul de n-grammes sur un tampon
+        # vide) : un ticket vide est remplacé par une espace, qui produit un jeton blanc et une
+        # distribution quasi uniforme — la décision la moins informée, pas une exception.
+        cleaned = [str(text) if str(text).strip() else " " for text in texts]
         rows = [
             [float(doc.cats.get(label, 0.0)) for label in self._classes]
-            for doc in self.nlp.pipe([str(text) for text in texts], batch_size=64)
+            for doc in self.nlp.pipe(cleaned, batch_size=64)
         ]
         matrix = np.asarray(rows, dtype="float64")
         # Classes exclusives : la sortie est déjà un softmax. La renormalisation protège seulement
@@ -282,9 +292,10 @@ class SpacyTextClassifier(BaseTextClassifier):
     def _explain(self, texts: Sequence[str], k: int) -> list[list[tuple[str, float]]]:
         """Explain each prediction by occlusion, most influential term first.
 
-        Le terme est retiré du texte, le document amputé est rescanné, et l'influence est la baisse
-        de probabilité de la classe prédite : la même définition que la variante transformers, pour
-        que les deux explications se comparent.
+        Le **jeton** est retiré du texte (le document est reconstruit à partir des jetons spaCy,
+        sans celui-ci), le document amputé est rescanné, et l'influence est la baisse de
+        probabilité de la classe prédite. Retirer une sous-chaîne serait faux : enlever « mon » de
+        « montant » détruirait un autre mot et lui attribuerait son influence.
 
         Args:
             texts: Texts to explain.
@@ -294,17 +305,18 @@ class SpacyTextClassifier(BaseTextClassifier):
             One list of ``(term, influence)`` pairs per text, sorted by decreasing influence.
         """
         probabilities = self._predict_proba(texts)
-        candidates = [self._candidate_terms(str(text)) for text in texts]
+        candidates = [self._candidate_tokens(str(text)) for text in texts]
         variants: list[str] = []
         spans: list[tuple[int, int]] = []
-        for text, terms in zip(texts, candidates, strict=True):
+        for text, tokens in zip(texts, candidates, strict=True):
             start = len(variants)
-            variants.extend(str(text).replace(term, " ", 1) for term in terms)
+            variants.extend(self._without_token(str(text), index) for _, index in tokens)
             spans.append((start, len(variants)))
         scored_variants = self._predict_proba(variants) if variants else None
 
         explanations: list[list[tuple[str, float]]] = []
-        for position, terms in enumerate(candidates):
+        for position, tokens in enumerate(candidates):
+            terms = [term for term, _ in tokens]
             predicted = int(np.argmax(probabilities[position]))
             baseline = float(probabilities[position, predicted])
             start, stop = spans[position]
@@ -327,10 +339,21 @@ class SpacyTextClassifier(BaseTextClassifier):
             "weights": self.nlp.to_bytes(),
             "classes": list(self._classes),
             "facts": dict(self._facts),
+            "spacy_version": spacy.__version__,
         }
 
     def _restore(self, payload: Mapping[str, Any]) -> None:
         """Rebuild the pipeline from its configuration, then load its weights."""
+        saved = str(payload.get("spacy_version", "inconnue"))
+        if saved.split(".")[:2] != spacy.__version__.split(".")[:2]:
+            # Les architectures (`TextCatBOW.v3`, `TextCatReduce.v1`) et le format des poids sont
+            # versionnés par spaCy : un écart de version mineure se signale avant de classer.
+            logger.warning(
+                "Artefact entraîné avec spaCy {} et rechargé avec spaCy {} : vérifier les "
+                "prédictions avant de le servir",
+                saved,
+                spacy.__version__,
+            )
         config = Config().from_str(str(payload["config"]))
         language = spacy.util.get_lang_class(str(config["nlp"]["lang"]))
         nlp = language.from_config(config)
@@ -348,6 +371,9 @@ class SpacyTextClassifier(BaseTextClassifier):
             "batch_size": self._batch_size(),
             "learning_rate": self._learning_rate(),
             "classes": list(self._classes),
+            # La fiche de modèle du socle ne trace que les bibliothèques tabulaires : la version de
+            # spaCy (qui versionne les architectures et le format des poids) est archivée ici.
+            "spacy_version": spacy.__version__,
         }
 
     def _extra_metadata(self) -> dict[str, Any]:
@@ -386,6 +412,15 @@ class SpacyTextClassifier(BaseTextClassifier):
         metrics = classification_metrics(list(labels), predictions, labels=list(self._classes))
         return {key: float(value) for key, value in metrics.items() if key in _TRAIN_METRIC_KEYS}
 
+    def _representation_size(self) -> int:
+        """Return the size of the representation read by the classification layer."""
+        family = str(self.params.get("architecture", "bow"))
+        network = dict(self.params.get("network") or {})
+        hashed = int(network.get("length", 262144))
+        # L'encodeur réduit concatène la moyenne et le maximum des vecteurs de jetons.
+        pooled = 2 * int(network.get("width", 64))
+        return {"bow": hashed, "reduce": pooled, "ensemble": hashed + pooled}.get(family, 0)
+
     def _count_parameters(self) -> int:
         """Count the trainable parameters of the ``textcat`` model."""
         model = self.nlp.get_pipe(_COMPONENT).model  # type: ignore[attr-defined]
@@ -410,11 +445,9 @@ class SpacyTextClassifier(BaseTextClassifier):
         return 10
 
     def _batch_size(self) -> int:
-        """Training batch size (``train.batch_size`` wins, model parameters come second)."""
+        """Training batch size: ``train.batch_size`` (orchestration), else 32."""
         train = dict(self.config.get("train") or {})
-        if train.get("batch_size") is not None:
-            return max(int(train["batch_size"]), 1)
-        return max(int(self._training_config().get("batch_size", 16)), 1)
+        return max(int(train.get("batch_size") or 32), 1)
 
     def _learning_rate(self) -> float:
         """Learning rate: it belongs to the model (``params.training``), then ``train``."""
@@ -437,17 +470,41 @@ class SpacyTextClassifier(BaseTextClassifier):
             callback.on_epoch_end(context)
         return bool(getattr(context, "stopped_early", False))
 
-    def _candidate_terms(self, text: str) -> list[str]:
-        """Return the distinct alphabetic tokens of a text (spaCy tokenizer), bounded in number."""
+    def _candidate_tokens(self, text: str) -> list[tuple[str, int]]:
+        """Return the first occurrence of each distinct alphabetic token, with its index.
+
+        Args:
+            text: Text to explain.
+
+        Returns:
+            ``(term, token index)`` pairs, in order of appearance, bounded in number.
+        """
         seen: list[str] = []
+        tokens: list[tuple[str, int]] = []
         for token in self.nlp.make_doc(text):
             term = token.text
             if len(term) < 2 or not token.is_alpha or term in seen:
                 continue
             seen.append(term)
-            if len(seen) >= MAX_OCCLUSION_TERMS:
+            tokens.append((term, int(token.i)))
+            if len(tokens) >= MAX_OCCLUSION_TERMS:
                 break
-        return seen
+        return tokens
+
+    def _without_token(self, text: str, index: int) -> str:
+        """Return the text without one token, every other token kept byte for byte.
+
+        Args:
+            text: Original text.
+            index: Position of the token to remove (spaCy tokenizer).
+
+        Returns:
+            The text rebuilt from its tokens and their trailing whitespace, minus one token.
+        """
+        doc = self.nlp.make_doc(text)
+        return "".join(
+            token.text_with_ws if token.i != index else token.whitespace_ for token in doc
+        )
 
 
 __all__ = [
