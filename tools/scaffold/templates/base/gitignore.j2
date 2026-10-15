@@ -44,6 +44,8 @@ artifacts/metrics/*
 !artifacts/**/.gitkeep
 {% if stack.key == 'mlflow' %}# Base MLflow locale (runs, modèles journalisés) : régénérée par `make train`.
 artifacts/mlruns/
+mlruns/
+mlartifacts/
 {% endif %}*.joblib
 *.pkl
 *.pt

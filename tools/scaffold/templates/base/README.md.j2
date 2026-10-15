@@ -489,17 +489,30 @@ python -m src.main mode=train model.params.max_depth=8   # un second run, compar
 ```python
 import mlflow
 
-mlflow.set_tracking_uri("sqlite:///artifacts/mlruns/mlflow.db")
+mlflow.set_tracking_uri("sqlite:///artifacts/mlruns/mlflow.db")  # ou `tracking.tracking_uri`
 run_id = "..."  # artifacts/metrics/mlflow_run.json
 model = mlflow.pyfunc.load_model(f"runs:/{run_id}/model")
 ```
 
 Le modèle journalisé consomme la matrice **pré-traitée** : le pré-traitement ajusté est journalisé à
 côté (`pipeline/preprocessing.joblib`) et c'est `src/inference/predictor.py` qui enchaîne les deux
-en production. Le modèle est sérialisé au format **skops**, qui refuse de recharger un type inconnu
-(contrairement à pickle, qui exécute ce que contient le fichier) ; seuls les types internes de
-scikit-learn sont déclarés de confiance. Pointer un serveur partagé est un changement de
-configuration (`tracking.tracking_uri`), pas de code.
+en production.
+
+- **Sérialisation** : le modèle MLflow est au format **skops**, qui refuse de recharger un type
+  inconnu (pickle, lui, exécute ce que contient le fichier) ; seuls les types internes de
+  scikit-learn sont déclarés de confiance. Cette liste est stockée dans le fichier `MLmodel`, à côté
+  du modèle : skops protège d'un fichier piégé, pas d'un dépôt d'artefacts compromis. Les fichiers
+  `pipeline/*.joblib` du run restent des pickles : ne les recharger que depuis une source de confiance.
+- **Serveur partagé** : `tracking.tracking_uri: http://mlflow.interne:5000`. L'expérience est alors
+  créée sans emplacement local, pour que les artefacts soient stockés par le serveur et lisibles
+  par toute l'équipe. Les identifiants passent par `MLFLOW_TRACKING_USERNAME` /
+  `MLFLOW_TRACKING_PASSWORD` / `MLFLOW_TRACKING_TOKEN`, jamais par l'URI (elle est de toute façon
+  expurgée avant d'être écrite).
+- **Données réelles** : `tracking.log_input_example: false` évite de stocker cinq lignes d'entrée à
+  côté du modèle.
+- **Robustesse** : un échec du suivi pendant `make evaluate` est signalé, pas bloquant (les rapports
+  sont déjà sur disque) ; un entraînement dont le suivi échoue efface le lien vers le run précédent,
+  pour que ses métriques de test ne soient jamais rattachées au mauvais modèle.
 {% endif %}
 
 ---

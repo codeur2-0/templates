@@ -53,9 +53,10 @@ business:
       value: "MLP 59 -> 32 -> 1 (sigmoid, perte BCE), 1 953 paramètres, meilleure époque 6 sur 13 (arrêt anticipé)"
 
 train:
-  # Budget large, arrêt anticipé strict : sur 23 400 couples d'entraînement le réseau atteint son
-  # meilleur NDCG de validation en moins de dix époques (3 à 6 selon la graine), puis sur-apprend
-  # l'affinité bruitée.
+  # Budget large, arrêt anticipé strict sur `val_loss` : sur 23 400 couples d'entraînement, la
+  # perte de validation est minimale entre les époques 3 et 6 selon la graine, puis le réseau
+  # sur-apprend l'affinité bruitée. Le NDCG n'est pas suivi par époque : il est mesuré à la fin, sur
+  # la validation puis sur le test.
   epochs: 40
   batch_size: 256
   learning_rate: 0.002
@@ -159,7 +160,9 @@ extras:
     # popularité une référence forte mais battable. Mesuré : aléatoire 0,230 < popularité 0,334 <
     # modèle 0,584 < plafond oracle 0,722.
     appeal_weight: 1.30
-  # Critères de succès du cas d'usage, lus par le rapport d'évaluation.
+  # Critères de succès du cas d'usage, lus par le rapport d'évaluation. Les valeurs « Mesuré » des
+  # commentaires de ce bloc et de `data_conf` sont celles de la calibration du générateur, faite
+  # avec le projet scikit-learn : les mesures de CETTE stack sont dans `business.measured_results`.
   #
   # Calibration : les valeurs de NDCG, précision, rappel et couverture sont des **fractions**
   # comprises entre 0 et 1, comme les métriques `ndcg_at_k`, `precision_at_k` et `recall_at_k` du

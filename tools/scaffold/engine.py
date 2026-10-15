@@ -71,6 +71,12 @@ def layers_for(
         The ordered list of existing layer directories (Jinja precedence: first wins).
     """
     root = template_root or TEMPLATE_ROOT
+    if stack.extends and not (root / "stack" / stack.extends).is_dir():
+        msg = (
+            f"Stack '{stack.key}' extends '{stack.extends}', but templates/stack/{stack.extends} "
+            "does not exist"
+        )
+        raise ValueError(msg)
     candidates = [
         root / "stack" / stack.template_dir,
         *([root / "stack" / stack.extends] if stack.extends else []),

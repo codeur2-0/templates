@@ -67,8 +67,11 @@ evaluate: ## Évalue le modèle entraîné (rapports + figures + métriques)
 predict: ## Prédit sur un échantillon ou un fichier
 	$(PYTHON) scripts/predict.py $(PRED_ARGS)
 
+# Base locale par défaut ; `make mlflow-ui MLFLOW_URI=...` pour un autre backend.
+MLFLOW_URI ?= sqlite:///artifacts/mlruns/mlflow.db
+
 mlflow-ui: ## Ouvre l'interface MLflow sur la base locale (http://127.0.0.1:5000)
-	$(PYTHON) -m mlflow ui --backend-store-uri sqlite:///artifacts/mlruns/mlflow.db --host 127.0.0.1
+	$(PYTHON) -m mlflow ui --backend-store-uri $(MLFLOW_URI) --host 127.0.0.1
 
 all: ## Enchaîne : données -> train -> évaluation -> prédiction
 	$(PYTHON) -m src.main mode=all $(OVERRIDES)

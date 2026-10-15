@@ -11,7 +11,14 @@ import pytest
 
 from src.models.base import BaseModel
 from src.schemas.config import AppConfig
-from src.tracking.tracker import MlflowTracker, build_tracker, flatten
+from src.tracking.tracker import (
+    MlflowTracker,
+    build_tracker,
+    flatten,
+    is_local_backend,
+    qualify_metrics,
+    redact_uri,
+)
 from src.utils.io import read_json, write_json
 from src.utils.paths import ProjectPaths
 
@@ -24,13 +31,17 @@ def tracker(tmp_path: Path, app_config: AppConfig) -> MlflowTracker:
 
 @pytest.fixture
 def trained_run(
-    tracker: MlflowTracker, app_config: AppConfig, fitted_model: BaseModel, prepared: dict[str, Any], tmp_path: Path
+    tracker: MlflowTracker,
+    app_config: AppConfig,
+    fitted_model: BaseModel,
+    prepared: dict[str, Any],
+    tmp_path: Path,
 ) -> str:
-    """Record one training run and return its id."""
+    """Record one training run, with the metric names the `Trainer` really produces."""
     card = write_json(tmp_path / "card.json", {"model": fitted_model.summary()})
     tracker.log_training(
         config=app_config.model_dump(),
-        metrics={"val_roc_auc": 0.8, "train_roc_auc": 0.9},
+        metrics={"roc_auc": 0.9, "val_roc_auc": 0.8},
         model=fitted_model,
         artifacts=[card],
         sample=prepared["X_train"],
@@ -38,8 +49,8 @@ def trained_run(
     return str(read_json(tracker.run_file)["run_id"])
 
 
-class TestFlatten:
-    """Aplatissement de la configuration en paramètres MLflow."""
+class TestHelpers:
+    """Aplatissement, qualification des métriques, URI."""
 
     def test_nested_keys_become_dotted_names(self) -> None:
         """Chaque feuille devient un paramètre `a.b.c`."""
@@ -51,6 +62,37 @@ class TestFlatten:
     def test_long_values_are_truncated(self) -> None:
         """MLflow borne la taille d'une valeur : on tronque plutôt que d'échouer."""
         assert len(flatten({"x": "a" * 5000})["x"]) == 500
+
+    def test_tracking_block_is_never_logged(self) -> None:
+        """L'adresse du serveur de suivi n'est pas un paramètre du modèle."""
+        flat = flatten({"tracking": {"tracking_uri": "http://srv"}, "seed": 1})
+        assert flat == {"seed": "1"}
+
+    def test_unprefixed_metrics_are_training_metrics(self) -> None:
+        """`roc_auc` du `Trainer` est un score sur le train : il devient `train_roc_auc`."""
+        assert qualify_metrics({"roc_auc": 0.9, "val_roc_auc": 0.8}) == {
+            "train_roc_auc": 0.9,
+            "val_roc_auc": 0.8,
+        }
+
+    def test_credentials_are_redacted(self) -> None:
+        """Un jeton laissé dans l'URI ne doit jamais être écrit sur disque."""
+        assert redact_uri("https://user:token@mlflow.example:5000") == "https://mlflow.example:5000"
+        assert redact_uri("sqlite:///C:/db.sqlite") == "sqlite:///C:/db.sqlite"
+
+    @pytest.mark.parametrize(
+        ("uri", "local"),
+        [
+            ("sqlite:///C:/x/mlflow.db", True),
+            ("file:///tmp/mlruns", True),
+            ("C:/x/mlruns", True),
+            ("http://mlflow.example:5000", False),
+            ("databricks", False),
+        ],
+    )
+    def test_local_backend_detection(self, uri: str, local: bool) -> None:
+        """Seul un backend local reçoit un emplacement d'artefacts local."""
+        assert is_local_backend(uri) is local
 
 
 class TestTracking:
@@ -64,10 +106,12 @@ class TestTracking:
     def test_training_run_records_params_metrics_and_model(
         self, tracker: MlflowTracker, trained_run: str
     ) -> None:
-        """Paramètres aplatis, métriques et modèle sont retrouvables dans le run."""
+        """Paramètres aplatis, métriques qualifiées et modèle sont retrouvables dans le run."""
         mlflow.set_tracking_uri(tracker.tracking_uri)
         run = mlflow.get_run(trained_run)
         assert run.data.metrics["val_roc_auc"] == pytest.approx(0.8)
+        assert run.data.metrics["train_roc_auc"] == pytest.approx(0.9)
+        assert "roc_auc" not in run.data.metrics
         assert "model.algorithm" in run.data.params
         assert run.data.tags["pipeline"] == "train"
 
@@ -84,7 +128,11 @@ class TestTracking:
         assert len(mlflow.search_runs([experiment.experiment_id])) == 1
 
     def test_logged_model_predicts_like_the_trained_one(
-        self, tracker: MlflowTracker, trained_run: str, fitted_model: BaseModel, prepared: dict[str, Any]
+        self,
+        tracker: MlflowTracker,
+        trained_run: str,
+        fitted_model: BaseModel,
+        prepared: dict[str, Any],
     ) -> None:
         """Le modèle rechargé par `mlflow.pyfunc` prédit exactement comme l'estimateur."""
         mlflow.set_tracking_uri(tracker.tracking_uri)
@@ -97,3 +145,41 @@ class TestTracking:
         """Sans run d'entraînement connu, l'évaluation n'invente pas de run."""
         tracker.log_evaluation(metrics={"roc_auc": 0.5}, artifacts=[])
         assert not tracker.run_file.exists()
+
+    def test_failed_training_run_drops_the_previous_link(
+        self,
+        tracker: MlflowTracker,
+        app_config: AppConfig,
+        fitted_model: BaseModel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Un entraînement dont le suivi échoue ne laisse pas l'évaluation viser l'ancien run."""
+        write_json(tracker.run_file, {"run_id": "ancien", "tracking_uri": tracker.tracking_uri})
+
+        def unavailable() -> str:
+            raise RuntimeError("backend indisponible")
+
+        monkeypatch.setattr(tracker, "_experiment_id", unavailable)
+        with pytest.raises(RuntimeError):
+            tracker.log_training(
+                config=app_config.model_dump(), metrics={}, model=fitted_model, artifacts=[]
+            )
+        assert not tracker.run_file.exists()
+
+    def test_run_of_another_backend_is_not_reused(
+        self, tracker: MlflowTracker, trained_run: str
+    ) -> None:
+        """Un lien vers un autre backend est ignoré au lieu de faire échouer l'évaluation."""
+        link = dict(read_json(tracker.run_file))
+        write_json(tracker.run_file, {**link, "tracking_uri": "sqlite:///ailleurs.db"})
+        tracker.log_evaluation(metrics={"roc_auc": 0.6}, artifacts=[])
+        mlflow.set_tracking_uri(tracker.tracking_uri)
+        assert "test_roc_auc" not in mlflow.get_run(trained_run).data.metrics
+
+    def test_unknown_run_is_reported_not_raised(self, tracker: MlflowTracker) -> None:
+        """Un run supprimé ou inconnu du backend produit un avertissement, pas une erreur."""
+        write_json(
+            tracker.run_file,
+            {"run_id": "0" * 32, "tracking_uri": redact_uri(tracker.tracking_uri)},
+        )
+        tracker.log_evaluation(metrics={"roc_auc": 0.6}, artifacts=[])

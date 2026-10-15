@@ -73,6 +73,9 @@ extras:
       experiment_name: null
       # Journaliser la forêt au format `mlflow.sklearn` (signature + exemple d'entrée).
       log_model: true
+      # Cinq lignes d'entrée stockées avec le modèle (signature lisible). À désactiver sur des
+      # données personnelles réelles.
+      log_input_example: true
 
 learning_objectives:
   - "Composer un pipeline scikit-learn propre : ColumnTransformer, transformers custom, fit sur le train uniquement."

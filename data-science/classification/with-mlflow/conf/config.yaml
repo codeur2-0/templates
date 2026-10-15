@@ -84,3 +84,4 @@ tracking:
   tracking_uri: null
   experiment_name: null
   log_model: true
+  log_input_example: true

@@ -186,12 +186,12 @@ data-science/classification/with-mlflow/
 │   └── predict.py
 │
 ├── notebooks/                   # 6 notebooks pédagogiques exécutables
-│   ├── 01_exploratory_analysis.ipynb
-│   ├── 02_data_validation_and_schemas.ipynb
-│   ├── 03_preprocessing_and_features.ipynb
+│   ├── 01_eda.ipynb
+│   ├── 02_validation.ipynb
+│   ├── 03_preprocessing.ipynb
 │   ├── 04_model_exploration.ipynb
-│   ├── 05_training_and_tracking.ipynb
-│   └── 06_evaluation_and_error_analysis.ipynb
+│   ├── 05_training.ipynb
+│   └── 06_error_analysis.ipynb
 │
 ├── tests/                       # pytest (schémas, loaders, preprocessing, modèle, training)
 │   ├── conftest.py
@@ -393,7 +393,6 @@ from src.schemas.config import validate_config
 
 data = SyntheticDataGenerator(n_samples=1000, seed=42).run()
 ```
-
 ### (d) Via le Makefile
 
 ```bash
@@ -424,17 +423,30 @@ python -m src.main mode=train model.params.max_depth=8   # un second run, compar
 ```python
 import mlflow
 
-mlflow.set_tracking_uri("sqlite:///artifacts/mlruns/mlflow.db")
+mlflow.set_tracking_uri("sqlite:///artifacts/mlruns/mlflow.db")  # ou `tracking.tracking_uri`
 run_id = "..."  # artifacts/metrics/mlflow_run.json
 model = mlflow.pyfunc.load_model(f"runs:/{run_id}/model")
 ```
 
 Le modèle journalisé consomme la matrice **pré-traitée** : le pré-traitement ajusté est journalisé à
 côté (`pipeline/preprocessing.joblib`) et c'est `src/inference/predictor.py` qui enchaîne les deux
-en production. Le modèle est sérialisé au format **skops**, qui refuse de recharger un type inconnu
-(contrairement à pickle, qui exécute ce que contient le fichier) ; seuls les types internes de
-scikit-learn sont déclarés de confiance. Pointer un serveur partagé est un changement de
-configuration (`tracking.tracking_uri`), pas de code.
+en production.
+
+- **Sérialisation** : le modèle MLflow est au format **skops**, qui refuse de recharger un type
+  inconnu (pickle, lui, exécute ce que contient le fichier) ; seuls les types internes de
+  scikit-learn sont déclarés de confiance. Cette liste est stockée dans le fichier `MLmodel`, à côté
+  du modèle : skops protège d'un fichier piégé, pas d'un dépôt d'artefacts compromis. Les fichiers
+  `pipeline/*.joblib` du run restent des pickles : ne les recharger que depuis une source de confiance.
+- **Serveur partagé** : `tracking.tracking_uri: http://mlflow.interne:5000`. L'expérience est alors
+  créée sans emplacement local, pour que les artefacts soient stockés par le serveur et lisibles
+  par toute l'équipe. Les identifiants passent par `MLFLOW_TRACKING_USERNAME` /
+  `MLFLOW_TRACKING_PASSWORD` / `MLFLOW_TRACKING_TOKEN`, jamais par l'URI (elle est de toute façon
+  expurgée avant d'être écrite).
+- **Données réelles** : `tracking.log_input_example: false` évite de stocker cinq lignes d'entrée à
+  côté du modèle.
+- **Robustesse** : un échec du suivi pendant `make evaluate` est signalé, pas bloquant (les rapports
+  sont déjà sur disque) ; un entraînement dont le suivi échoue efface le lien vers le run précédent,
+  pour que ses métriques de test ne soient jamais rattachées au mauvais modèle.
 
 ---
 
@@ -451,7 +463,7 @@ Toute la configuration vit dans `conf/` et est composée par Hydra :
 | `conf/preprocessing/default.yaml` | imputation, scaling, encodage, features dérivées | `preprocessing.numeric.scaler=robust`, `preprocessing.categorical.encoder=ordinal` |
 | `conf/hydra/local.yaml` | répertoires de sortie Hydra (`outputs/`, `multirun/`) | `hydra.run.dir=outputs/debug` |
 | `conf/config.yaml` -> bloc `decision` | Réglages métier de la famille, au même niveau que `mode` et `seed` : 3 clés (threshold, retention_cost_eur, customer_lifetime_value_eur), chacune commentée dans le fichier — c'est là qu'on change le métier sans toucher au code. | `decision.threshold=0.5`, `decision.retention_cost_eur=25.0` |
-| `conf/config.yaml` -> bloc `tracking` | Réglages métier de la famille, au même niveau que `mode` et `seed` : 3 clés (tracking_uri, experiment_name, log_model), chacune commentée dans le fichier — c'est là qu'on change le métier sans toucher au code. | `tracking.log_model=True` |
+| `conf/config.yaml` -> bloc `tracking` | Réglages métier de la famille, au même niveau que `mode` et `seed` : 4 clés (tracking_uri, experiment_name, log_model, log_input_example), chacune commentée dans le fichier — c'est là qu'on change le métier sans toucher au code. | `tracking.log_model=True`, `tracking.log_input_example=True` |
 
 Règles appliquées :
 
@@ -610,4 +622,4 @@ Pour rejouer une configuration exacte : Hydra sauvegarde la config composée dan
 Code fourni à des fins pédagogiques, licence MIT. Pour proposer une amélioration : conserver la
 structure imposée, ajouter des tests, mettre à jour ce README et vérifier `make verify`.
 
-*Dernière génération : 2026-09-30 · projet `ds-classification-mlflow`*
+*Dernière génération : 2026-10-15 · projet `ds-classification-mlflow`*

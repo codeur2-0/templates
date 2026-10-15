@@ -44,6 +44,8 @@ artifacts/metrics/*
 !artifacts/**/.gitkeep
 # Base MLflow locale (runs, modèles journalisés) : régénérée par `make train`.
 artifacts/mlruns/
+mlruns/
+mlartifacts/
 *.joblib
 *.pkl
 *.pt
