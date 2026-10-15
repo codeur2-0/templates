@@ -853,7 +853,7 @@ python -m tools.verify data-science/classification/with-pytorch
 ```
 
 État au dernier passage : **40/40 projets conformes**, dans un même environnement (Python 3.12,
-PyTorch 2.14, TensorFlow 2.21, spaCy 3.8, transformers 5.19, MLflow 3.16) — **6 115 tests** au total :
+PyTorch 2.14, TensorFlow 2.21, spaCy 3.8, transformers 5.19, MLflow 3.16) — **6 118 tests** au total :
 165 par projet tabulaire, 187 pour les projets multi-classes, 183 pour le projet MLflow, de 76 à 127
 pour les projets texte.
 
