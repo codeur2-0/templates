@@ -1,0 +1,49 @@
+# =================================================================================================
+# Modèle : Encodeur-décodeur transformer (2 couches, 128 unités) entraîné sur le corpus
+# -------------------------------------------------------------------------------------------------
+# Le modèle est un encodeur-décodeur de type transformer, volontairement minuscule (2 couches, 128
+# unités, 4 têtes) : le vocabulaire WordPiece partagé par l'encodeur et le décodeur est appris sur
+# le split d'entraînement, les poids sont initialisés au hasard puis pré-entraînés par
+# reconstruction d'un résumé tronqué et bruité, avant l'affinage supervisé enseignant-forcé. Rien
+# n'est téléchargé, donc rien ne dépend du réseau à l'exécution. Trois choix sont publiés plutôt
+# que cachés : le décodage est **glouton** (un résumé doit être reproductible ligne à ligne), le
+# budget de longueur est déclaré, et la part des résumés qui l'atteignent figure dans le rapport —
+# un décodeur qui bute sur sa borne ne conclut pas. Le corpus étant synthétique et les résumés de
+# référence construits sur des gabarits de faits, la tâche est à la portée d'un modèle de cette
+# taille ; c'est précisément ce que le projet démontre.
+#
+# Alternatives considérées : `textrank` : extractive avec diversification MMR — mesurée sur le même échantillon de validation, publiée dans la comparaison des algorithmes du notebook 04., `lead` : plancher extractif, servi comme **référence** dans le rapport d'évaluation., Modèle pré-entraîné (`barthez`, `mT5`) : hors périmètre (aucune dépendance réseau à l'exécution)., Modèle abstrait de type GPT : hors périmètre, et 360 documents d'entraînement ne justifient pas un modèle de langue..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.layers=...
+# =================================================================================================
+
+name: "Encodeur-décodeur transformer (2 couches, 128 unités) entraîné sur le corpus"
+algorithm: transformer_tiny
+class: EncoderDecoderSummarizer
+task: generation
+supports_proba: false
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `EncoderDecoderSummarizer(params=...)` (voir src/models/model.py).
+params:
+  layers: 2
+  units: 128
+  heads: 4
+  dropout: 0.1
+  max_input_tokens: 160
+  compression: 0.45
+  max_output_tokens: 90
+  pretraining:
+    epochs: 2
+    mask_rate: 0.25
+
+# --- options spécifiques à la stack `seq2seq` ---------------------------------------
+text_column: text
+id_column: doc_id
+strategies_to_compare:
+- transformer_tiny
+- textrank
+- lead

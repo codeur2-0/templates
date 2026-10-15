@@ -16,10 +16,10 @@ Usage:
 from __future__ import annotations
 
 import logging
-from types import FrameType
 import os
 import sys
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from loguru import logger
@@ -83,7 +83,7 @@ def setup_logging(
         intercept_stdlib: Redirect ``logging`` records to loguru.
         quiet_third_party: Raise the level of noisy third-party loggers to ``WARNING``.
     """
-    global _CONFIGURED  # noqa: PLW0603 - module level singleton, intentional
+    global _CONFIGURED
 
     logger.remove()
     logger.add(

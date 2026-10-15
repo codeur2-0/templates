@@ -1,0 +1,145 @@
+# ==============================================================================================
+# ai-eng / text-classification / with-transformers
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/text_classification.yaml` (routage de tickets de support).
+# Même corpus, mêmes splits, mêmes métriques que la variante `with-tfidf_classifier` : c'est ce qui
+# rend l'écart entre les deux variantes lisible. Ce manifeste ne décrit QUE ce qui change — la
+# représentation neuronale, l'artefact (`model.pt`) et les hyper-paramètres de la boucle
+# d'entraînement.
+#
+# Aucun poids pré-entraîné n'est téléchargé : le vocabulaire et les poids sont appris sur le split
+# d'entraînement — pré-entraînement masqué sans aucun libellé, puis affinage supervisé. La stack
+# entraîne deux familles d'architectures (la moyenne des vecteurs de termes et un encodeur de type
+# BERT) et la comparaison a été faite sur le split de validation avant d'écrire ce manifeste :
+# l'encodeur à deux couches gagne (0,8022), la moyenne des vecteurs de termes suit (0,7455) et
+# l'encodeur à quatre couches reste en dessous. Le modèle servi est donc l'encodeur à deux couches,
+# avec le taux d'apprentissage que la stack déclare pour un encodeur initialisé au hasard (0,005) et
+# non celui du sac d'embeddings : c'est le réglage mesuré, et il coûte deux minutes et demie de CPU
+# au lieu de trois secondes. La fiche de modèle publie le taux de jetons `[UNK]`, le taux de tickets
+# tronqués et le nombre de paramètres.
+# ==============================================================================================
+
+key: ai-eng-text-classification-transformers
+title: "Routage de tickets de support par un encodeur appris sur le corpus"
+summary: >-
+  Le même corpus que la variante `with-tfidf_classifier` — 1 200 tickets, six catégories, trois
+  styles rédactionnels, une classe « autre » sans vocabulaire propre — confié cette fois à des
+  modèles neuronaux entraînés **sur le corpus** : vocabulaire appris sur le train, sac d'embeddings
+  ou encodeur de type BERT, pré-entraînement masqué sans aucun libellé puis affinage supervisé. La
+  comparaison des trois architectures sur le split de validation donne le résultat publié du projet :
+  sur 719 tickets d'entraînement, l'encodeur à deux couches atteint 0,8022 de F1 macro, la moyenne
+  des vecteurs de termes 0,7455, et l'encodeur à quatre couches reste bloqué à 0,0559. Le partage
+  avec la variante lexicale est net : l'encodeur gagne 0,09 sur les paraphrases (0,8285 contre
+  0,7352) mais perd 0,14 sur les tickets canoniques (0,7892 contre 0,9262). Le facteur
+  décisif n'est donc pas la profondeur mais le **régime d'entraînement** : un encodeur initialisé au
+  hasard diverge au taux d'apprentissage qui fait converger un sac d'embeddings, et les réglages
+  gagnants de la grille de sélection sont devenus les défauts de la stack — c'est ce qui permet au
+  notebook 04 de comparer les trois architectures sans réglage avantageux pour l'une d'elles.
+
+family: text_classification
+domain: ai-eng
+problem: text-classification
+stack: transformers
+project_slug: tickets-routage-transformers
+package_name: tickets_routage_transformers
+
+business:
+  # Mesures du run de référence (`python -m src.main mode=all`, graine 42, 1 200 tickets, split de
+  # test de 177 tickets) : mêmes lignes et même protocole que la variante TF-IDF, pour que le lecteur
+  # compare deux colonnes et non deux récits.
+  measured_results:
+    - label: "F1 macro sur le split de test (six classes, chacune pesant pareil)"
+      value: "0,7942"
+    - label: "F1 macro en validation (le split qui a choisi l'architecture)"
+      value: "0,8022"
+    - label: "Exactitude sur le split de test (plancher trivial 0,2034)"
+      value: "0,7853"
+    - label: "Trois architectures, F1 macro en validation (grille de sélection, 719 tickets)"
+      value: "2 couches 0,8022 / sac 0,7455 / 4 couches 0,0559"
+    - label: "Segments paraphrase (52 tickets) / canonique (93) / bruité (32), F1 macro"
+      value: "0,8285 / 0,7892 / 0,7315"
+    - label: "Écart avec la variante `with-tfidf_classifier` (mêmes corpus et splits)"
+      value: "0,7942 contre 0,8408"
+    - label: "Gain de l'encodeur sur les paraphrases, à corpus et splits identiques"
+      value: "+0,0933 (0,8285 contre 0,7352)"
+    - label: "Kappa de Cohen / exactitude équilibrée"
+      value: "0,7426 / 0,8069"
+    - label: "Écart de calibration (confiance moyenne 0,9753 contre exactitude 0,7853)"
+      value: "0,2099"
+    - label: "Latence p50 / p95 d'une prédiction (encodeur, 6 classes)"
+      value: "2,09 ms / 2,22 ms"
+    - label: "Vocabulaire / paramètres / jetons `[UNK]` / tickets tronqués"
+      value: "385 pièces / 344 582 / 0 % / 0 %"
+    - label: "Ajustement du modèle servi (719 tickets : 10 époques de masquage, 40 d'affinage)"
+      value: "150 s"
+model:
+  display_name: "Encodeur BERT minuscule appris sur le corpus (2 couches, 128 unités)"
+  algorithm: bert_tiny
+  rationale: >-
+    Deux couches d'attention, 128 unités, un vocabulaire et des poids appris sur le corpus : le
+    pré-entraînement masqué lit les tickets **sans leurs libellés**, puis l'affinage supervisé
+    apprend la classification avec `class_weight='balanced'` pour que la classe « autre » ne soit
+    pas sacrifiée. C'est l'architecture qui gagne la comparaison publiée du projet : 0,8022 de F1
+    macro en validation contre 0,7455 pour la moyenne des vecteurs de termes (sans contexte) et
+    moins encore pour l'encodeur à quatre couches, sur les mêmes 719 tickets d'entraînement. Ce
+    résultat tient à un réglage mesuré, pas à une intuition : un encodeur initialisé au hasard
+    diverge au taux d'apprentissage du sac d'embeddings, et la grille de sélection a montré qu'il
+    lui faut 0,005 — cette valeur est devenue le défaut de la stack pour les encodeurs. Le coût est
+    réel et publié : deux minutes et demie de CPU contre trois secondes pour le sac, et la variante
+    `with-tfidf_classifier` reste devant sur ce corpus (0,8408 en test). Chaque décision est
+    explicable par occlusion (le terme affiché est retiré du texte et la baisse de probabilité est
+    publiée), et la fiche de modèle annonce le taux de jetons `[UNK]`, le taux de tickets tronqués
+    et le nombre de paramètres.
+  params:
+    tokenizer:
+      vocab_size: 4000
+      min_frequency: 2
+      max_length: 96
+      lowercase: true
+      strip_accents: true
+    # Ni la taille du réseau ni le budget de pré-entraînement ne sont répétés ici : ils viennent des
+    # défauts de la stack (`bert_tiny` : 2 couches, 128 unités, 10 époques de masquage), sinon un
+    # réglage du modèle servi se retrouverait appliqué aux autres architectures pendant la
+    # comparaison du notebook 04.
+    training:
+      class_weight: balanced
+      threads: 1
+      warmup_ratio: 0.1
+      clip_norm: 1.0
+      weight_decay: 0.01
+  alternatives:
+    - "`embedding_bag` (moyenne des vecteurs de termes, 48 dimensions) : 0,7455 de F1 macro en validation, soit 0,06 de moins que l'encodeur — mais trois secondes d'entraînement au lieu de deux minutes et demie. C'est le compromis raisonnable quand le corpus grossit ou que le budget de calcul se réduit."
+    - "`bert_small` (4 couches, 256 unités) : 0,0559 de F1 macro en validation et une classe unique prédite — avec les réglages testés (zéro à cinq époques de masquage, taux d'apprentissage de 0,005 à 0,03), cette architecture ne décolle pas sur 719 tickets, alors que celle à deux couches atteint 0,8022. C'est un résultat négatif publié, que le notebook 04 reproduit à chaque exécution."
+    - "Variante `with-tfidf_classifier` : même corpus, mêmes splits ; elle reste la meilleure sur ce corpus (0,8408 en test), explicable terme à terme et deux cents fois plus rapide — l'écart des deux variantes est un résultat publié, pas un argument."
+    - "Modèle pré-entraîné téléchargé (`camembert-base`) : hors périmètre, parce que le projet interdit toute dépendance réseau à l'exécution."
+
+train:
+  epochs: 40
+  batch_size: 32
+  # Le taux du modèle servi, visible ici : c'est aussi le défaut que la stack déclare pour les
+  # encodeurs (le sac d'embeddings, lui, converge à 0,02 — la grille de sélection a mesuré les deux).
+  learning_rate: 0.005
+  weight_decay: 0.01
+  callbacks:
+    progress_bar: false
+  early_stopping:
+    enabled: false
+
+extras:
+  data_conf:
+    corpus:
+      reference_date: "2025-03-03"
+      style_shares:
+        canonique: 0.5
+        paraphrase: 0.3
+        bruite: 0.2
+      split_shares:
+        train: 0.6
+        val: 0.2
+        calibration: 0.05
+        test: 0.15
+      # Formulations réservées aux splits d'évaluation, par couple (classe, style) : identiques à
+      # celles de la variante TF-IDF, sans quoi les deux variantes ne mesureraient pas le même test.
+      phrasing_holdout: 2
+  model_conf:
+    text_column: text

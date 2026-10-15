@@ -1,0 +1,50 @@
+# =================================================================================================
+# Modèle : Encodeur BERT minuscule appris sur le corpus (2 couches, 128 unités)
+# -------------------------------------------------------------------------------------------------
+# Deux couches d'attention, 128 unités, un vocabulaire et des poids appris sur le corpus : le pré-
+# entraînement masqué lit les tickets **sans leurs libellés**, puis l'affinage supervisé apprend
+# la classification avec `class_weight='balanced'` pour que la classe « autre » ne soit pas
+# sacrifiée. C'est l'architecture qui gagne la comparaison publiée du projet : 0,8022 de F1 macro
+# en validation contre 0,7455 pour la moyenne des vecteurs de termes (sans contexte) et moins
+# encore pour l'encodeur à quatre couches, sur les mêmes 719 tickets d'entraînement. Ce résultat
+# tient à un réglage mesuré, pas à une intuition : un encodeur initialisé au hasard diverge au
+# taux d'apprentissage du sac d'embeddings, et la grille de sélection a montré qu'il lui faut
+# 0,005 — cette valeur est devenue le défaut de la stack pour les encodeurs. Le coût est réel et
+# publié : deux minutes et demie de CPU contre trois secondes pour le sac, et la variante `with-
+# tfidf_classifier` reste devant sur ce corpus (0,8408 en test). Chaque décision est explicable
+# par occlusion (le terme affiché est retiré du texte et la baisse de probabilité est publiée), et
+# la fiche de modèle annonce le taux de jetons `[UNK]`, le taux de tickets tronqués et le nombre
+# de paramètres.
+#
+# Alternatives considérées : `embedding_bag` (moyenne des vecteurs de termes, 48 dimensions) : 0,7455 de F1 macro en validation, soit 0,06 de moins que l'encodeur — mais trois secondes d'entraînement au lieu de deux minutes et demie. C'est le compromis raisonnable quand le corpus grossit ou que le budget de calcul se réduit., `bert_small` (4 couches, 256 unités) : 0,0559 de F1 macro en validation et une classe unique prédite — avec les réglages testés (zéro à cinq époques de masquage, taux d'apprentissage de 0,005 à 0,03), cette architecture ne décolle pas sur 719 tickets, alors que celle à deux couches atteint 0,8022. C'est un résultat négatif publié, que le notebook 04 reproduit à chaque exécution., Variante `with-tfidf_classifier` : même corpus, mêmes splits ; elle reste la meilleure sur ce corpus (0,8408 en test), explicable terme à terme et deux cents fois plus rapide — l'écart des deux variantes est un résultat publié, pas un argument., Modèle pré-entraîné téléchargé (`camembert-base`) : hors périmètre, parce que le projet interdit toute dépendance réseau à l'exécution..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.tokenizer=...
+# =================================================================================================
+
+name: "Encodeur BERT minuscule appris sur le corpus (2 couches, 128 unités)"
+algorithm: bert_tiny
+class: TransformerTextClassifier
+task: multiclass
+supports_proba: true
+epochs_based: true
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `TransformerTextClassifier(params=...)` (voir src/models/model.py).
+params:
+  tokenizer:
+    vocab_size: 4000
+    min_frequency: 2
+    max_length: 96
+    lowercase: true
+    strip_accents: true
+  training:
+    class_weight: balanced
+    threads: 1
+    warmup_ratio: 0.1
+    clip_norm: 1.0
+    weight_decay: 0.01
+
+# --- options spécifiques à la stack `transformers` ---------------------------------------
+text_column: text

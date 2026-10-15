@@ -1,0 +1,59 @@
+# ==============================================================================================
+# ai-eng / question-answering / with-tfidf
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/question_answering.yaml` (support client sur fiches
+# produit). Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet, modèle,
+# point de fonctionnement et paramètres de l'index lexical.
+# ==============================================================================================
+
+key: ai-eng-qa-tfidf
+title: "Support client sur fiches produit avec scikit-learn (BM25) — QA extractive de référence"
+summary: >-
+  Réponse aux questions du support client par la phrase exacte de la fiche produit (corpus
+  synthétique de 120 fiches -> contrats Pandera -> découpage -> index BM25 appris sur le train ->
+  classement des fiches -> phrase copiée du meilleur passage ou abstention explicite), entièrement
+  piloté par Hydra et structuré en objets testables. Le contrat de cette famille est la **phrase
+  exacte** : l'évaluation mesure l'exact match et le F1 de réponse en plus du rappel, confronte le
+  tout au tirage aléatoire et à l'ordre du corpus, puis ventile les résultats par difficulté
+  (factuelle, paraphrase, multi-document) et par comportement d'abstention sur les questions hors
+  corpus.
+
+family: question_answering
+domain: ai-eng
+problem: question-answering
+stack: tfidf
+project_slug: product-support-assistant-tfidf
+package_name: product_support_tfidf
+
+model:
+  display_name: "Index lexical BM25 + réponse copiée mot pour mot de la fiche"
+  rationale: >-
+    La question du support nomme le produit et l'article — « le délai de retour de la trottinette
+    Roam » : les termes de la question sont ceux de la phrase canonique de la fiche. BM25 exploite
+    cette signature sans entraînement, rend une fiche unique, s'explique terme par terme et laisse
+    le générateur extractif copier la phrase exacte, ce que le contrat de cette famille exige. Ses
+    limites sont mesurées plutôt que cachées : le segment « paraphrase » chiffre ce qu'il ne sait
+    pas faire quand la question s'éloigne du vocabulaire de la fiche, et le segment
+    « multi-document » plafonne tout système qui ne renvoie qu'un passage.
+  params:
+    abstention_threshold: 0.0
+    calibrate_abstention: true
+    calibration_min_gain: 0.05
+  alternatives:
+    - "tfidf_cosine : même index, scoring cosinus normalisé — plus simple à expliquer, plus sensible à la longueur des passages."
+    - "Variante `with-langchain` : la même recherche servie par une chaîne LCEL (prompt de configuration, adaptateur LLM interchangeable, citations conservées) — la comparaison des deux stacks chiffre l'apport de l'orchestration, pas celui du scoring."
+    - "Embeddings hachés + SVD : la représentation dense déterministe du dépôt, seule à rapprocher deux formulations sans mot commun."
+    - "Recherche hybride : la pratique industrielle, à n'envisager qu'après avoir mesuré où le lexical échoue."
+
+extras:
+  model_conf:
+    llm:
+      provider: extractive
+      max_sentences: 2
+      min_overlap: 2
+      support_ratio: 0.8
+  root_conf:
+    retrieval:
+      answer_k: 5
+      abstention_threshold: 0.0
+      rerank: false

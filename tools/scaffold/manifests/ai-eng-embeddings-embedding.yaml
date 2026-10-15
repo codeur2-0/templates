@@ -1,0 +1,98 @@
+# ==============================================================================================
+# ai-eng / embeddings / with-embedding
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/embedding_pipeline.yaml` (catalogue publié trois fois).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet, forme de l'index
+# dense et point de fonctionnement. Le corpus, les questions annotées et les métriques sont ceux de
+# la famille — c'est ce qui rend la comparaison avec la variante `with-tfidf` honnête.
+# ==============================================================================================
+
+key: ai-eng-embeddings-embedding
+title: "Index vectoriel dense d'un catalogue dupliqué (hachage + SVD) — recherche et dédoublonnage"
+summary: >-
+  Construction et exploitation d'un index d'embeddings sur un catalogue produit publié trois fois
+  (notice constructeur, fiche commerciale, note SAV) : hachage de n-grammes (uni+bigrammes) puis SVD
+  tronquée apprise sur le train, normalisation L2, matrice de vecteurs persistée avec ses
+  métadonnées et sa configuration. Le projet publie ce qu'un index a de particulier — dimension
+  réellement produite, fidélité de la projection, taille de l'artefact, débit de requêtes, taux de
+  succès du cache — et sert deux cas d'usage avec le même artefact : la recherche par question
+  (rappel mesuré par segment, abstention sur les questions hors corpus) et la détection de
+  quasi-doublons (`nearest_neighbours`), qui retrouve les deux autres fiches d'un même fait pour les
+  168 fiches du corpus. Aucun poids pré-entraîné, aucun téléchargement, aucun appel réseau : l'index
+  est appris sur le corpus, à graine fixée.
+
+family: embedding_pipeline
+domain: ai-eng
+problem: embeddings
+stack: embedding
+project_slug: catalogue-embedding-index
+package_name: catalogue_embedding_index
+
+business:
+  measured_results:
+    - label: "recall@5 (test, 41 questions dont 34 répondables)"
+      value: "0,9412"
+    - label: "Précision au premier rang (le premier résultat est l'une des trois fiches du fait)"
+      value: "0,7805"
+    - label: "MRR / nDCG@10"
+      value: "0,9608 / 0,9682"
+    - label: "Exact match de la réponse (1,00 sur les questions factuelles, 0,60 sur les paraphrases)"
+      value: "0,7941"
+    - label: "F1 de la réponse"
+      value: "0,8802"
+    - label: "Précision des citations"
+      value: "0,9375"
+    - label: "Exactitude équilibrée réponse / abstention (couverture 0,94)"
+      value: "0,7563"
+    - label: "Questions hors corpus refusées (7 questions du test)"
+      value: "4"
+    - label: "Fidélité de la projection (128 dimensions, matrice de 0,16 Mo contre 5,25 Mo en 4096)"
+      value: "1,0000"
+    - label: "Construction de l'index / latence p95 d'une requête (cache armé)"
+      value: "0,42 s / 4,64 ms"
+
+model:
+  display_name: "Index vectoriel dense (n-grammes hachés + SVD tronquée), cosinus remappé sur [0, 1]"
+  algorithm: hashing_svd
+  rationale: >-
+    Le hachage de n-grammes projette un texte dans un espace de dimension fixe sans apprendre de
+    vocabulaire — un document jamais vu pendant l'entraînement reste représentable — et la SVD
+    tronquée, apprise sur les passages d'entraînement uniquement, compresse cet espace en 128
+    dimensions denses qui captent la cooccurrence. Les vecteurs sont normalisés en norme L2 : la
+    similarité cosinus devient un produit matriciel (donc un débit mesurable), l'index tient en
+    quelques centaines de kilo-octets et le score remappé dans ``[0, 1]`` rend le seuil d'abstention
+    calibrable — c'est ce qui permet de refuser 4 des 7 questions hors corpus du split de test.
+    Ses propriétés sont mesurées : la fidélité de projection vaut 1,0000 à 128 dimensions (l'ordre
+    des similarités est celui de l'espace de hachage brut, sur les paires testées) pour un index
+    trente-deux fois plus petit, et la fiche de modèle publie le chiffre. Ses limites sont mesurées
+    de la même façon : un hachage de n-grammes reste un index de mots — sur ce corpus, le dense
+    gagne le classement (MRR 0,96 contre 0,91) mais l'index lexical garde la précision des
+    citations (0,97 contre 0,94) et refuse 3 des 7 questions hors corpus : aucun des deux n'est
+    « meilleur » dans l'absolu.
+  params:
+    abstention_threshold: 0.0
+    calibrate_abstention: true
+    calibration_min_gain: 0.05
+    max_cache_entries: 512
+    embedding:
+      n_features: 4096
+      n_components: 128
+      ngram_range: [1, 2]
+  alternatives:
+    - "`hashing_raw` : l'espace de hachage conservé tel quel (4096 dimensions, fidélité 1,0) — même classement, index trente-deux fois plus gros : la référence interne qui chiffre ce que la compression apporte."
+    - "Variante `with-tfidf` : le même corpus indexé dans l'espace vectoriel creux (TF-IDF cosinus, BM25, fusion RRF) — le concurrent à battre, et le témoin du segment paraphrase."
+    - "`nearest_neighbours` : le même artefact sert la détection de quasi-doublons sans code supplémentaire, et retrouve les deux autres fiches d'un même fait en tête du classement."
+    - "Bi-encodeur entraîné (stack `transformers`) : seule approche qui rapproche deux formulations sans mot commun, au prix d'un entraînement et d'un artefact plus lourd."
+
+extras:
+  model_conf:
+    llm:
+      provider: extractive
+      max_sentences: 2
+      min_overlap: 2
+      support_ratio: 0.8
+  root_conf:
+    retrieval:
+      answer_k: 5
+      abstention_threshold: 0.0
+      rerank: false

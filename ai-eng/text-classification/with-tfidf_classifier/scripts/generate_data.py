@@ -1,0 +1,70 @@
+"""Génère le jeu de données synthétique d'exemple dans data/raw.
+
+Wrapper CLI minimal : il compose la configuration Hydra (mêmes overrides que
+`python -m src.main`), force `mode=generate-data` et délègue à `src.main.main_flow`.
+
+Exemples :
+    $ python scripts/generate_data.py
+    $ python scripts/generate_data.py data.n_samples=1000 seed=7
+    $ python scripts/generate_data.py ++train.epochs=5 log_level=DEBUG
+
+Le script reste volontairement très court : toute la logique vit dans `src/`, ce qui la rend
+testable (pytest) et réutilisable (notebooks, API, orchestrateur).
+"""
+
+from __future__ import annotations
+
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+
+#: Racine du projet (le dossier qui contient `src/` et `conf/`).
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from hydra import compose, initialize_config_dir  # noqa: E402
+
+from src.main import main_flow  # noqa: E402
+from src.utils.logging import get_logger  # noqa: E402
+
+logger = get_logger(__name__)
+
+#: Mode forcé par ce script.
+MODE = "generate-data"
+
+
+def run(overrides: Sequence[str] | None = None) -> int:
+    """Compose the configuration and run the pipeline.
+
+    Args:
+        overrides: Hydra overrides provided on the command line.
+
+    Returns:
+        Process exit code (`0` on success, `1` when a pipeline failed).
+    """
+    command_overrides = list(overrides or [])
+    config_dir = str((PROJECT_ROOT / "conf").resolve())
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="config", overrides=[f"mode={MODE}", *command_overrides])
+
+    logger.info("scripts/generate_data.py | overrides={}", command_overrides or "none")
+    results = main_flow(cfg)
+    failed = [mode for mode, result in results.items() if not result.succeeded]
+    if failed:
+        logger.error("Échec du/des mode(s) : {}", failed)
+        return 1
+    return 0
+
+
+def main() -> int:
+    """CLI entry point.
+
+    Returns:
+        Process exit code.
+    """
+    return run(sys.argv[1:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

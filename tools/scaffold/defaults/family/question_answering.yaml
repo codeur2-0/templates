@@ -1,0 +1,232 @@
+# =================================================================================================
+# Famille « question_answering » — support client appuyé sur les fiches produit (QA extractive).
+# -------------------------------------------------------------------------------------------------
+# Même modalité, même tâche (`retrieval`) et même évaluation que la famille RAG : ce qui change est
+# le **contrat de réponse**. Ici la réponse attendue est la phrase exacte de la fiche, donc
+# `answer_exact_match` est atteignable et devient une métrique de pilotage ; la question porte le nom
+# du produit, qui est le seul discriminant possible entre vingt fiches concurrentes.
+# =================================================================================================
+
+domain: ai-eng
+problem: question-answering
+modality: text
+family: question_answering
+
+business:
+  persona: >-
+    Support client de niveau 1 d'un e-commerçant de 300 personnes, avec un responsable qualité qui
+    répond aux litiges et un ingénieur IA chargé d'outiller l'équipe.
+  context: >-
+    Le service client répond chaque jour à des questions factuelles — durée de garantie, délai de
+    retour, coût des frais, prise en charge SAV — dont la réponse existe déjà, écrite noir sur
+    blanc, dans les fiches produit internes. Les conseillers répondent de mémoire : une durée de
+    garantie annoncée de 24 mois au lieu de 36 coûte un litige, et chaque réponse approximative
+    nourrit un contentieux.
+  problem: >-
+    Répondre à une question client par la **phrase exacte** de la fiche produit qui fait foi, en
+    citant la fiche, et refuser explicitement de répondre quand aucune fiche ne contient la
+    réponse — plutôt que de produire une phrase plausible.
+  inputs: >-
+    Question d'un client (ou d'un conseiller) en langage naturel, et un corpus de fiches produit
+    versionnées : titre, section, espace wiki d'origine, date de publication, texte.
+  outputs: >-
+    La phrase de la fiche qui répond à la question (copiée, pas reformulée), l'identifiant de la
+    fiche citée, le score de confiance du meilleur passage et une décision explicite de réponse ou
+    d'abstention.
+  value: >-
+    Zéro réponse inventée sur les sujets contractuels (garantie, retour, frais), temps de réponse
+    divisé par deux au niveau 1, et une réponse auditable : chaque phrase produite est retrouvable
+    dans une fiche datée, ce qui rend un litige arbitrable.
+  success_criteria:
+    - "Exact match ≥ 0,55 sur les questions extractives du split de test : la phrase doit être la bonne, pas seulement proche (baseline mesurée : 0,62)."
+    - "F1 de réponse ≥ 0,70 : une phrase tronquée ou complétée coûte des points (baseline mesurée : 0,74)."
+    - "recall@1 ≥ 0,75 et recall@5 ≥ 0,95 : la phrase citée doit venir du meilleur passage, pas seulement d'un passage retrouvé (baseline mesurée : 0,83 et 1,00)."
+    - "Précision des citations ≥ 0,85 : une réponse n'annexe pas la phrase d'une fiche deux fois moins bien classée (baseline mesurée : 0,98)."
+    - "Taux de réponse sur les questions hors corpus ≤ 0,20 : une fiche citée à tort est pire qu'un refus (baseline mesurée : 0,17)."
+    - "Exactitude équilibrée de la décision réponse/abstention ≥ 0,75 : refuser une question répondable coûte aussi cher que répondre à côté (baseline mesurée : 0,81)."
+    - "Couverture des questions répondables ≥ 0,75 : un refus coûte une réponse que le corpus contenait (baseline mesurée : 0,79)."
+    - "Latence p95 < 250 ms sur CPU, sans appel réseau, pour un corpus de quelques centaines de fiches (baseline mesurée : 5,1 ms)."
+    - "Reproductibilité : deux exécutions à graine fixée produisent exactement les mêmes métriques."
+  cadence: "Index reconstruit à chaque publication de fiche produit ; réponse en ligne pour le support."
+  constraints:
+    - "Aucune clé API et aucun téléchargement : l'assistant tourne hors ligne par défaut."
+    - "Le corpus est synthétique : aucune donnée client, aucune donnée personnelle."
+    - "Toute réponse doit citer une fiche identifiable dans le corpus."
+
+data:
+  dataset_name: product_support_faq
+  title: "Fiches produit et questions du support client (garantie, retour, SAV)"
+  description: >-
+    Un corpus synthétique de 120 fiches produit — vingt produits x six articles (garantie, retour,
+    frais de retour, prise en charge SAV, compatibilité, mise à jour) — et les questions du support
+    qui s'y rapportent. Chaque fiche contient une **phrase canonique** qui porte la valeur (une
+    durée, un montant, une compatibilité) et les questions sont écrites à partir d'elle : la
+    réponse de référence est donc la phrase du corpus, mot pour mot, et l'exact match mesure la
+    sélection de la bonne phrase plutôt que l'élégance d'une reformulation. Les questions couvrent
+    quatre difficultés — factuelle, paraphrase, multi-document, hors corpus — et la difficulté
+    d'une paraphrase tient à la question, jamais à la réponse.
+  n_samples: 120
+  seed: 42
+  formats: [parquet, csv]
+  id_column: doc_id
+  time_column: published_at
+  columns:
+    - name: doc_id
+      dtype: str
+      role: identifier
+      description: "Identifiant stable de la fiche (clé de jointure, jamais une feature)."
+      unique: true
+      checks: { regex: "^DOC-[0-9]{4}$" }
+      generator: { kind: sequence }
+    - name: title
+      dtype: str
+      role: metadata
+      description: "Titre de la fiche : le type d'article et le produit concerné."
+      checks: { min_length: 6, max_length: 160 }
+      distribution: "un titre par fiche, construit sur le type d'article et le code produit"
+      generator: { kind: template }
+    - name: section
+      dtype: category
+      role: feature
+      description: "Section éditoriale : definition, politique, calcul, procedure, contact."
+      checks: { isin: [politique, procedure, definition, contact, calcul, conformite] }
+      generator: { kind: choice }
+    - name: source
+      dtype: category
+      role: feature
+      description: "Espace wiki d'origine : wiki_juridique, wiki_support, wiki_finance, wiki_it."
+      checks: { isin: [wiki_rh, wiki_it, wiki_finance, wiki_juridique, wiki_ops, wiki_support] }
+      generator: { kind: choice }
+    - name: published_at
+      dtype: datetime
+      role: timestamp
+      description: "Date de publication de la fiche (sert à calculer son ancienneté)."
+      generator: { kind: date }
+    - name: n_tokens
+      dtype: int
+      role: metadata
+      description: "Nombre de tokens du texte, calculé avec le tokenizer du projet."
+      checks: { ge: 40, le: 1200 }
+      generator: { kind: derived }
+    - name: text
+      dtype: str
+      role: feature
+      description: "Texte intégral de la fiche : c'est lui qui contient la phrase canonique."
+      checks: { min_length: 200 }
+      generator: { kind: template }
+  insights:
+    - "Chaque fiche contient une phrase canonique et trois à quatre phrases de contexte : le modèle extractif doit choisir la bonne, et l'exact match le dit sans ambiguïté."
+    - "Six types d'articles se répètent sur vingt produits : le nom du produit est le seul discriminant lexical entre des fiches qui se ressemblent presque mot pour mot."
+    - "Les paraphrases conservent le nom du produit : sans lui la question serait ambiguë (plusieurs fiches y répondent) et la mesurer ne dirait rien."
+    - "Les questions multi-document demandent deux valeurs à la fois (garantie et délai d'intervention) : la réponse de référence concatène deux phrases, et tout système qui s'arrête au premier passage est plafonné."
+    - "Les questions hors corpus portent sur des faits voisins mais absents (extension de garantie, SAV le dimanche) : seule l'abstention y est correcte."
+  recommendations:
+    - "Comparer systématiquement au tirage aléatoire et à l'ordre du corpus avant d'interpréter un recall@5."
+    - "Mesurer l'exact match et le F1 séparément : un système qui ajoute une phrase de contexte juste est puni par l'exact match et pas par le F1."
+    - "Ne jamais régler le seuil d'abstention sur le split de test : le split de calibration existe pour cela."
+    - "Regarder les segments : une moyenne globale cache l'effondrement sur les paraphrases et le plafond structurel du multi-document."
+  notes:
+    - "Le corpus est synthétique, mais sa structure imite un vrai référentiel produit : articles répétés, valeurs par produit, phrases canoniques citables."
+    - "Le plafond annoté (part des questions répondables) est publié dans les métadonnées de génération : il évite de poursuivre un rappel de 1,0 inatteignable."
+
+model:
+  display_name: "Retriever lexical BM25 + réponse extractive copiée de la fiche"
+  algorithm: bm25
+  rationale: >-
+    Une question du support nomme le produit et le type d'article — « la garantie du casque Aria » :
+    ce sont exactement les termes qui figurent dans la phrase canonique de la fiche. BM25 exploite
+    cette signature lexicale sans entraînement, rend une fiche unique et s'explique terme par terme,
+    ce qui suffit à répondre par la phrase exacte. Ses limites sont mesurées plutôt que supposées :
+    les questions multi-document exigent deux fiches (tout système qui n'en renvoie qu'une est
+    plafonné) et les paraphrases qui s'éloignent du vocabulaire de la fiche décrochent.
+  params:
+    abstention_threshold: 0.0
+  alternatives:
+    - "tfidf_cosine : l'autre scoring lexical du même index, plus sensible à la longueur des passages ; disponible dans le registre d'algorithmes."
+    - "Variante `with-langchain` : la même recherche servie par une chaîne LCEL (prompt de configuration, adaptateur LLM interchangeable, citations conservées) — la comparaison chiffre l'apport de l'orchestration, pas celui du scoring."
+    - "Embeddings denses : seule approche qui rapproche deux formulations sans mot commun, au prix d'un modèle à entraîner ou à charger."
+    - "Fine-tuning d'un modèle de génération : à n'envisager qu'après avoir mesuré ce que le contrat « phrase exacte » laisse réellement perdre."
+
+metrics:
+  task: retrieval
+  # Métrique principale : recall@1, et non recall@5. Une réponse ne peut être exacte que si le
+  # *meilleur* passage est le bon ; recall@1 est donc la métrique qui parle du contrat de la
+  # famille, là où recall@5 sature par construction sur un corpus de fiches courtes.
+  primary: recall_at_1
+  secondary:
+    - recall_at_3
+    - recall_at_5
+    - mrr
+    - ndcg_at_10
+    - answer_exact_match
+    - answer_f1
+    - citation_precision
+    - citation_recall
+    - abstention_accuracy
+    - abstention_balanced_accuracy
+    - answer_coverage
+  baseline: random
+  # Plancher de non-régression du socle lexical (BM25 + réponse copiée), mesuré sur le split de
+  # test : 0.8258. Le seuil est un garde-fou de régression, pas un objectif : le contrat réel de
+  # cette famille est l'exact match (objectif métier ≥ 0,50, publié dans les critères de succès).
+  min_primary: 0.70
+  direction: maximize
+
+preprocessing:
+  chunking:
+    max_tokens: 110
+    overlap_tokens: 30
+
+train:
+  split:
+    test_size: 0.35
+    val_size: 0.2
+    stratify: true
+    shuffle: true
+    time_based: false
+  retrieval_ks: [1, 3, 5, 10]
+  early_stopping:
+    enabled: false
+  cross_validation:
+    enabled: false
+    folds: 3
+    strategy: kfold
+
+extras:
+  data_conf:
+    corpus:
+      reference_date: "2025-01-06"
+      paraphrase_share: 0.35
+      multi_document_share: 0.15
+      hors_corpus_share: 0.08
+      val_size: 0.20
+      test_size: 0.35
+  model_conf:
+    llm:
+      provider: extractive
+      # Deux phrases au plus : une question multi-document demande deux valeurs (une garantie et
+      # un délai d'intervention) et une réponse qui n'en cite qu'une est plafonnée sur ce segment.
+      # Chaque phrase reste copiée du corpus, donc l'exact match garde son sens.
+      max_sentences: 2
+      # Deux mots pleins en commun au minimum : avec un seul, la phrase neutre qui ouvre chaque
+      # fiche se qualifierait sur un mot grammatical (« est », « que ») et s'ajouterait à la
+      # réponse, ce qui ferait chuter l'exact match pour une raison qui n'apprend rien du modèle.
+      min_overlap: 2
+  root_conf:
+    retrieval:
+      answer_k: 5
+      abstention_threshold: 0.0
+
+# --------------------------------------------------------------------------------------------
+# Ce que le projet enseigne. La famille est la variante « contrat de réponse » du RAG : les mêmes
+# briques, mais la qualité se juge sur la phrase produite et sur le refus de répondre.
+# --------------------------------------------------------------------------------------------
+learning_objectives:
+  - "Écrire un générateur de corpus dont la réponse de référence est une phrase du corpus, afin que l'exact match mesure la sélection de la bonne phrase."
+  - "Séparer le vocabulaire des fiches (garantie, délai, montant, panne, compatibilité) pour que la question ait une seule bonne fiche."
+  - "Distinguer une question difficile d'une question ambiguë : la paraphrase s'éloigne du texte, elle ne retire pas l'entité qui identifie la réponse."
+  - "Composer une réponse multi-document (deux phrases, deux fiches) et mesurer le plafond que cela crée."
+  - "Traiter l'abstention comme une décision mesurée : une réponse refusée coûte, une réponse inventée coûte davantage."
+  - "Comparer exact match et F1 de réponse : le premier exige la formulation exacte, le second pardonne la reformulation."
+  - "Lire une matrice de confusion d'abstention par segment plutôt qu'une exactitude globale."
+  - "Industrialiser : index persisté, artefact rechargé à l'identique, seuil calibré hors du split de test."

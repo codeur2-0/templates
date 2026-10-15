@@ -16,8 +16,20 @@ if TYPE_CHECKING:  # pragma: no cover
     from tools.scaffold.config import ProjectSpec
     from tools.scaffold.registry import FamilySpec, StackSpec
 
-#: Mapping ``family.notebook_builder`` -> module de construction.
-BUILDERS = ("tabular", "text", "image", "platform")
+#: Modules de construction connus, indexés par ``family.notebook_builder``.
+#: ``tabular`` sert de repli : une famille sans builder dédié garde un squelette exécutable.
+BUILDERS = (
+    "tabular",
+    "text",
+    "text_classification",
+    "nel",
+    "summarization",
+    "image",
+    "platform",
+)
+
+#: Familles dont le builder existe réellement (les autres retombent sur ``tabular``).
+IMPLEMENTED = ("tabular", "text", "text_classification", "nel", "summarization")
 
 
 def build_notebooks(
@@ -38,17 +50,24 @@ def build_notebooks(
         The list of written notebook paths.
     """
     from tools.scaffold.notebooks import (
-        tabular,  # local import: évite une dépendance à nbformat au chargement
+        nel,
+        summarization,
+        tabular,
+        text,
+        text_classification,
     )
 
     destination.mkdir(parents=True, exist_ok=True)
     context = build_context(spec, family, stack)
 
-    builder_name = family.notebook_builder if family.notebook_builder in BUILDERS else "tabular"
-    if builder_name != "tabular":
-        # Les autres modalités réutilisent le même squelette, adapté par la suite.
-        builder_name = "tabular"
-    builder = tabular.build_all
+    requested = family.notebook_builder if family.notebook_builder in IMPLEMENTED else "tabular"
+    builder = {
+        "tabular": tabular.build_all,
+        "text": text.build_all,
+        "text_classification": text_classification.build_all,
+        "nel": nel.build_all,
+        "summarization": summarization.build_all,
+    }[requested]
     return builder(context, destination)
 
 

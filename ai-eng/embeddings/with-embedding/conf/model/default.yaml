@@ -1,0 +1,52 @@
+# =================================================================================================
+# Modèle : Index vectoriel dense (n-grammes hachés + SVD tronquée), cosinus remappé sur [0, 1]
+# -------------------------------------------------------------------------------------------------
+# Le hachage de n-grammes projette un texte dans un espace de dimension fixe sans apprendre de
+# vocabulaire — un document jamais vu pendant l'entraînement reste représentable — et la SVD
+# tronquée, apprise sur les passages d'entraînement uniquement, compresse cet espace en 128
+# dimensions denses qui captent la cooccurrence. Les vecteurs sont normalisés en norme L2 : la
+# similarité cosinus devient un produit matriciel (donc un débit mesurable), l'index tient en
+# quelques centaines de kilo-octets et le score remappé dans ``[0, 1]`` rend le seuil d'abstention
+# calibrable — c'est ce qui permet de refuser 4 des 7 questions hors corpus du split de test. Ses
+# propriétés sont mesurées : la fidélité de projection vaut 1,0000 à 128 dimensions (l'ordre des
+# similarités est celui de l'espace de hachage brut, sur les paires testées) pour un index trente-
+# deux fois plus petit, et la fiche de modèle publie le chiffre. Ses limites sont mesurées de la
+# même façon : un hachage de n-grammes reste un index de mots — sur ce corpus, le dense gagne le
+# classement (MRR 0,96 contre 0,91) mais l'index lexical garde la précision des citations (0,97
+# contre 0,94) et refuse 3 des 7 questions hors corpus : aucun des deux n'est « meilleur » dans
+# l'absolu.
+#
+# Alternatives considérées : `hashing_raw` : l'espace de hachage conservé tel quel (4096 dimensions, fidélité 1,0) — même classement, index trente-deux fois plus gros : la référence interne qui chiffre ce que la compression apporte., Variante `with-tfidf` : le même corpus indexé dans l'espace vectoriel creux (TF-IDF cosinus, BM25, fusion RRF) — le concurrent à battre, et le témoin du segment paraphrase., `nearest_neighbours` : le même artefact sert la détection de quasi-doublons sans code supplémentaire, et retrouve les deux autres fiches d'un même fait en tête du classement., Bi-encodeur entraîné (stack `transformers`) : seule approche qui rapproche deux formulations sans mot commun, au prix d'un entraînement et d'un artefact plus lourd..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.abstention_threshold=...
+# =================================================================================================
+
+name: "Index vectoriel dense (n-grammes hachés + SVD tronquée), cosinus remappé sur [0, 1]"
+algorithm: hashing_svd
+class: EmbeddingModel
+task: retrieval
+supports_proba: false
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `EmbeddingModel(params=...)` (voir src/models/model.py).
+params:
+  abstention_threshold: 0.0
+  calibrate_abstention: true
+  calibration_min_gain: 0.05
+  max_cache_entries: 512
+  embedding:
+    n_features: 4096
+    n_components: 128
+    ngram_range:
+    - 1
+    - 2
+
+# --- options spécifiques à la stack `embedding` ---------------------------------------
+llm:
+  provider: extractive
+  max_sentences: 2
+  min_overlap: 2
+  support_ratio: 0.8

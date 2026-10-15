@@ -1,0 +1,68 @@
+# =================================================================================================
+# Modèle : Chaîne LCEL + retriever lexical BM25 (réponse copiée de la fiche)
+# -------------------------------------------------------------------------------------------------
+# Le retrieval reste BM25 — rapide, explicable, sans entraînement — mais la réponse traverse
+# désormais un graphe LCEL : le contexte est assemblé à partir des fiches retrouvées, un prompt de
+# configuration impose la copie de la phrase exacte, l'adaptateur LLM reste interchangeable et les
+# citations traversent toute la chaîne sans être perdues. C'est ce que cette variante apporte à la
+# famille : le contrat « phrase exacte » devient une consigne vérifiable plutôt qu'une propriété
+# implicite du générateur, et la précision des citations devient une métrique suivie.
+#
+# Alternatives considérées : `langchain_dense` : embeddings n-grammes hachés compressés par une SVD tronquée apprise sur le train — seul bras qui rapproche deux formulations sans mot commun., `langchain_hybrid` : fusion par rangs réciproques du lexical et du dense, la pratique industrielle quand aucune des deux familles ne suffit seule., Variante `with-tfidf` : la même indexation BM25 sans orchestration — témoin pour chiffrer l'apport de la chaîne., Adaptateur distant : remplacer `llm.provider: extractive` par un client OpenAI-compatible pour envoyer le même prompt à un vrai modèle, sans changer une ligne de la chaîne..
+#
+# Surcharge en ligne de commande :
+#   python -m src.main mode=train model.params.abstention_threshold=...
+# =================================================================================================
+
+name: "Chaîne LCEL + retriever lexical BM25 (réponse copiée de la fiche)"
+algorithm: langchain_lexical
+class: LangChainModel
+task: retrieval
+supports_proba: false
+epochs_based: false
+random_state: ${seed}
+
+# Hyperparamètres du modèle : ils sont transmis tels quels au constructeur
+# `LangChainModel(params=...)` (voir src/models/model.py).
+params:
+  abstention_threshold: 0.0
+  calibrate_abstention: true
+  calibration_min_gain: 0.05
+  lexical:
+    k1: 1.5
+    b: 0.75
+    ngram_range:
+    - 1
+    - 1
+    min_df: 1
+  embedding:
+    n_features: 4096
+    n_components: 192
+  rrf_constant: 60
+
+# --- options spécifiques à la stack `langchain` ---------------------------------------
+llm:
+  provider: extractive
+  max_sentences: 2
+  min_overlap: 2
+  support_ratio: 0.8
+prompt:
+  max_context_chars: 2400
+  template: 'Tu réponds à une question du support client à partir des fiches produit
+    fournies.
+
+    Copie la phrase exacte de la fiche qui répond, sans la reformuler ni la compléter.
+
+    Si aucune fiche ne contient la réponse, réponds exactement ''ABSTENTION''.
+
+    Termine ta réponse par ''SOURCES: '' suivi des identifiants des fiches utilisées.
+
+
+    Fiches produit:
+
+    {context}
+
+
+    Question: {question}
+
+    Réponse:'

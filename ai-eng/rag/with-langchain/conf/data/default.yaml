@@ -1,0 +1,53 @@
+# =================================================================================================
+# Données : Base de connaissances interne (procédures d'entreprise)
+# -------------------------------------------------------------------------------------------------
+# Un corpus documentaire synthétique de 128 documents (huit thèmes d'entreprise x huit périmètres
+# de population x deux éditions), construit à partir de faits plantés : chaque fait génère un
+# document qui le contient et une question qui l'interroge. Les questions couvrent quatre
+# difficultés — facile, paraphrase, multi-document, hors corpus — de sorte que le rappel mesure de
+# vraies capacités distinctes : retrouver une formulation identique, retrouver un sens sans les
+# mêmes mots, agréger deux sources, et savoir ne pas répondre.
+#
+# Le jeu de données est **synthétique** et généré par `src/data/generators.py`
+# (commande : `make data` ou `python scripts/generate_data.py`). Il n'y a donc aucun
+# téléchargement ni donnée confidentielle : l'exemple est rejouable hors ligne.
+# =================================================================================================
+
+dataset_name: internal_knowledge_base
+n_samples: 128
+seed: 42
+formats:
+  - parquet
+  - csv
+
+raw_dir: data/raw
+processed_dir: data/processed
+external_dir: data/external
+
+target: null              # apprentissage non supervisé : pas de cible
+id_column: doc_id
+time_column: published_at
+group_column: null
+
+# Colonnes exclues du modèle (identifiants, fuites potentielles, métadonnées).
+drop_columns: ['doc_id', 'title', 'published_at', 'n_tokens']
+
+# Contrats de données Pandera appliqués systématiquement (src/data/schemas.py).
+validation:
+  raw: true               # valider les données brutes juste après chargement
+  processed: true         # valider les données transformées avant entraînement
+  inference: true         # valider toute requête de prédiction
+  strict: true            # refuser toute colonne non déclarée dans le schéma
+  lazy: false             # true = collecter toutes les erreurs avant de lever
+
+sampling:
+  limit: null             # nombre maximal de lignes utilisées (null = tout)
+
+# --- paramètres spécifiques --------------------------------------------------------------------
+corpus:
+  reference_date: '2025-01-06'
+  paraphrase_share: 0.3
+  multi_document_share: 0.15
+  hors_corpus_share: 0.1
+  val_size: 0.2
+  test_size: 0.35

@@ -1,0 +1,271 @@
+# =================================================================================================
+# Famille « summarization » — résumer un compte-rendu d'intervention en quelques phrases fidèles.
+# -------------------------------------------------------------------------------------------------
+# Même corpus que les autres familles de texte, mais un objet différent : la sortie n'est pas une
+# étiquette ni une liste de mentions, c'est un **texte**. Un projet de résumé a donc besoin de deux
+# choses que les autres familles n'ont pas :
+#
+#   * des **résumés de référence** qui réécrivent les faits au lieu de recopier des phrases. Sans
+#     réécriture, un modèle extractif suffirait et le projet n'aurait rien à apprendre ;
+#   * une table de **faits annotés**, qui dit ce qu'un résumé *doit* rapporter. C'est elle qui rend
+#     la fidélité mesurable : le ROUGE seul récompense la formulation, et il monte quand un modèle
+#     recopie une phrase du document au lieu de la résumer.
+#
+# Le corpus est cohérent par construction : chaque document est écrit autour d'un **profil
+# d'équipement** (pompe, convoyeur, automate…), donc l'équipement, son symptôme, sa cause, l'action
+# et la pièce forment un ensemble qui tient debout. Les valeurs de décor (numéros de ticket, de
+# téléphone, de parking, horaires) sont des distracteurs **déclarés** : présents dans les documents,
+# jamais attendus dans un résumé.
+# =================================================================================================
+
+domain: nlp
+problem: summarization
+modality: text
+family: summarization
+
+business:
+  persona: >-
+    Responsable d'un service de maintenance industrielle (60 techniciens), avec un ingénieur données
+    qui outille le retour d'expérience et un responsable qualité qui relit les comptes-rendus avant
+    de les archiver.
+  context: >-
+    Chaque intervention donne lieu à un compte-rendu d'une dizaine de phrases : ce qui a été
+    constaté, pourquoi, ce qui a été fait, avec quelle pièce, en combien de temps et dans quel état
+    le matériel est laissé. Les responsables de site les reçoivent par dizaines chaque semaine et
+    les lisent en diagonale ; la synthèse est faite à la main, quand elle est faite.
+  problem: >-
+    Produire automatiquement le résumé d'un compte-rendu — ses faits saillants, en quelques phrases
+    fidèles — sans jamais inventer une valeur : une durée, une référence de pièce ou un statut
+    absent du document se paie sur le terrain, alors qu'un résumé un peu moins fluide se lit très
+    bien.
+  inputs: >-
+    Un compte-rendu d'intervention en texte libre, avec son type d'intervention, son urgence
+    déclarée, son site et sa date de rédaction. Aucune mise en forme, aucun champ structuré.
+  outputs: >-
+    Un résumé de quelques phrases, sa longueur, sa compression, la part des faits saillants du
+    document qu'il rapporte (globalement et par type de fait) et la liste des valeurs qu'il contient
+    sans qu'elles soient dans le document. Plus la fiche de modèle, le rapport d'évaluation et les
+    figures de lecture.
+  value: >-
+    Un responsable de site lit cinq phrases au lieu de dix, et chaque résumé est *vérifiable* : la
+    couverture dit ce qui a été oublié, les valeurs non supportées disent ce qui a été inventé. Le
+    projet publie aussi ce qu'une baseline extractive obtient sur les mêmes lignes, donc personne ne
+    confond « le modèle résume » avec « le modèle recopie le début du document ».
+  success_criteria:
+    - "ROUGE-1 F1 au-dessus du seuil déclaré sur le split de test, mesuré face à la meilleure des références de chaque document."
+    - "La couverture des faits saillants est publiée à côté du ROUGE : gagner du ROUGE en perdant des faits est un résultat visible, pas un succès."
+    - "Les valeurs non supportées sont comptées et listées : une valeur du résumé absente du document est une hallucination détectable, et elle est publiée telle quelle."
+    - "La baseline extractive et le résumé vide sont mesurés sur les mêmes lignes de test, donc chaque score se lit par différence."
+    - "La ventilation par type d'intervention, par urgence déclarée et par site est publiée : une moyenne qui cache un effondrement sur une catégorie n'est pas un résultat."
+    - "Déterminisme : deux entraînements à graine fixée produisent les mêmes résumés, et la suite de tests le vérifie."
+    - "Aucune dépendance réseau à l'exécution : vocabulaire et poids appris sur le split d'entraînement, aucun modèle pré-entraîné téléchargé."
+  cadence: "Entraînement mensuel sur les comptes-rendus validés ; résumé produit à la clôture de chaque intervention."
+  constraints:
+    - "Aucune donnée personnelle : le corpus est synthétique, les sites et les techniciens sont anonymes."
+    - "Une valeur inventée est plus grave qu'une phrase mal tournée : la fidélité est mesurée, publiée, et prioritaire dans les arbitrages."
+    - "Le résumé tient dans un budget de longueur déclaré : une synthèse qui atteint sa borne signale un décodeur qui ne sait pas conclure."
+
+data:
+  dataset_name: intervention_reports
+  title: "Comptes-rendus d'intervention : documents, résumés de référence et faits annotés"
+  description: >-
+    Un corpus synthétique de 600 comptes-rendus d'intervention (131 tokens en moyenne, 11 phrases),
+    leurs **résumés de référence** (53 tokens, 44 % de la longueur du document) et la table des
+    **faits** annotés : 8,4 faits par document en sept types (équipement, symptôme, cause, action,
+    pièce, durée, statut), dont 6 sont saillants — c'est-à-dire que le résumé de référence doit les
+    rapporter. Chaque document est écrit autour d'un **profil d'équipement** (pompe, convoyeur,
+    automate, variateur…), donc le symptôme, la cause, l'action et la pièce sont cohérents entre eux.
+    Les résumés réécrivent les faits : les valeurs sont reprises à l'identique (« 45 minutes »,
+    « JNT-204 »), les phrases non, et la moitié des résumés utilise un second registre de rédaction.
+    Les distracteurs sont **déclarés** : numéros de ticket, de téléphone, de parking et horaires de
+    présence apparaissent dans les documents et jamais dans les résumés. Le découpage
+    (train / val / calibration / test) est écrit dans le corpus.
+  n_samples: 600
+  seed: 42
+  formats: [parquet, csv]
+  # Il n'y a pas de « cible » au sens tabulaire : la supervision est une **seconde table** (les
+  # résumés de référence, jointe par `doc_id`) et la fidélité est mesurée sur une **troisième** (les
+  # faits annotés). C'est la différence de fond avec la classification de texte, où le libellé tient
+  # sur la ligne du document.
+  target: null
+  id_column: doc_id
+  time_column: published_at
+  columns:
+    - name: doc_id
+      dtype: str
+      role: identifier
+      description: "Identifiant stable du compte-rendu (clé de jointure avec les résumés et les faits)."
+      unique: true
+      checks: { regex: "^CR-[0-9]{4}$" }
+      generator: { kind: sequence }
+    - name: text
+      dtype: str
+      role: feature
+      description: "Compte-rendu complet : contexte, symptôme, cause, actions, pièce, durée et conclusion."
+      checks: { min_length: 300, max_length: 2400 }
+      generator: { kind: template }
+    - name: intervention_type
+      dtype: category
+      role: feature
+      description: "Nature de l'intervention : dépannage, maintenance, installation ou expertise."
+      checks: { isin: [depannage, maintenance, installation, expertise] }
+      distribution: "≈ 25 % par type"
+      generator: { kind: choice }
+    - name: urgency
+      dtype: category
+      role: metadata
+      description: "Urgence déclarée à l'ouverture : un distracteur pour le modèle, un segment d'analyse pour le rapport."
+      checks: { isin: [basse, normale, haute] }
+      distribution: "≈ 20 / 50 / 30 %"
+      generator: { kind: choice }
+    - name: site
+      dtype: category
+      role: metadata
+      description: "Site d'intervention (anonymisé) : six sites, un segment d'analyse."
+      checks: { isin: [SITE-A, SITE-B, SITE-C, SITE-D, SITE-E, SITE-F] }
+      generator: { kind: choice }
+    - name: n_sentences
+      dtype: int
+      role: metadata
+      description: "Nombre de phrases du document (calculé à la génération, jamais prédit)."
+      checks: { ge: 6, le: 40 }
+      generator: { kind: derived }
+    - name: n_tokens
+      dtype: int
+      role: metadata
+      description: "Nombre de tokens du document : c'est le dénominateur de la compression."
+      checks: { ge: 60, le: 600 }
+      generator: { kind: derived }
+    - name: published_at
+      dtype: datetime
+      role: timestamp
+      description: "Date de rédaction du compte-rendu."
+      generator: { kind: date }
+    - name: split
+      dtype: category
+      role: group
+      description: "Découpage du corpus (train / val / calibration / test), écrit dans le corpus au moment de la génération."
+      checks: { isin: [train, val, calibration, test] }
+      distribution: "60 / 20 / 10 / 10 % : le test n'est mesuré qu'une fois"
+      generator: { kind: sequence }
+  annotations:
+    name: facts
+    title: "Table des faits : une ligne par fait annoté, saillant ou non"
+    description: >-
+      La table qui rend la fidélité mesurable, jointe aux documents par `doc_id`. Chaque ligne dit
+      ce qui a été écrit dans le document (type, valeur normalisée, surface exacte, index de la
+      phrase) et si le résumé de référence doit le rapporter. Un résumé qui rapporte une valeur
+      saillante la couvre ; un résumé qui contient une valeur absente du document l'invente, et les
+      deux sont comptés séparément.
+    n_rows_expected: "≈ 8,4 par document (5 000 faits pour 600 documents), dont 6 saillants"
+    columns:
+      - name: doc_id
+        dtype: str
+        role: join_key
+        description: "Document annoté (clé étrangère vers la table des documents)."
+        checks: { regex: "^CR-[0-9]{4}$" }
+      - name: fact_id
+        dtype: str
+        role: identifier
+        description: "Identifiant stable du fait, unique dans le corpus."
+        checks: { regex: "^FT-[0-9]{5}$" }
+      - name: fact_type
+        dtype: category
+        role: target
+        description: "Type du fait : équipement, symptôme, cause, action, pièce, durée ou statut."
+        checks: { isin: [equipement, symptome, cause, action, piece, duree, statut] }
+      - name: sentence_index
+        dtype: int
+        role: offset
+        description: "Index de la phrase du document qui porte le fait (les deux tables restent alignées)."
+        checks: { ge: 0 }
+      - name: value
+        dtype: str
+        role: metadata
+        description: "Valeur normalisée du fait (« JNT-204 », « 45 minutes »), telle qu'elle apparaît dans le résumé attendu."
+        checks: { min_length: 2 }
+      - name: surface
+        dtype: str
+        role: metadata
+        description: "Texte exact écrit dans le document : la couverture est cherchée sur cette surface, jamais sur une valeur reconstruite."
+        checks: { min_length: 2 }
+      - name: salient
+        dtype: bool
+        role: metadata
+        description: "Vrai si le résumé de référence doit rapporter ce fait : c'est la supervision de la fidélité, et les types obligatoires d'un compte-rendu le sont toujours."
+  insights:
+    - "Tous les faits d'un compte-rendu ne méritent pas d'être résumés : le corpus en porte 8,4 en moyenne quand le résumé de référence n'en rapporte que 6 — les autres sont exacts et volontairement écartés."
+    - "Les résumés réécrivent les faits au lieu de recopier des phrases : un modèle extractif plafonne donc, et ce plafond est mesuré (baseline `lead`, publiée sur les mêmes lignes)."
+    - "La moitié des résumés change de registre de rédaction : un modèle qui apprend une seule formulation perd la moitié du corpus, et la ventilation le montre."
+    - "Le décor (tickets, parkings, horaires) n'est jamais résumé : un modèle qui recopie tout le document gagne du ROUGE en précision et en perd en fidélité — les deux chiffres sont publiés ensemble."
+    - "Chaque document est cohérent : l'équipement, son symptôme, sa cause, l'action et la pièce forment un profil unique. Un corpus incohérent produirait des résumés absurdes et n'apprendrait rien."
+    - "La compression de référence (44 %) est un budget publié : un résumé plus long n'est pas un meilleur résumé, il est simplement plus long."
+  recommendations:
+    - "Comparer les stratégies sur le même échantillon de validation avant de servir un modèle : le résumé vide (ROUGE 0,0), la baseline extractive `lead` et l'encodeur-décodeur appris."
+    - "Lire la couverture des faits avant le ROUGE : un résumé fluide qui oublie les durées est un mauvais résumé de maintenance."
+    - "Vérifier les valeurs non supportées avant de diffuser : une durée inventée se remarque sur le terrain, une phrase mal tournée ne se remarque pas."
+    - "Regarder la part des résumés qui atteignent le budget de longueur : au-delà de quelques pour cent, le décodeur s'arrête au lieu de conclure."
+    - "Ne jamais régler un paramètre sur le split de test : le corpus fournit `val` pour le suivi et `calibration` pour arbitrer le budget de décodage."
+  notes:
+    - "Le corpus est déterministe : même graine, mêmes documents, mêmes résumés de référence, mêmes faits, mêmes découpages."
+    - "Les textes sont produits par gabarits paramétrés : aucune donnée personnelle, aucun texte recopié, aucune dépendance réseau."
+    - "Chaque fait est enregistré **pendant** l'écriture du document, avec sa surface et l'index de sa phrase : rien n'est retrouvé après coup par une expression régulière."
+
+model:
+  display_name: "Encodeur-décodeur (transformer minuscule) entraîné sur le corpus"
+  algorithm: transformer_tiny
+  rationale: >-
+    Un encodeur-décodeur est entraîné **sur le corpus** : vocabulaire WordPiece appris sur le split
+    d'entraînement, poids initialisés au hasard, pré-entraînement dénoising (le résumé de référence
+    est bruité, le modèle apprend à le reconstruire) puis affinage supervisé enseignant-forcé. Aucun
+    poids pré-entraîné n'est téléchargé : c'est le seul réglage possible hors ligne, et il est publié
+    dans la fiche de modèle. Le décodage est glouton et déterministe, avec un budget de longueur
+    déclaré. L'architecture est volontairement minuscule afin que le projet entier — données,
+    entraînement, six notebooks et pipeline — tourne sur un ordinateur portable sans accélération
+    matérielle.
+  params:
+    # Seuls les réglages réellement servis sont déclarés ici : le budget d'époques, la taille des lots
+    # et le taux d'apprentissage viennent du nœud `train` (mesurés par la grille du manifeste), la
+    # graine vient de `seed`, et l'architecture est publiée par la fiche de modèle.
+    layers: 2
+    units: 128
+    heads: 4
+    dropout: 0.1
+    max_input_tokens: 160
+    compression: 0.45
+    max_output_tokens: 90
+  alternatives:
+    - "`textrank` : baseline extractive (graphe de phrases, marche aléatoire, sélection MMR) — elle ne réécrit rien, donc son texte est toujours fidèle, et son ROUGE est publié sur les mêmes lignes."
+    - "`lead` : les premières phrases du document dans le budget de longueur — le plancher extractif que tout lecteur a en tête, mesuré avant d'être cru."
+    - "Modèle pré-entraîné téléchargé (`barthez`, `mT5`) : hors périmètre, le projet interdit toute dépendance réseau à l'exécution."
+    - "Modèle abstrait de type GPT : hors périmètre pour la même raison, et 360 documents d'entraînement ne justifient pas un modèle de langue."
+
+train:
+  epochs: 12
+  batch_size: 16
+  learning_rate: 0.002
+  early_stopping:
+    enabled: false
+  callbacks:
+    progress_bar: false
+
+metrics:
+  task: generation
+  primary: rouge1_f
+  secondary:
+    - rouge2_f
+    - rouge_l_f
+    - fact_coverage
+    - fact_precision
+    - unsupported_share
+    - compression_mean
+    - hit_max_length_share
+    - n_words_mean
+    - latency_p50_ms
+    - latency_p95_ms
+  # La référence publiée est la baseline extractive `lead` : le rapport la mesure sur le même split de
+  # test, donc chaque score de modèle se lit comme un gain par rapport à « prendre le début du
+  # document ». Le plancher d'un résumé vide (ROUGE 0,0) est publié avec le corpus.
+  baseline: lead
+  min_primary: 0.45
+  direction: maximize

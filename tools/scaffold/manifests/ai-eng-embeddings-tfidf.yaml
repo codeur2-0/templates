@@ -1,0 +1,90 @@
+# ==============================================================================================
+# ai-eng / embeddings / with-tfidf
+# ------------------------------------------------------------------------------------------------
+# Cas d'usage hérité de `defaults/family/embedding_pipeline.yaml` (catalogue publié trois fois).
+# Ce manifeste ne décrit QUE ce qui change avec la stack : identité du projet, espace vectoriel creux
+# et point de fonctionnement. Le corpus, les questions annotées et les métriques sont ceux de la
+# famille — c'est ce qui rend la comparaison avec la variante `with-embedding` honnête.
+# ==============================================================================================
+
+key: ai-eng-embeddings-tfidf
+title: "Espace vectoriel creux d'un catalogue dupliqué (TF-IDF cosinus) — la référence à battre"
+summary: >-
+  Le même catalogue produit publié trois fois, indexé dans un espace vectoriel creux appris sur le
+  train : vocabulaire et IDF persistés avec l'index, vecteurs normalisés, classement par similarité
+  cosinus, puis réponse copiée du meilleur passage ou abstention explicite. Ce projet est la
+  **référence** de la famille : il chiffre ce qu'un index de mots obtient quand la phrase à
+  retrouver est recopiée mot pour mot dans trois fiches. Le comparer à la variante dense chiffre ce
+  que la compression apporte : sur ce corpus l'index dense classe mieux (MRR 0,96 contre 0,91),
+  retrouve plus souvent la phrase exacte (0,79 contre 0,76) et refuse une question hors corpus de
+  plus, tandis que l'index creux garde la précision des citations (0,97 contre 0,94) et ne coûte
+  que 0,07 s de construction. Les trois scorers de la stack (TF-IDF cosinus, BM25, fusion RRF du
+  lexical et du dense) sont comparés sur le split de validation par le notebook 04.
+
+family: embedding_pipeline
+domain: ai-eng
+problem: embeddings
+stack: tfidf
+project_slug: catalogue-lexical-baseline
+package_name: catalogue_lexical_baseline
+
+business:
+  measured_results:
+    - label: "recall@5 (test, 41 questions dont 34 répondables)"
+      value: "0,9412"
+    - label: "Précision au premier rang (le premier résultat est l'une des trois fiches du fait)"
+      value: "0,7317"
+    - label: "MRR / nDCG@10"
+      value: "0,9118 / 0,9462"
+    - label: "Exact match de la réponse (1,00 sur les questions factuelles, 0,60 sur les paraphrases)"
+      value: "0,7647"
+    - label: "F1 de la réponse"
+      value: "0,8413"
+    - label: "Précision des citations"
+      value: "0,9667"
+    - label: "Exactitude équilibrée réponse / abstention (couverture 0,88)"
+      value: "0,6555"
+    - label: "Questions hors corpus refusées (7 questions du test)"
+      value: "3"
+    - label: "Vocabulaire conservé (termes de l'index creux)"
+      value: "138"
+    - label: "Construction de l'index / latence p95 d'une requête (cache armé)"
+      value: "0,07 s / 7,44 ms"
+
+model:
+  display_name: "Espace vectoriel creux TF-IDF (cosinus normalisé) sur le catalogue dupliqué"
+  algorithm: tfidf_cosine
+  rationale: >-
+    TF-IDF projette chaque fiche dans un espace vectoriel creux dont les dimensions sont les mots du
+    corpus, pondérées par leur rareté ; les vecteurs sont normalisés en norme L2, donc le score est
+    un cosinus borné dans ``[0, 1]`` et le seuil d'abstention reste calibrable sur le split de
+    calibration — c'est la différence mesurée avec BM25, dont le score n'est pas borné et dont la
+    calibration d'un seuil global ne sépare plus les questions hors corpus. Sur ce corpus, la
+    phrase à retrouver est recopiée mot pour mot dans trois fiches, et un index de mots y est chez
+    lui : recall@5 0,94, mrr 0,91. Ses limites sont publiées sans être atténuées : l'index dense
+    classe mieux (MRR 0,96), retrouve plus souvent la phrase exacte (0,79 contre 0,76) et refuse une
+    question hors corpus de plus (4 refus sur 7 contre 3), tandis que l'index creux garde l'avantage
+    sur la précision des citations (0,97 contre 0,94) et sur le coût de construction (0,07 s contre
+    0,42 s).
+  params:
+    abstention_threshold: 0.0
+    calibrate_abstention: true
+    calibration_min_gain: 0.05
+  alternatives:
+    - "`bm25` : un classement au moins aussi bon que le cosinus sur ce corpus, mais un score non borné dont la calibration d'un seuil global ne sépare plus les questions hors corpus (l'exactitude équilibrée tombe à 0,41) : le notebook 04 compare les trois scorers sur le split de validation."
+    - "`hybrid` : fusion par rangs réciproques du lexical et d'un espace dense haché — la pratique industrielle quand aucune des deux familles ne suffit seule."
+    - "Variante `with-embedding` : index dense (n-grammes hachés + SVD tronquée) avec les propriétés d'index publiées (dimension, fidélité, taille, débit, cache) — la comparaison des deux stacks chiffre ce que la sémantique apporte, et ce qu'elle coûte."
+    - "Bi-encodeur entraîné (stack `transformers`) : seule approche qui rapproche deux formulations sans mot commun, au prix d'un entraînement et d'un artefact plus lourd."
+
+extras:
+  model_conf:
+    llm:
+      provider: extractive
+      max_sentences: 2
+      min_overlap: 2
+      support_ratio: 0.8
+  root_conf:
+    retrieval:
+      answer_k: 5
+      abstention_threshold: 0.0
+      rerank: false

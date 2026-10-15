@@ -14,8 +14,12 @@ constantes**.
 
 ## 1. Ce qui est livré aujourd'hui
 
-**29 projets** sur sept familles tabulaires, tous verts dans `tools/verify.py` (lint, formatage,
-typage, tests, six notebooks exécutés, pipeline complet `data → train → evaluate → predict`).
+**39 projets** — 29 sur sept familles tabulaires (sections 1.1 à 1.7) et 10 sur les six familles
+texte `ai-eng/rag` (section 1.8), `ai-eng/question-answering` (section 1.9), `ai-eng/embeddings`
+(section 1.10), `ai-eng/text-classification` (section 1.11), `ai-eng/named-entity-recognition`
+(section 1.12) et `nlp/summarization` (section 1.13) — tous verts dans
+`tools/verify.py` (lint, formatage, typage, tests, six notebooks exécutés, pipeline complet
+`data → train → evaluate → predict`).
 
 ### 1.1 `data-science/classification` — prédiction d'attrition client (churn télécom), six stacks + MLflow
 
@@ -266,9 +270,362 @@ Chaque projet expose aussi : les six notebooks exécutés par la CI locale, les 
 modèle JSON (`model_card.json` : métriques, hyperparamètres, versions des librairies, empreinte
 des données) et un rapport d'évaluation Markdown avec analyse d'erreurs.
 
+### 1.8 `ai-eng/rag` — assistant documentaire interne sourcé, deux stacks
+
+Le premier cas d'usage **texte** du dépôt, et le premier où le modèle ne produit pas un label mais
+une réponse : répondre à une question interne uniquement à partir d'un corpus de procédures, citer
+le passage qui fonde la réponse, et s'abstenir explicitement quand le corpus ne la contient pas.
+128 documents synthétiques (huit thèmes d'entreprise x huit périmètres x deux éditions) découpés en
+passages de 110 tokens (chevauchement 30), 319 questions annotées dont 34 hors corpus, quatre
+difficultés mesurées séparément — facile, paraphrase, multi-document, hors corpus. La pertinence
+d'un passage est jugée par le chevauchement avec l'extrait annoté (seuil 50 % des mots de contenu),
+pas par la seule appartenance au bon document : un bon document n'est pas une bonne réponse.
+
+| Projet | Stack | Retrieval | recall@5 (test) | MRR | Précision des citations | F1 réponse | Abstention (exactitude) | Latence p95 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-tfidf`](ai-eng/rag/with-tfidf) | scikit-learn | BM25 (Okapi) | **0,7194** | 0,7038 | 0,6688 | 0,3210 | 0,8073 | **5,4 ms** |
+| [`with-langchain`](ai-eng/rag/with-langchain) | LangChain (LCEL) | BM25 + chaîne prompt/LLM/ancrage | **0,7194** | 0,7038 | 0,6688 | 0,3210 | 0,8073 | 12,9 ms |
+
+Les deux projets partagent le corpus, les questions, le découpage et l'index BM25 : **les chiffres de
+qualité sont identiques parce que le retrieval est identique** — c'est voulu, et c'est ce qui rend
+la comparaison lisible. Ce que la variante LangChain apporte ne se lit donc pas dans ces colonnes :
+
+- le **prompt** est un objet de configuration (`model.prompt.template`, variables `{context}` et
+  `{question}` vérifiées au montage de la chaîne), plutôt qu'une chaîne de caractères enfouie dans le
+  code ;
+- l'**adaptateur LLM** est une couture : générateur extractif hors ligne par défaut (aucune clé,
+  aucun réseau), client OpenAI-compatible optionnel qui reçoit **le prompt rendu par la chaîne** ;
+- les **citations traversent tout le graphe** : le nœud d'ancrage conserve le texte, les identifiants
+  des passages réellement utilisés, le prompt rendu et les passages, là où un `StrOutputParser`
+  rendrait une chaîne nue ;
+- la chaîne **n'est pas sérialisée** : l'état (passages, vocabulaire, embeddings) part en joblib et
+  le graphe est reconstruit au chargement — un test vérifie que la reconstruction répond à l'identique ;
+- le coût de l'orchestration est mesuré, pas caché : **+6,3 ms de médiane** (p50 4,8 -> 11,1 ms) et
+  **+7,5 ms de p95** (5,4 -> 12,9 ms) par question, sur un index de 128 passages.
+
+La même stack sert **trois stratégies de retrieval** interchangeables par `model.algorithm` :
+`langchain_lexical` (BM25, celle du rapport ci-dessus), `langchain_dense` (n-grammes hachés
+compressés par une SVD tronquée apprise sur le train) et `langchain_hybrid` (fusion par rangs
+réciproques des deux classements). Le notebook 04 les compare sur le **split de validation** et
+publie les intervalles de confiance ; le test qui refait le calcul de la fusion RRF à la main fait
+partie de la suite.
+
+Trois références donnent un sens aux 0,7194 : tirage aléatoire 0,0332, ordre du corpus 0,0357, et
+98 des 109 questions de test ont une réponse dans le corpus — un rappel de 1,0 est hors d'atteinte.
+
+| Segment (test) | Questions | recall@5 | MRR | F1 réponse | Abstention |
+| --- | --- | --- | --- | --- | --- |
+| `facile` | 43 | **0,9186** | 0,9193 | 0,3883 | 0,0930 |
+| `multi_document` (deux sources) | 13 | 0,7692 | 0,7956 | **0,5218** | 0,0000 |
+| `paraphrase` (aucun mot en commun) | 42 | **0,5000** | 0,4549 | 0,1900 | 0,4048 |
+| `hors_corpus` | 11 | n/a | n/a | 0,0000 | **1,0000** |
+
+**Lecture honnête** : le segment « paraphrase » divise le rappel par deux et concentre les échecs —
+c'est la limite structurelle d'un retriever lexical, mesurée plutôt que supposée, et c'est
+exactement ce que la variante dense puis hybride de la même stack est là pour chiffrer. Les
+questions hors corpus sont toutes refusées (0 réponse inventée sur 11) et le seuil d'abstention est
+calibré sur un split dédié, jamais sur le test. Les deux projets rendent un verdict **conforme**
+(`recall_at_5 = 0,7194 >= 0,60`) et exposent le même jeu de métriques par question : recall@k, MRR,
+nDCG@k, précision/rappel des citations, F1 de réponse, exactitude et rappel d'abstention, latences
+p50/p95, plus les planchers triviaux et les segments.
+
+---
+
+### 1.9 `ai-eng/question-answering` — support client sur fiches produit, deux stacks
+
+Deuxième cas d'usage texte, et deuxième contrat de réponse : ici la réponse attendue n'est pas
+« une réponse appuyée sur un passage », c'est **la phrase exacte de la fiche** qui fait foi. Le
+corpus synthétique compte 120 fiches produit (vingt produits x six articles : garantie, retour,
+frais de retour, prise en charge SAV, compatibilité, mise à jour du firmware) et 200 questions
+annotées dont 14 hors corpus. Chaque fiche porte une phrase canonique qui contient la valeur citée
+et chaque question est écrite à partir d'elle : l'exact match mesure donc la sélection de la bonne
+phrase, pas l'élégance d'une reformulation. Le vocabulaire est réparti par article — délai et
+réception pour le retour, montant et frais pour les frais, prise en charge et panne pour le SAV —
+car sans cette séparation une question aurait plusieurs bonnes fiches et la métrique ne dirait plus
+rien du modèle. Les questions mono-document portent le nom du produit (le seul discriminant lexical
+entre vingt fiches qui se ressemblent), les paraphrases gardent ce nom et s'éloignent du vocabulaire
+de la fiche, les questions multi-document demandent deux valeurs à la fois (une garantie *et* un
+délai d'intervention) et les questions hors corpus portent sur un fait voisin mais absent.
+
+| Projet | Stack | Réponse | Exact match (test) | F1 réponse | recall@1 | Précision des citations | Abstention (équilibrée) | Latence p95 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-tfidf`](ai-eng/question-answering/with-tfidf) | scikit-learn | phrase copiée du meilleur passage | **0,6212** | **0,7381** | **0,8258** | **0,9808** | **0,8106** | **5,3 ms** |
+| [`with-langchain`](ai-eng/question-answering/with-langchain) | LangChain (LCEL) | chaîne prompt + retriever + ancrage | **0,6212** | **0,7381** | **0,8258** | **0,9808** | **0,8106** | 11,0 ms |
+
+Les deux projets partagent le corpus, les questions, le découpage et l'index BM25 : les chiffres de
+qualité sont identiques par construction, et le coût de l'orchestration est la seule différence
+mesurable (+5,3 ms en médiane, +5,6 ms en p95). Les deux verdicts sont **conformes**
+(`recall_at_1 = 0,8258 >= 0,70`, la métrique principale de la famille : une réponse ne peut être
+exacte que si le *meilleur* passage est le bon).
+
+Deux garde-fous du générateur de réponse valent d'être nommés, parce qu'ils expliquent l'essentiel
+des chiffres. `min_overlap = 2` interdit de citer une phrase qui ne partage qu'un mot avec la
+question — sans lui, la phrase d'ouverture de chaque fiche (« Cette fiche est publiée par le service
+client… ») suffisait à compléter une réponse exacte. `support_ratio = 0,8` écarte les passages dont
+le score tombe sous 80 % du meilleur : sans lui, une question sur les *frais de retour* recevait la
+phrase du *délai de retour*, deux fois moins bien classée, et perdait son exact match. Les deux
+réglages sont mesurés dans le projet (exact match sur le segment facile 0,60 → 0,81, précision des
+citations 0,89 → 0,98) et publiés dans la fiche de modèle avec le seuil d'abstention calibré
+(41,36, appris sur le split de calibration, jamais sur le test).
+
+| Segment (test) | Questions | Exact match | F1 réponse | recall@1 | Rang moyen du 1er pertinent | Abstention |
+| --- | --- | --- | --- | --- | --- | --- |
+| `facile` (phrase canonique) | 43 | **0,8140** | **0,8140** | **1,0000** | 1,00 | 0,1860 |
+| `paraphrase` (autre formulation) | 12 | 0,5000 | 0,5323 | 0,5000 | 2,17 | 0,4167 |
+| `multi_document` (deux fiches) | 11 | 0,0000 | 0,6664 | 0,5000¹ | 1,00 | 0,0909 |
+| `hors_corpus` | 6 | n/a | 0,0139 | n/a | n/a | **0,8333** |
+
+¹ Deux fiches d'or : le recall@1 est mécaniquement plafonné à 0,5 sur ce segment — le rang moyen du
+premier document pertinent, lui, vaut 1,00.
+
+**Lecture honnête** : sur les questions factuelles, 4 réponses sur 5 sont la phrase exacte de la
+bonne fiche, et les citations ne se trompent jamais (précision 0,98) — la part du contrat que le
+projet sait tenir. Trois limites sont mesurées plutôt que cachées. D'abord, 19 questions sur 72 sont
+refusées, dont 5 des 6 questions hors corpus : le seuil calibré préfère le refus, et la couverture
+(0,79) est publiée à côté de l'abstention. Ensuite, la paraphrase divise le recall@1 par deux
+(1,00 → 0,50) : c'est la limite structurelle du lexical, mesurée ici sur un contrat où elle coûte
+vraiment des points. Enfin, une question multi-document reçoit la phrase du mieux classé des deux
+fiches (F1 0,67, abstention 0,09) : le `support_ratio` qui protège les questions factuelles est
+exactement ce qui empêche d'aller chercher la seconde fiche, et le rapport le dit au lieu de le
+taire. Trois références donnent un sens au 0,8258 : tirage aléatoire 0,0000, ordre du corpus 0,0076,
+et 93 % des questions ont une réponse dans le corpus (plafond annoté publié dans les métadonnées de
+génération).
+
+Comme pour la famille RAG, la variante LangChain ne change pas le retrieval : elle change ce qui est
+**explicite et testable** — le prompt de copie est un objet de configuration, l'adaptateur LLM reste
+une couture (extractif hors ligne par défaut, client OpenAI-compatible optionnel), et les citations
+traversent le graphe jusqu'au rapport. La même stack sert trois stratégies interchangeables
+(`langchain_lexical`, `langchain_dense`, `langchain_hybrid`) que le notebook 04 compare sur le split
+de validation.
+
+### 1.10 `ai-eng/embeddings` — index vectoriel d'un catalogue publié trois fois, deux stacks
+
+Troisième cas d'usage texte, et troisième objet mesuré : ici le sujet n'est pas la réponse mais
+**l'index** — sa dimension, sa fidélité, sa taille, son débit et le service qu'il rend, dédoublonnage
+inclus. Le corpus synthétique compte 168 fiches produites par une recette combinatoire :
+vingt-huit références x deux faits (autonomie, garantie légale) x trois styles éditoriaux (notice
+constructeur, fiche commerciale, note SAV), et 115 questions annotées dont 19 hors corpus. Trois
+équipes publient le même référentiel : les deux phrases du fait — celle qui porte la valeur et celle
+qui la contextualise — sont **recopiées** d'une fiche à l'autre, seules la phrase de style, la
+section, l'espace documentaire d'origine et le titre changent. Les trois fiches sont donc annotées
+pertinentes pour la question, ce qui plafonne le recall@1 au tiers et en fait une lecture de
+précision ; 56 questions factuelles, 28 paraphrases, 12 multi-document (six fiches pertinentes :
+deux faits x trois écritures) et 19 hors corpus couvrent quatre difficultés. Les paraphrases
+partagent deux fois moins de mots pleins avec la phrase source que les questions factuelles
+(34 % contre 71 %) sans jamais retirer la référence qui identifie la réponse.
+
+| Projet | Stack | Index | recall@5 (test) | MRR | Exact match | F1 réponse | Précision des citations | Abstention (équilibrée) | Latence p95 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-embedding`](ai-eng/embeddings/with-embedding) | scikit-learn (hachage + SVD) | dense, 128 dimensions (matrice de 0,16 Mo) | **0,9412** | **0,9608** | **0,7941** | **0,8802** | **0,9375** | **0,7563** | **4,6 ms** |
+| [`with-tfidf`](ai-eng/embeddings/with-tfidf) | scikit-learn (TF-IDF cosinus) | creux, 138 termes | **0,9412** | **0,9118** | **0,7647** | **0,8413** | **0,9667** | **0,6555** | 7,4 ms |
+
+Les deux projets partagent le corpus, les questions, le découpage (110 tokens, 30 de recouvrement),
+la réponse extractive et le seuil d'abstention calibré sur le split de calibration ; seul l'index
+change. Les deux verdicts sont **conformes** (`recall_at_5 = 0,9412 >= 0,90`, la métrique principale
+de la famille) et les deux publient leurs planchers : tirage aléatoire 0,0539, ordre du corpus
+0,0000. L'index dense est un hachage de n-grammes (uni+bigrammes, 4096 dimensions) projeté par une
+SVD tronquée apprise sur le train en 128 dimensions, vecteurs normalisés en norme L2 : la
+similarité cosinus devient un produit matriciel et le score, remappé dans `[0, 1]`, reste
+calibrable. Ce que la famille ajoute au rappel, c'est la **mesure de l'index lui-même** : matrice de
+0,16 Mo contre 5,25 Mo pour l'espace de hachage brut (trente-deux fois plus petit), fidélité de
+projection 1,0000 (l'ordre des similarités est inchangé sur les paires testées), index construit en
+0,42 s en dense et 0,07 s en lexical, latence p95 sous 8 ms dans les deux cas.
+
+**Lecture honnête** : l'index dense gagne le classement (MRR 0,96 contre 0,91) et l'exact match
+(0,79 contre 0,76) ; l'index lexical garde la précision des citations (0,97 contre 0,94), coûte
+sept fois moins cher à construire et refuse 3 des 7 questions hors corpus du test contre 4 — chaque
+projet publie ses refus avec sa couverture (0,94 en dense, 0,88 en lexical), jamais l'un sans
+l'autre. Trois limites sont mesurées plutôt que tues. D'abord, la compression ne crée pas de
+sémantique : un hachage de n-grammes reste un index de mots, et les deux variantes tombent à 0,60
+d'exact match sur les paraphrases contre 1,00 sur les questions factuelles. Ensuite, le recall@1 est
+plafonné par construction (trois fiches pertinentes par fait, six pour le multi-document) : la
+famille le publie en métrique secondaire et lit la précision au premier rang à sa place. Enfin, le
+multi-document reste le point faible du dense (exact match 0,25 pour un F1 de 0,82) : la première
+phrase est trouvée, la seconde est écartée par le garde-fou `support_ratio` qui protège les
+questions factuelles — le rapport le dit au lieu de le taire.
+
+| Segment (test) | Questions | Exact match | F1 réponse | recall@5 | Rang moyen du 1er pertinent | Abstention |
+| --- | --- | --- | --- | --- | --- | --- |
+| `facile` (phrase canonique) | 20 | **1,0000** | **1,0000** | **1,0000** | 1,00 | 0,0000 |
+| `paraphrase` (autre formulation) | 10 | 0,6000 | 0,6645 | 0,8667 | 1,40 | 0,2000 |
+| `multi_document` (deux faits) | 4 | 0,2500 | 0,8205 | 0,8333 | 1,00 | 0,0000 |
+| `hors_corpus` | 7 | n/a | 0,0000 | n/a | n/a | **0,5714** |
+
+Le même artefact sert un second usage, lui aussi mesuré : `nearest_neighbours` retrouve les deux
+autres écritures d'un fait, et la suite de tests l'affirme pour **toutes** les fiches du corpus
+(336 voisins attendus, deux par fiche) — le notebook 04 en fait sa quatrième section. Aucun poids
+pré-entraîné, aucun téléchargement, aucun appel réseau : l'index est appris sur le corpus, à graine
+fixée, et le `n_components` publié est celui que la SVD a réellement produit, pas celui demandé.
+
+### 1.11 `ai-eng/text-classification` — routage de tickets de support, deux stacks
+
+Quatrième cas d'usage texte, et le plus proche d'un besoin de service : **attribuer** un ticket à son
+catégorie. Le corpus synthétique compte 1 200 tickets, six catégories (facturation, livraison,
+produit défectueux, remboursement, compte client et une classe « autre » sans vocabulaire propre,
+12 % du corpus) et trois styles rédactionnels : 50 % des tickets emploient le vocabulaire de leur
+catégorie, 30 % reformulent la même demande sans ce vocabulaire, 20 % ajoutent une politesse et une
+signature partagées par toutes les classes. La priorité déclarée par le client est tirée
+**indépendamment** du libellé : c'est un distracteur déclaré, mesuré par un test de raccourci. Enfin
+chaque pool de formulations est coupé en deux, deux tournures par couple (classe, style) étant
+réservées aux splits d'évaluation : une F1 élevée ne peut pas venir d'un gabarit mémorisé.
+
+| Projet | Stack | Modèle | F1 macro (test) | Exactitude | Kappa | ECE | F1 canonique / paraphrase | Latence p95 | Ajustement |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-tfidf_classifier`](ai-eng/text-classification/with-tfidf_classifier) | scikit-learn (TF-IDF, classification de texte) | régression logistique multinomiale sur TF-IDF | **0,8408** | **0,8531** | **0,8217** | 0,2363 | 0,9262 / 0,7352 | **0,78 ms** | 0,4 s |
+| [`with-transformers`](ai-eng/text-classification/with-transformers) | Hugging Face Transformers (entraîné sur le corpus) | encodeur BERT minuscule (2 couches, 344 582 paramètres) | 0,7942 | 0,7853 | 0,7426 | **0,2099** | 0,7892 / **0,8285** | 2,22 ms | ≈ 150 s |
+
+Les deux projets partagent le corpus, les six classes, le découpage (719 / 243 / 61 / 177 tickets) et
+le seuil contractuel (`macro_f1 >= 0,70`) : l'écart entre les deux colonnes est donc un résultat, pas
+un artefact de protocole. Le classifieur lexical apprend un poids par terme et par classe, expose ses
+poids — chaque décision se relit terme à terme — et reste la meilleure moyenne du dépôt sur ce
+corpus (0,8408). La variante neuronale apprend son vocabulaire WordPiece et ses poids **sur le
+train** : pré-entraînement masqué sans aucun libellé, puis affinage supervisé avec
+`class_weight='balanced'` ; aucun poids pré-entraîné n'est téléchargé, l'artefact est un `model.pt`
+(joblib + JSON, aucun pickle Hugging Face) et l'explication d'une décision est une occlusion (le
+terme affiché est retiré du texte, la baisse de probabilité est publiée).
+
+**Lecture honnête** : la moyenne reste au lexical, mais le partage est instructif. Sur les tickets
+écrits avec le vocabulaire de leur catégorie, le TF-IDF écrase l'encodeur (0,9262 contre 0,7892) ;
+sur les **paraphrases**, l'encodeur gagne de 0,09 (0,8285 contre 0,7352) — un modèle contextuel ne
+dépend plus des mots de la catégorie, et c'est précisément ce que la famille mesure. La même grille
+d'architectures, mesurée sur le split de validation (719 tickets d'entraînement), départage les trois
+modèles neuronaux : encodeur à deux couches **0,8022**, moyenne des vecteurs de termes 0,7455,
+encodeur à quatre couches 0,0559 — cette dernière ne décolle pas, sur aucun des réglages testés
+(zéro à cinq époques de masquage, taux d'apprentissage de 0,005 à 0,03), et le projet le publie au
+lieu de le retirer. Le facteur décisif n'est donc pas la profondeur mais le **régime
+d'entraînement** : un encodeur initialisé au hasard diverge au taux d'apprentissage qui fait
+converger un sac d'embeddings, et les réglages gagnants de la grille sont devenus les défauts de la
+stack. Coût assumé : trois secondes d'ajustement pour le sac d'embeddings (~18 000 paramètres)
+contre environ deux minutes et demie pour l'encodeur servi (344 582 paramètres, mesuré entre 136 s et
+150 s selon la charge de la machine).
+
+### 1.12 `ai-eng/named-entity-recognition` — extraction d'entités dans les messages clients, spaCy
+
+Cinquième cas d'usage texte, et le premier où le modèle ne classe pas un document : il **localise**
+des éléments dans le texte. Cinq types d'entités (produit, référence de commande, montant, date,
+transporteur) doivent être retrouvés avec leurs **bornes exactes** dans 1 200 messages de service
+client synthétiques (4 454 entités, 21 tokens par message en moyenne), écrits dans deux styles
+rédactionnels — 55 % rédigés (« CMD-1234 », « 12 mars 2025 ») et 45 % abrégés (« cmd 1234 », «
+12/03/2025 ») — et arrivés par quatre canaux. Le découpage est 720 / 240 / 60 / 180 messages. Deux
+difficultés sont construites : les surfaces de produits et de transporteurs des splits d'évaluation
+sont **réservées** (12 produits et 4 transporteurs jamais vus à l'entraînement : une liste apprise
+ne peut pas les retrouver), et les distracteurs sont **déclarés** (familles de produits, villes,
+numéros de facture, années seules — présents dans les textes, jamais annotés).
+
+| Projet | Stack | Modèle | F1 entité (test) | Précision / rappel | F1 macro | F1 partielle | Surfaces réservées / vues | Ajustement |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-spacy`](ai-eng/named-entity-recognition/with-spacy) | spaCy (tok2vec + transitions, entraîné sur le corpus) | **hybride** : tagger appris, corroboré par une couche de règles | **0,9340** | 0,9521 / 0,9167 | **0,9239** | 0,9735 | 0,6056 / 1,0000 | ≈ 95-103 s |
+
+Trois références mesurées sur le même split de test (180 messages, 672 entités) donnent un sens aux
+0,9340 : le plancher trivial (n'annoter aucune entité) vaut **0,0**, la couche de règles du projet —
+motifs de référence, de montant et de date plus un index de surfaces appris **sur le train
+uniquement** — atteint **0,8710** (précision 0,9725, rappel 0,7887), et le raccourci de forme («
+telle signature de caractères veut dire tel type », appris sur le train) atteint 1,0 sur les trois
+types à motif, 0,9265 sur `produit` et 0,9351 sur `transporteur` — mais seulement quand les bornes
+lui sont données. Le modèle apporte **+0,0630** de F1 sur la couche de règles, et il **généralise**
+là où l'index s'arrête — c'est la raison pour laquelle le tagger est servi ; la couche de règles,
+elle, reste dans le rendu hybride pour ce qu'elle apporte en plus du score : une **provenance** et
+un taux de corroboration par mention.
+
+**Lecture honnête** : trois chiffres racontent le projet. (1) Le tagger retrouve **100 %** des
+mentions dont la surface a été vue à l'entraînement et **60,6 %** de celles dont la surface était
+réservée — cet écart de 0,3944 est la seule mesure du dépôt qui distingue « apprendre la forme d'un
+nom » de « recopier un vocabulaire », et il est publié dans les deux sens. (2) Le type difficile est
+`transporteur` (F1 0,713 : précision 0,828, rappel 0,626) parce que ses surfaces n'ont pas de
+préfixe reconnaissable — à l'inverse `commande`, `date` et `montant` sont lus au sans-faute par les
+deux couches (F1 1,0). La ventilation le montre au passage : les messages abrégés ne sont pas les
+plus durs (0,943 contre 0,926 pour les rédigés), et le canal le plus difficile est le formulaire
+(0,923) — un résultat publié, pas une intuition. (3) La confiance publiée n'est **pas** une
+probabilité : un tagger à transitions n'en expose aucune, donc chaque mention porte son **taux de
+corroboration** par les règles, dont la précision est mesurée par niveau — 0,973 pour les mentions
+corroborées (545 sur 647), 0,843 pour les autres, écart de 0,1396 sur les mentions correctes.
+Publier une fausse probabilité aurait été plus simple et faux ; le projet publie une mesure, avec
+son mode d'emploi (seuil d'automatisation arbitré sur le split de calibration et relu sur la
+validation, jamais sur le test).
+
+La stack spaCy sert **trois algorithmes** interchangeables par `model.algorithm` : `gazetteer` (la
+couche de règles seule, sans apprentissage de poids), `tagger` (tok2vec + classifieur à transitions,
+`spacy.blank("fr")`, aucun poids pré-entraîné téléchargé) et `hybrid` (servi par défaut). Le projet
+est structurellement le plus riche du dépôt : l'annotation est un **couple de tables** validé par
+Pandera (`surface == text[start:end]`, pas de chevauchement, mention rattachée au split de son
+message), l'entraînement commence par l'**alignement des offsets** sur les tokens (100 % des
+annotations apprennent, 0 ignorée — un corpus décalé produirait un score moyen sans que personne ne
+sache pourquoi), et l'artefact est un **répertoire** (`nlp.to_disk`) rechargé à l'identique, ce que
+la suite de tests vérifie. Coût assumé : environ une minute et demie d'entraînement (30 époques sur
+720 messages) et 3 à 5 s d'évaluation, pour une médiane de 2,5 à 3,1 ms par message en inférence
+(p95 de 3,0 à 4,4 ms selon la charge — la latence est une mesure, pas un score, et le projet ne la
+fige pas) ; les six notebooks tournent sur un corpus réduit (320 messages) et re-dérivent leurs
+propres chiffres.
+
+### 1.13 `nlp/summarization` — résumé de comptes-rendus d'intervention, encodeur-décodeur appris
+
+Sixième famille texte, et la première du répertoire `nlp/` : il ne s'agit plus de **retrouver**
+l'information (RAG, questions-réponses, entités) mais de la **produire**. 600 comptes-rendus
+d'intervention techniques synthétiques (126,8 tokens par document pour 52,5 par résumé de référence,
+sept types de faits annotés : équipement, symptôme, cause, action, pièce, durée, statut — 5 036 faits
+dont 3 573 saillants) doivent être résumés en quelques phrases **fidèles** : un résumé fluide qui
+oublie la durée d'une intervention est un mauvais résumé, et il est compté comme tel. Les résumés de
+référence sont écrits à partir des faits saillants avec **50 % de réécriture** — recopier les
+phrases du document ne suffit donc pas — et le split est 360 / 120 / 60 / 60.
+
+| Projet | Stack | Modèle | ROUGE-1 F1 (test) | ROUGE-2 | ROUGE-L | Couverture des faits | Précision | Compression | Ajustement |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [`with-seq2seq`](nlp/summarization/with-seq2seq) | `seq2seq` (PyTorch, encodeur-décodeur écrit dans le projet) | **encodeur-décodeur transformer** : 2 couches, 128 unités, 4 têtes, vocabulaire WordPiece appris sur le train | **0,6958** | 0,5496 | 0,4616 | **0,6145** | 0,9794 | 0,4304 | 170 s (12 époques) |
+
+Trois références mesurées sur les **mêmes 60 documents de test** donnent son sens au 0,6958 : le
+résumé vide vaut **0,0** (un score défini, pas une absence), la baseline extractive publiée `lead`
+(les premières phrases du document, même budget) atteint **0,4351** avec une couverture de 0,4915, et
+`textrank` (graphe de phrases + diversification MMR) **0,3888** pour 0,3862. Le modèle apporte donc
+**+0,2607** de ROUGE-1 sur la référence publiée, et **+0,1230** de couverture des faits sur la
+meilleure extractive — deux gains qui ne vont pas de soi : un générateur peut améliorer la forme
+sans améliorer la fidélité, et le rapport publie les deux colonnes côte à côte pour que ce cas soit
+visible.
+
+**Lecture honnête.** (1) La fidélité est mesurée, pas espérée : **0,6145** de couverture en moyenne,
+et seulement **8,3 %** des résumés contiennent une valeur absente du document (précision 0,9794 —
+c'est la seule métrique du projet qui compte les inventions). (2) Le type de fait qui résiste est
+`piece` (couverture **0,0000**), suivi de `action` (0,1667) : ce ne sont pas des types marginaux
+(37,2 % des documents portent un fait de type `piece`, 94,5 % un fait de type `action`), mais les
+seuls dont la valeur est un identifiant consommé (`CRR-241`) ou une opération parmi douze — le modèle
+a appris les gabarits fréquents (`cause` 0,9167, `statut` 0,8167) et pas encore la recopie d'un
+identifiant rare. C'est le premier poste à travailler,
+et il est publié tel quel. (3) Le budget de longueur se lit avec le ROUGE : **58,3 %** des résumés
+atteignent leur borne (90 tokens), pour une compression moyenne de 0,4304 — la marge de progression
+est dans le critère d'arrêt du décodeur autant que dans le modèle. Le projet publie aussi la
+**latence** (p50 181,1 ms, p95 223,4 ms par document sur la machine de référence) : une mesure, pas un
+score — elle dépend de la machine, jamais figée, et c'est écrit dans le manifeste.
+
+La stack `seq2seq` sert **trois algorithmes** interchangeables par `model.algorithm` :
+`transformer_tiny` (appris, servi), `textrank` et `lead` (extractifs, publiés comme références).
+Rien n'est téléchargé : le vocabulaire WordPiece est **appris sur le split d'entraînement par le
+projet** (879 pièces, 797 fusions, taux de jetons inconnus 0,0000) et les poids sont initialisés au
+hasard, pré-entraînés par débruitage (2 époques) puis affinés en enseignant-forcé (12 époques,
+loss 0,810) — 1 151 599 paramètres. Le décodage est **glouton** : un résumé doit être reproductible
+ligne à ligne, ce que la suite de tests vérifie en réentraînant deux fois le même modèle, et un test
+dédié vérifie que deux vocabulaires appris sur le même corpus sont identiques (identifiants
+compris) — l'apprenti de la bibliothèque `tokenizers` départageait les fréquences égales par une
+table de hachage interne, donc deux exécutions produisaient deux vocabulaires, et le projet a écrit
+le sien pour rendre le résultat reproductible.
+
+**Ce que la tranche a appris (et corrigé).** Le premier run de référence mesurait 0,3358 de
+couverture : les identifiants du corpus (`P-12`, `CBL-045`) étaient découpés en `[UNK]` par le
+tokenizer, donc le modèle ne pouvait pas recopier une pièce ou un équipement même quand il le
+voulait. Le vocabulaire a été appris sur la ponctuation comme **segments à part entière**
+(`BertPreTokenizer` côté encodage, recollage explicite au décodage) : le même modèle, le même corpus,
+seuls le vocabulaire et le décodage ont changé, et la couverture est passée de 0,3358 à **0,6145**
+(ROUGE-1 de 0,6876 à 0,6958). C'est l'unique chiffre du dépôt qui montre le prix d'un
+pré-traitement : un caractère mal découpé coûte la moitié d'une métrique de fidélité.
+
+Les six notebooks tournent sur un corpus réduit (200 comptes-rendus) et un bac à sable complet
+(`outputs/notebooks/` : le corpus **et** les artefacts du notebook), donc ils ne peuvent pas écraser
+les chiffres publiés par `make train` / `make evaluate` ; ils re-dérivent leurs propres scores et
+publient leurs recommandations chiffrées. Coût assumé : environ deux minutes d'entraînement sur le
+corpus complet.
+
 ---
 
 ## 2. Démarrage rapide (cinq commandes)
+
 
 ```bash
 git clone https://github.com/codeur2-0/templates.git && cd templates/data-science/classification/with-sklearn
@@ -361,6 +718,13 @@ l'implémentation change. C'est ce qui rend la comparaison possible.
 | **TensorFlow** | Niveau le plus bas : modèle **subclassé**, couches maison (`DenseBlock`, `ResidualBlock`), pipeline `tf.data`, `GradientTape` + `tf.function`, pertes sur logits, écrêtage du gradient, pondération d'échantillons | poids `model.weights.h5` + sidecar `model.config.json` |
 | **MLflow** | Stack d'**outillage** qui hérite de scikit-learn (`extends: sklearn` dans `stacks.yaml`) : elle ne surcharge que `src/tracking/tracker.py`. Run par entraînement, test rattaché au même run, modèle rechargeable par `mlflow.pyfunc` | `model.joblib` + modèle MLflow (skops) dans `artifacts/mlruns/` |
 
+Cinq stacks texte complètent la liste, documentées avec leurs projets : **scikit-learn
+(TF-IDF / BM25)**, **LangChain (LCEL)**, l'**index vectoriel dense** (hachage de n-grammes puis SVD
+tronquée, stack `embedding`), **spaCy** (tagger à transitions entraîné sur le corpus, corroboré par
+une couche de règles) et le **encodeur-décodeur `seq2seq`** (transformer écrit dans le projet,
+vocabulaire WordPiece appris et décodage glouton) — même corpus annoté d'un côté, corpus annoté au
+caractère de l'autre, texte résumé de bout en bout du troisième (sections 1.8 à 1.13).
+
 Pièges documentés dans le code (et résolus) que ces stacks partagent :
 
 - **Les schedules Keras se paramètrent en pas d'optimiseur, pas en époques.** Avec
@@ -433,13 +797,17 @@ tools/
 │   ├── engine.py                 # rendu Jinja2 + post-traitement (ruff format / ruff --fix)
 │   ├── context.py                # contexte de rendu (spec, stack, family, helpers comme wrap())
 │   ├── registry/
-│   │   ├── stacks.yaml           # 18 stacks : dépendances, classe, format du fichier modèle, docs
+│   │   ├── stacks.yaml           # 22 stacks : dépendances, classe, format du fichier modèle, docs
 │   │   └── families.yaml         # familles de problèmes : modalité, tâche, builder de notebooks
 │   ├── defaults/
 │   │   ├── global.yaml           # valeurs par défaut de tous les projets (train, preprocessing…)
 │   │   └── family/<famille>.yaml # cas d'usage : données, métriques, seuils de qualité
 │   ├── manifests/*.yaml          # UN manifeste = UN projet livré
-│   ├── notebooks/tabular.py      # générateur des six notebooks (prose française + code)
+│   ├── notebooks/
+│   │   ├── tabular.py            # six notebooks des familles tabulaires
+│   │   ├── text.py               # six notebooks des familles texte (RAG, questions-réponses)
+│   │   ├── nel.py                # six notebooks de l'extraction d'entités nommées
+│   │   └── summarization.py      # six notebooks du résumé (bac à sable et stratégies)
 │   └── templates/
 │       ├── base/                 # partagé par tous : Makefile, conf/, utils, schemas, models/base.py
 │       ├── modality/tabular/     # data, preprocessing, features, training, evaluation, inference…
@@ -461,13 +829,34 @@ python -m tools.verify --all --notebooks-inplace     # … et les 6 notebooks ex
 python -m tools.verify data-science/classification/with-pytorch
 ```
 
-État au dernier passage : **29/29 projets conformes** (ruff check, ruff format, mypy strict,
-4 902 tests au total — 165 par projet, 187 pour les projets multi-classes et 172 pour le projet MLflow qui ajoutent les tests
-de leur couche tâche ou de suivi —, 174 notebooks exécutés, `python -m src.main mode=all` de bout en bout). Chaque projet est rejoué intégralement — lint, typage, tests, exécution des
-six notebooks et pipeline complet — avant d'être considéré comme livré.
+État au dernier passage : **39/39 projets conformes**, dans un même environnement (Python 3.12,
+PyTorch 2.14, TensorFlow 2.21, spaCy 3.8, transformers 5.19, MLflow 3.16) — **5 992 tests** au total :
+165 par projet tabulaire, 187 pour les projets multi-classes, 183 pour le projet MLflow, de 76 à 127
+pour les projets texte.
+
+- Les **10 projets texte** et les **2 projets apportés par l'intégration** (`recommendation/with-pytorch`,
+  `classification/with-mlflow`) ont été rejoués intégralement : ruff check, ruff format, mypy strict,
+  pytest, six notebooks exécutés, `python -m src.main mode=all`.
+- Les **27 autres projets tabulaires**, dont le code généré n'a changé que par un commentaire de
+  `pyproject.toml` et le traceur neutre `src/tracking`, ont été rejoués en lint, typage et tests ;
+  leur dernier passage intégral reste la référence pour les notebooks et le pipeline.
+- **Instabilités observées puis rejouées avec succès** : trois noyaux Jupyter qui n'ont pas démarré
+  sous charge (`nbclient` : `assert self.km is not None`, sans lien avec le code des notebooks), et
+  le test `rag/with-langchain::test_evaluate_reuses_the_threshold_learned_by_train`, en échec une
+  fois sur trois exécutions — un test instable à surveiller.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
 reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capture d'écran.
+
+**Trou connu du crible de lint (mesuré).** Les projets déclarent
+`extend-exclude = ["outputs", "multirun", "artifacts", "data", ".venv"]` : le motif `data` n'est pas
+ancré, il exclut donc aussi `src/data/`. Conséquence : `ruff check .` et `ruff format .` sont muets
+sur les générateurs, les schémas Pandera et les chargeurs — le dossier le plus dense de chaque
+projet. Après `ruff format` + `ruff check --fix` appliqués à ces fichiers, il reste **388 erreurs**
+sur les 35 projets (dont **294 E501**), concentrées dans `src/data/{schemas,generators,loaders}.py`.
+Réparer les gabarits `task/*`/`family/*`/`modality/*` de `src/data/`, puis ancrer les motifs
+(`/data`), doit se faire **en une seule tranche** : ancrer d'abord ferait passer 35 projets au rouge
+d'un coup. Le contrôle des 35 projets porte donc, aujourd'hui, sur tout sauf `src/data/`.
 
 ---
 
@@ -487,30 +876,47 @@ reste léger et leur exécution reste une preuve vérifiable plutôt qu'une capt
 ## 7. Feuille de route
 
 État du générateur : `registry/families.yaml` déclare **29 familles** et `registry/stacks.yaml`
-**18 stacks**. Les couches `base/`, `modality/tabular/`,
-`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking}/`,
-`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation}/`
-et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,mlflow}/` sont écrites et vérifiées : les
-**sept familles tabulaires** sont livrées. Ce qui reste, par ordre de valeur pédagogique :
+**22 stacks**. Les couches `base/`, `modality/{tabular,text}/`,
+`task/{classification,multiclass,regression,clustering,anomaly,forecasting,ranking,retrieval,text_multiclass,named_entity_recognition,summarization}/`,
+`family/{binary_classification,multiclass_classification,regression,clustering,anomaly_detection,time_series_forecasting,recommendation,retrieval_augmented_generation,question_answering,embedding_pipeline,text_classification,named_entity_recognition,summarization}/`
+et `stack/{sklearn,xgboost,lightgbm,pytorch,tensorflow,keras,mlflow,tfidf,tfidf_classifier,langchain,embedding,transformers,spacy,seq2seq}/`
+sont écrites et vérifiées : les **sept familles tabulaires**, la **famille RAG** (section 1.8), la
+**famille questions-réponses** (section 1.9), la **famille d'index d'embeddings** (section 1.10), la
+**famille de classification de texte** (section 1.11), la **famille d'extraction d'entités nommées**
+(section 1.12) et la **famille de résumé** (section 1.13) sont livrées — neuf projets `ai-eng` et un
+projet `nlp`, tous mesurés sur un corpus synthétique et un split de test dédié. Ce qui reste, par
+ordre de valeur pédagogique :
 
 1. **Stacks tabulaires déclarées, pas encore livrées** — `recommendation` en TensorFlow et à deux
-   tours. `clustering` en PyTorch / TensorFlow est
-   **écarté après mesure** : sur les 36 features standardisées du jeu clients, un k-means dans
-   l'espace latent d'un auto-encodeur ne bat le k-means direct sur aucune métrique (silhouette
-   0,12–0,20 contre 0,206, ARI latent 0,22–0,39 contre 0,418) et sa stabilité entre graines
-   (ARI 0,54–0,83, 250 époques comprises) reste sous le critère de 0,90 — le k-means direct est à
-   0,999. Livrer ce projet obligerait à baisser un seuil. Pour les stacks restantes, les couches
-   `task/` et `family/` existent ; il reste un manifeste par stack et, comme pour la prévision et la détection d'anomalies, des
-   notebooks paramétrés par stack (`extras.notebook_<famille>`) : les commentaires chiffrés d'un
-   notebook doivent parler de la stack réellement mesurée.
-2. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
+   tours. `clustering` en PyTorch / TensorFlow est **écarté après mesure** : sur les 36 features
+   standardisées du jeu clients, un k-means dans l'espace latent d'un auto-encodeur ne bat le
+   k-means direct sur aucune métrique (silhouette 0,12–0,20 contre 0,206, ARI latent 0,22–0,39
+   contre 0,418) et sa stabilité entre graines (ARI 0,54–0,83, 250 époques comprises) reste sous le
+   critère de 0,90 — le k-means direct est à 0,999. Livrer ce projet obligerait à baisser un seuil.
+2. **Suite du périmètre ai-eng et nlp** — la modalité texte, les tâches `retrieval`,
+   `text_multiclass`, `named_entity_recognition` et `summarization` et les familles
+   `retrieval_augmented_generation`, `question_answering`, `embedding_pipeline`,
+   `text_classification`, `named_entity_recognition` et `summarization` sont en place (sections 1.8
+   à 1.13) : la suite réutilise ces couches. Restent `ai-eng/` (agents : Deepagents, Strands, CrewAI ;
+   serving FastAPI), `nlp/` (fine-tuning LLM) et les familles `llm_finetuning` et `agent_tools` —
+   cette dernière réutilise `modality/text/` + `task/retrieval/` comme l'a fait
+   `embedding_pipeline`.
+3. **Autres modalités** — `data-eng/` (pandas + PyArrow, DuckDB, Prefect), `mlops/` (MLflow,
    GitHub Actions + tox), `analytics/` (rapports Jinja2, monitoring de drift SciPy),
-   `ai-eng/` (LangChain, Deepagents, Strands, CrewAI, RAG, Transformers, serving FastAPI), `computer-vision/` et `nlp/`
-   (spaCy, Transformers). Chacune demande une nouvelle couche `modality/` (loaders,
-   pré-traitement, pipelines, tests) en plus des couches `family/` et `task/`.
-3. **Stacks déjà déclarées, non implémentées** — `spacy`, `transformers`, `langchain`, `duckdb`,
-   `pandas`, `prefect`, `fastapi`, `scipy`, `pandera` : l'entrée de registre existe,
-   le dossier `templates/stack/<clé>/src/models/` reste à écrire.
+   `computer-vision/`. Chacune demande une nouvelle couche `modality/` (loaders, pré-traitement,
+   pipelines, tests) en plus des couches `family/` et `task/`.
+4. **Stacks déjà déclarées, non implémentées** — `duckdb`, `pandas`, `prefect`,
+   `fastapi`, `jinja2`, `scipy`, `github-actions`, `pandera` : l'entrée de registre existe, le dossier
+   `templates/stack/<clé>/` reste à écrire ; elles serviront `data-eng/`, `mlops/` et le serving
+   (`spacy` est livrée avec la section 1.12).
 
 Chaque ajout suit la même procédure : entrée de registre -> templates de stack ou de famille ->
 manifeste -> `build` -> `verify` -> commit.
+
+**5. Réparer le crible de lint sur `src/data/`** — 388 erreurs mesurées (294 E501, 62 RUF046,
+25 RUF012, 6 F841, le reste en pièces détachées) après `ruff format` + `ruff check --fix`, dans les
+gabarits `src/data/{schemas,generators,loaders}.py` des couches `task/`, `family/` et `modality/`.
+Trois gestes, dans cet ordre : replier la prose des gabarits (`python -m tools.wrapdoc`, livré),
+réparer les longues lignes de code, puis **ancrer** les motifs d'exclusion (`/data`) et rebâtir les
+35 projets. L'ancrage seul transforme un contrôle incomplet en 35 projets rouges ; c'est pourquoi il
+va avec la réparation, pas avant elle.

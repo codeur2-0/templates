@@ -1,0 +1,211 @@
+# =================================================================================================
+# Famille « retrieval_augmented_generation » — assistant documentaire interne (RAG).
+# -------------------------------------------------------------------------------------------------
+# Toutes les stacks de cette famille partagent EXACTEMENT ce cas d'usage, ce corpus synthétique,
+# ces questions annotées et ces métriques : seule l'implémentation du retriever change. C'est ce
+# qui rend la comparaison entre une baseline lexicale (tfidf) et une chaîne LangChain honnête.
+# =================================================================================================
+
+domain: ai-eng
+problem: rag
+modality: text
+family: retrieval_augmented_generation
+
+business:
+  persona: >-
+    Équipe Knowledge / Support d'une scale-up de 400 personnes, avec un ingénieur IA qui
+    industrialise l'assistant et une équipe support qui répond aujourd'hui à la main.
+  context: >-
+    Les procédures internes sont empilées dans six espaces wiki (RH, IT, finance, juridique,
+    opérations, support). Personne ne retrouve une règle : le support répond quarante fois par
+    semaine aux mêmes questions, et chaque réponse donnée de mémoire est une source de risque
+    (une règle inventée coûte plus cher qu'une règle non trouvée).
+  problem: >-
+    Répondre aux questions internes en s'appuyant uniquement sur les documents de référence,
+    citer le passage exact qui fonde la réponse, et s'abstenir explicitement quand le corpus ne
+    contient pas la réponse.
+  inputs: >-
+    Question en langage naturel d'un collaborateur (ou d'un agent support) et un corpus
+    documentaire versionné : titre, section, espace wiki d'origine, date de publication, texte.
+  outputs: >-
+    Un classement des passages les plus pertinents, une réponse courte construite à partir d'eux,
+    les identifiants des passages cités, un score de confiance et une décision explicite de
+    réponse ou d'abstention.
+  value: >-
+    Division par trois du temps de recherche d'une règle interne, réponses traçables (chaque
+    affirmation est rattachée à un document daté) et suppression des réponses « de mémoire »
+    sur les sujets sensibles (congés, conformité, achats).
+  success_criteria:
+    - "recall@5 ≥ 0,75 sur les questions du split de test (le corpus annoté fixe le plafond)."
+    - "MRR ≥ 0,60 : le premier passage pertinent doit arriver tôt dans la liste."
+    - "Précision des citations ≥ 0,80 : une citation sur cinq ne doit pas être hors sujet."
+    - "Taux de réponse sur les questions hors corpus ≤ 0,20 : l'abstention est une fonctionnalité."
+    - "Latence p95 < 250 ms sur CPU, sans appel réseau, pour un index de quelques milliers de passages."
+    - "Reproductibilité : deux exécutions à graine fixée produisent exactement les mêmes métriques."
+  cadence: "Index reconstruit à chaque publication wiki (batch nocturne) ; API synchrone pour le support."
+  constraints:
+    - "Aucune clé API et aucun téléchargement : l'assistant doit tourner hors ligne par défaut."
+    - "Le corpus est synthétique : aucune donnée personnelle, aucune donnée client."
+    - "Toute réponse doit être rattachée à un passage identifiable dans un document daté."
+
+data:
+  dataset_name: internal_knowledge_base
+  title: "Base de connaissances interne (procédures d'entreprise)"
+  description: >-
+    Un corpus documentaire synthétique de 128 documents (huit thèmes d'entreprise x huit
+    périmètres de population x deux éditions), construit à partir de faits plantés :
+    chaque fait génère un document qui le contient et une question qui l'interroge. Les questions
+    couvrent quatre difficultés — facile, paraphrase, multi-document, hors corpus — de sorte que
+    le rappel mesure de vraies capacités distinctes : retrouver une formulation identique,
+    retrouver un sens sans les mêmes mots, agréger deux sources, et savoir ne pas répondre.
+  n_samples: 128
+  seed: 42
+  formats: [parquet, csv]
+  id_column: doc_id
+  time_column: published_at
+  columns:
+    - name: doc_id
+      dtype: str
+      role: identifier
+      description: "Identifiant stable du document (sert de clé de jointure, jamais de feature)."
+      unique: true
+      checks: { regex: "^DOC-[0-9]{4}$" }
+      generator: { kind: sequence }
+    - name: title
+      dtype: str
+      role: metadata
+      description: "Titre éditorial du document, affiché avec les citations."
+      checks: { min_length: 6, max_length: 160 }
+      distribution: "un titre par document, versionné par un suffixe d'édition"
+      generator: { kind: template }
+    - name: section
+      dtype: category
+      role: feature
+      description: "Section éditoriale : politique, procedure, definition, contact, calcul, conformite."
+      checks: { isin: [politique, procedure, definition, contact, calcul, conformite] }
+      generator: { kind: choice }
+    - name: source
+      dtype: category
+      role: feature
+      description: "Espace wiki d'origine : wiki_rh, wiki_it, wiki_finance, wiki_juridique, wiki_ops, wiki_support."
+      checks: { isin: [wiki_rh, wiki_it, wiki_finance, wiki_juridique, wiki_ops, wiki_support] }
+      generator: { kind: choice }
+    - name: published_at
+      dtype: datetime
+      role: timestamp
+      description: "Date de publication du document (sert à calculer l'ancienneté d'une source)."
+      generator: { kind: date }
+    - name: n_tokens
+      dtype: int
+      role: metadata
+      description: "Nombre de tokens du texte, calculé avec le tokenizer du projet."
+      checks: { ge: 40, le: 1200 }
+      generator: { kind: derived }
+    - name: text
+      dtype: str
+      role: feature
+      description: "Texte intégral du document : c'est lui qui est découpé en passages puis indexé."
+      checks: { min_length: 200 }
+      generator: { kind: template }
+  insights:
+    - "Les documents ne contiennent pas la réponse « en clair » : plusieurs formulations voisines coexistent (par exemple plusieurs valeurs de solde de congés selon l'édition), ce qui oblige le classement à départager des passages proches."
+    - "Les questions paraphrases ne partagent presque aucun mot de contenu avec le passage qui répond : un retriever purement lexical y décroche mécaniquement, et c'est mesuré par segment."
+    - "Les questions multi-document exigent deux sources : tout système qui publie le meilleur passage unique est plafonné sur ce segment."
+    - "Les questions hors corpus annotent le document le plus proche sans extrait répondant : elles ne récompensent que l'abstention."
+    - "Le corpus contient volontairement des documents quasi dupliqués (même règle, éditions différentes) : la redondance est un piège classique des wikis d'entreprise."
+  recommendations:
+    - "Comparer systématiquement le modèle à deux références triviales : tirage aléatoire et ordre du corpus."
+    - "Mesurer la qualité par segment (difficulté, intention, hors corpus) : une moyenne globale cache l'effondrement sur les paraphrases."
+    - "Ne jamais régler le seuil d'abstention sur le split de test : le split de calibration existe pour cela."
+    - "Considérer une réponse sans citation comme non fondée, même lorsqu'elle est juste."
+  notes:
+    - "Le corpus est synthétique, mais sa structure imite un vrai wiki : sections, espaces, dates, éditions successives."
+    - "Le plafond annoté (part des questions répondables) est publié dans les métadonnées de génération : il évite de poursuivre un rappel de 1,0 inaccessible."
+
+model:
+  display_name: "Retriever lexical BM25 + réponse extractive sourcée"
+  algorithm: bm25
+  rationale: >-
+    BM25 est la référence de la recherche documentaire depuis trente ans : saturation de la
+    fréquence des termes, normalisation par la longueur du passage, pondération par la rareté.
+    Sur un corpus d'entreprise structuré, dont le vocabulaire métier est stable et répété, il est
+    très difficile à battre — et il a trois propriétés qu'un modèle neuronal n'offre pas
+    gratuitement : il est instantané, il s'explique terme par terme, et il n'a besoin d'aucun
+    entraînement. Ses limites sont assumées et mesurées : il ne résout pas les paraphrases, il
+    ignore la négation, et il ne généralise pas à un vocabulaire absent du corpus.
+  params:
+    abstention_threshold: 0.0
+  alternatives:
+    - "tfidf_cosine : l'autre scoring lexical du même index, plus sensible à la longueur du passage (les longs passages sont pénalisés par la normalisation L2) ; disponible dans le registre d'algorithmes."
+    - "LangChain (variante with-langchain) : orchestration LCEL, prompt de synthèse et adaptateur LLM, avec le même index lexical ou des embeddings hachés — la comparaison des deux stacks chiffre ce qu'apporte l'orchestration."
+    - "Embeddings denses (transformers) : seule famille capable de traiter les paraphrases, au prix d'un modèle à charger et d'une latence supérieure."
+    - "Recherche hybride (lexical + dense) : la pratique industrielle, mais elle ne se justifie qu'après avoir mesuré où le lexical échoue."
+
+metrics:
+  task: retrieval
+  primary: recall_at_5
+  secondary:
+    - mrr
+    - ndcg_at_10
+    - citation_precision
+    - citation_recall
+    - answer_f1
+    - abstention_accuracy
+    - abstention_recall
+    - answer_coverage
+  baseline: random
+  # Plancher de non-régression du socle lexical de référence (BM25 + réponse extractive),
+  # mesuré sur le split de test : 0.6607. Le seuil est un garde-fou de régression, pas un
+  # objectif : la variante dense (transformers) est attendue au-dessus.
+  min_primary: 0.60
+  direction: maximize
+
+preprocessing:
+  chunking:
+    max_tokens: 110
+    overlap_tokens: 30
+
+train:
+  split:
+    test_size: 0.35
+    val_size: 0.2
+    stratify: true
+    shuffle: true
+    time_based: false
+  retrieval_ks: [1, 3, 5, 10]
+  early_stopping:
+    enabled: false
+  cross_validation:
+    enabled: false
+    folds: 3
+    strategy: kfold
+
+extras:
+  data_conf:
+    corpus:
+      reference_date: "2025-01-06"
+      paraphrase_share: 0.30
+      multi_document_share: 0.15
+      hors_corpus_share: 0.10
+      val_size: 0.20
+      test_size: 0.35
+  model_conf:
+    llm:
+      provider: extractive
+      max_sentences: 2
+      min_overlap: 1
+  root_conf:
+    retrieval:
+      answer_k: 5
+      abstention_threshold: 0.0
+
+learning_objectives:
+  - "Découper un corpus en passages : pourquoi le chevauchement existe et comment mesurer son effet sur le rappel."
+  - "Comprendre BM25 (saturation, normalisation de longueur, IDF) en l'implémentant, plutôt qu'en l'appelant."
+  - "Évaluer un système de recherche par question puis moyenne : recall@k, MRR, nDCG@k et ce que chacun ignore."
+  - "Comparer à des références triviales (aléatoire, ordre du corpus) avant de célébrer un score absolu."
+  - "Mesurer la fidélité des citations séparément de la ressemblance avec la réponse de référence."
+  - "Traiter l'abstention comme une fonctionnalité mesurée, pas comme un échec du modèle."
+  - "Diagnostiquer les échecs par segment (paraphrase, multi-document, hors corpus) au lieu d'une moyenne unique."
+  - "Lire une latence en percentiles et distinguer une latence de retrieval d'une latence de génération."
+  - "Industrialiser : index persisté, artefact rechargé à l'identique, configuration Hydra de bout en bout."
