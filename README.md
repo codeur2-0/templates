@@ -865,7 +865,10 @@ pour les projets texte.
   en lint, typage et tests ; leur code généré est inchangé depuis.
 - **Instabilités observées puis rejouées avec succès** : des noyaux Jupyter qui n'ont pas démarré ou
   ont échoué sous charge (`nbclient`), dont un `01_eda` de `with-transformers` passé en 37 s à la
-  relance, et le test `rag/with-langchain::test_evaluate_reuses_the_threshold_learned_by_train`, en
+  relance. Le notebook 04 de `with-transformers` est le plus exposé : sa cellule de comparaison des
+  trois encodeurs prend environ 460 s sur une machine calme et a dépassé la limite de 900 s par
+  cellule quand la machine était chargée (Docker Desktop à 71 % de CPU) ; il passe en environ
+  750 s au calme. Il y a aussi le test `rag/with-langchain::test_evaluate_reuses_the_threshold_learned_by_train`, en
   échec une fois sur trois exécutions — un test instable à surveiller.
 
 Les notebooks sont versionnés **sans outputs** : ils sont rejoués par `tools/verify.py`, le dépôt
